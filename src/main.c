@@ -178,6 +178,11 @@ void ProcessConnection(Connection *c)
 				break;
 			}
 			
+			if (g_log_debug) {
+				LOGD("<- %s (%u) size=%u\n", get_packet_name(s->packet_type), s->packet_type, s->packet_size);
+				log_hexdump("payload", s->buffer + s->parse_pos + 4, s->packet_size - 4 > 256 ? 256 : s->packet_size - 4);
+			}
+			
 			c->sin.offset = 0;
 			c->sin.size = s->packet_size - 4;
 			memcpy(c->sin.data, s->buffer + s->parse_pos + 4, s->packet_size - 4);
@@ -201,9 +206,14 @@ void ProcessConnection(Connection *c)
 					// printf("Login error\n");
 					return;
 				case _MSG_CLIENT_LOGINTOLRESP: 
-					// kind = read_i32(s->buffer + s->parse_pos + 4);
-					
-					LOGE("Bootstrap Login failed session expired: %d\n", 0/*kind*/);
+					if (s->packet_size - 4 >= 4) {
+						LOGE("Bootstrap login rejected by server (code=%d, first byte=%u). Payload size=%u. Run with --debug to see the raw response.\n",
+							read_i32(s->buffer + s->parse_pos + 4),
+							read_u8(s->buffer + s->parse_pos + 4),
+							s->packet_size - 4);
+					} else {
+						LOGE("Bootstrap login rejected by server (payload size=%u). Run with --debug to see the raw response.\n", s->packet_size - 4);
+					}
 					disconnect(c);
 					return;
 				case _MSG_RESP_ACTIVE: 
@@ -607,7 +617,8 @@ void PrintUsage(void)
 		"Lords Mobile Bot\n"
 		"\n"
 		"Usage:\n"
-		"  client <config_file>         Load and start the bot using the specified configuration file.\n"
+		"  client <config_file> [--debug]  Load and start the bot using the specified configuration file.\n"
+		"                               --debug prints every packet received (name + hexdump).\n"
 		"  client --create-config, -c   Create a default configuration file.\n"
 		"  client --help, -h            Display this help message.\n"
 		"  client --version, -v         Display version information.\n"
@@ -662,6 +673,9 @@ bool CreateDefaultConfig(const char *filename)
 		"account.igg_id = 1234567890\n"
 		"account.device_uuid = 12345678-1234-1234-1234-123456789abc\n"
 		"account.access_key = YOUR_ACCESS_KEY_HERE\n\n"
+		
+		"# Print every server packet (name + hexdump). Same as --debug.\n"
+		"log.debug = false\n\n"
 		
 		"# Prefix used to identify bot commands.\n"
 		"command.prefix = $\n\n"
@@ -811,8 +825,10 @@ int main(int argc, const char *argv[]) {
 	}
 #endif
 	
-	if (argc != 2) {
-        printf("Usage: %s <config.cfg>\n", argv[0]);
+	if (argc == 3 && (strcmp(argv[2], "--debug") == 0 || strcmp(argv[2], "-d") == 0)) {
+		g_log_debug = 1;
+	} else if (argc != 2) {
+        printf("Usage: %s <config.cfg> [--debug]\n", argv[0]);
         return EXIT_FAILURE;
     }
 	

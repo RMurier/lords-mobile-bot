@@ -17,6 +17,7 @@
  */
 
 #include "config.h"
+#include "log.h"
 #include <stdlib.h>
 
 #include <ctype.h>
@@ -127,6 +128,12 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 	
 	if (strcmp(key, "server.port") == 0) {
 		c->gateway_server.port = (uint16_t)strtoul(value, NULL, 10);
+		return true;
+	}
+	
+	// logging
+	if (strcmp(key, "log.debug") == 0) {
+		g_log_debug = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
 		return true;
 	}
 	
@@ -347,4 +354,4 @@ bool LoadConfig(Connection *c, const char *filename)
 
     fclose(fp);
     return true;
-}
+}
