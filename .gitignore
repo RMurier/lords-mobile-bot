@@ -1,1 +1,11 @@
 main.txt
+
+
+# Account credentials and captures: never commit these
+accounts/
+*.pcap
+*.pcapng
+captures/
+config.cfg
+data/
+logs/
