@@ -131,9 +131,25 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 	
+	// reconnect
+	if (strcmp(key, "reconnect.enabled") == 0) {
+		c->reconnect.enabled = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
+		return true;
+	}
+	
+	if (strcmp(key, "reconnect.delay") == 0) {
+		c->reconnect.delay = (uint32_t)strtoul(value, NULL, 10);
+		return true;
+	}
+	
+	if (strcmp(key, "reconnect.max_attempts") == 0) {
+		c->reconnect.max_attempts = (uint32_t)strtoul(value, NULL, 10);
+		return true;
+	}
+	
 	// logging
 	if (strcmp(key, "log.debug") == 0) {
-		g_log_debug = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
+		g_log_debug |= (strcmp(value, "true") == 0 || strcmp(value, "1") == 0); // the config can only enable debug, never override --debug
 		return true;
 	}
 	
@@ -323,6 +339,11 @@ bool LoadConfig(Connection *c, const char *filename)
 	char line[512];
 	char key[64], value[512];
 	uint32_t line_num = 0;
+	
+	/* Defaults, overridden by reconnect.* keys */
+	c->reconnect.enabled      = true;
+	c->reconnect.delay        = 60;
+	c->reconnect.max_attempts = 0;
 	
 	while (fgets(line, sizeof(line), fp)) {
 		line_num++;

@@ -448,6 +448,13 @@ typedef struct {
     CommandChannel command_output;
 } BotSettings;
 
+/* Automatic reconnection after a dropped connection. */
+typedef struct {
+    bool enabled;
+    uint32_t delay;        /* seconds to wait before reconnecting */
+    uint32_t max_attempts; /* consecutive failed attempts before giving up, 0 = unlimited */
+} ReconnectSettings;
+
 typedef struct {
 	char player_name[13];
 	ResourceStock resource;
@@ -836,6 +843,8 @@ typedef struct {
 	time_t last_heartbeat;
 	// login state
 	bool lobby_login;
+	// set once the game server accepted the login
+	bool game_logged_in;
 	// game server 
 	ServerInfo game_server;
 	ServerInfo gateway_server;
@@ -876,6 +885,7 @@ typedef struct {
 	BankSettings bank;
 	
 	BotSettings bot;
+	ReconnectSettings reconnect;
 	
 	AllianceInfo RoleAlliance;
 	

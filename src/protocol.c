@@ -2516,7 +2516,7 @@ void RecvLoginError(Connection *c, const uint8_t *data) {
 	} else if (kind == 9) {
 		printf("[ERROR] LOGGING FROM ANOTHER DEVICE errorCode: %u\n", kind);
 	} else {
-		printf("[ERROR] Login failed, server error code: %u (see docs/login-errors.md)\n", kind);
+		printf("[ERROR] Login failed, server error code: %u\n", kind);
 	}
 }
 

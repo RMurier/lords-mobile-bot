@@ -121,6 +121,53 @@ account.access_key = YOUR_ACCESS_KEY
 
 ---
 
+## Getting Account Credentials
+
+`account.igg_id`, `account.device_uuid` and `account.access_key` can be extracted
+from a network capture of **your own** device while the official game logs in
+(PCAPdroid on Android, or Wireshark on the emulator's network interface):
+
+```bash
+./client --create-config
+python3 tools/extract_credentials.py capture.pcap --template config.cfg --out-dir accounts/
+```
+
+One config file is written per IGG ID found in the capture (`accounts/<igg_id>.cfg`),
+with the client version and language taken from the capture as well.
+These files contain live session credentials: never share or commit them
+(`accounts/` and `*.pcap` are in `.gitignore`).
+
+---
+
+## Automatic Reconnection
+
+When the connection drops, or when the account is logged in from another device
+(for example when you play on your phone), the bot waits and reconnects by itself.
+
+```cfg
+reconnect.enabled = true
+reconnect.delay = 60
+reconnect.max_attempts = 0
+```
+
+| Option | Description |
+|---|---|
+| `reconnect.enabled` | Reconnect automatically (`true` by default) |
+| `reconnect.delay` | Seconds to wait before reconnecting (minimum 10, default 60) |
+| `reconnect.max_attempts` | Consecutive failed attempts before giving up, `0` = never give up |
+
+Notes:
+
+- The delay doubles after repeated failures, up to 8 times the configured delay.
+- The configuration file is reloaded on every reconnection, so a refreshed
+  `account.access_key` is picked up without restarting the bot.
+- If the server **rejects the credentials** (invalid or expired access key, client
+  version too old) the bot stops instead of retrying, since retrying cannot succeed.
+- Reconnecting while you are playing on another device logs that device out again.
+  Use a longer `reconnect.delay` if you want time to play.
+
+---
+
 ## Command System
 
 Controls bot command handling.
@@ -330,4 +377,4 @@ The following features are planned or under development:
 - Shelter automation
 - More resource management options
 - Additional bot modules
-- More runtime configuration controls
+- More runtime configuration controls

@@ -116,7 +116,15 @@ void logger(Connection *c) {
 	
 }
 
-void ProcessConnection(Connection *c)
+/* Why ProcessConnection() returned. */
+typedef enum {
+	PS_GATEWAY_OK,     // gateway accepted the login, game server address received
+	PS_DISCONNECTED,   // connection dropped or recv error
+	PS_KICKED,         // account logged in from another device
+	PS_REJECTED        // server rejected the credentials, retrying will not help
+} SessionResult;
+
+static SessionResult ProcessConnection(Connection *c)
 {
 	PacketStream *s = &c->stream;
 	
@@ -194,17 +202,18 @@ void ProcessConnection(Connection *c)
 					LOGI("Gateway Login success!\n");
 					LOGI("Gateway server disconnected\n");
 					disconnect(c);
-					return;
+					return PS_GATEWAY_OK;
 				case _MSG_GAMESERVER_LOGINLOG: 
 					// kind = read_u16(s->buffer + s->parse_pos + 4);
 					LOGI("Game login successful\n");
+					c->game_logged_in = true;
 					// ServerInitOver(c);
 					break;
 				case _MSG_LOGIN_LOGINERRORRESP: 
 					RecvLoginError(c, s->buffer + s->parse_pos + 4);
 					disconnect(c);
-					// printf("Login error\n");
-					return;
+					// kind 9: logged in from another device (can be retried), anything else is fatal
+					return read_u8(s->buffer + s->parse_pos + 4) == 9 ? PS_KICKED : PS_REJECTED;
 				case _MSG_CLIENT_LOGINTOLRESP: 
 					if (s->packet_size - 4 >= 4) {
 						LOGE("Bootstrap login rejected by server (code=%d, first byte=%u). Payload size=%u. Run with --debug to see the raw response.\n",
@@ -215,7 +224,7 @@ void ProcessConnection(Connection *c)
 						LOGE("Bootstrap login rejected by server (payload size=%u). Run with --debug to see the raw response.\n", s->packet_size - 4);
 					}
 					disconnect(c);
-					return;
+					return PS_REJECTED;
 				case _MSG_RESP_ACTIVE: 
 					c->server_time = read_u64(s->buffer + s->parse_pos + 4);
 					break;
@@ -440,6 +449,8 @@ void ProcessConnection(Connection *c)
 			s->parse_pos = 0;
 		}
 	}
+	
+	return PS_DISCONNECTED;
 }
  
 
@@ -676,6 +687,14 @@ bool CreateDefaultConfig(const char *filename)
 		
 		"# Print every server packet (name + hexdump). Same as --debug.\n"
 		"log.debug = false\n\n"
+
+		"# Automatic reconnection when the connection drops or the account is logged in\n"
+		"# from another device (for example after you play on your phone).\n"
+		"# delay: seconds to wait before reconnecting (minimum 10).\n"
+		"# max_attempts: consecutive failed attempts before giving up, 0 = never give up.\n"
+		"reconnect.enabled = true\n"
+		"reconnect.delay = 60\n"
+		"reconnect.max_attempts = 0\n\n"
 		
 		"# Prefix used to identify bot commands.\n"
 		"command.prefix = $\n\n"
@@ -791,6 +810,103 @@ bool CreateDefaultConfig(const char *filename)
     return true;
 }
 
+typedef enum {
+	RUN_FATAL,       // do not retry: bad config, credentials rejected, client too old
+	RUN_UNREACHABLE, // could not connect, or dropped before the game login
+	RUN_DROPPED,     // was logged in to the game, then disconnected
+	RUN_KICKED       // account logged in from another device
+} RunResult;
+
+static void SleepSeconds(uint32_t seconds)
+{
+#ifdef _WIN32
+	Sleep(seconds * 1000);
+#else
+	sleep(seconds);
+#endif
+}
+
+/*
+ * One full connection: gateway login, then game server login, then the main
+ * loop until the connection ends. The configuration is reloaded on every call,
+ * so a refreshed access key in the config file is picked up on reconnect.
+ */
+static RunResult RunSession(Connection *client, const char *config_file)
+{
+	SessionResult r;
+
+	memset(client, 0, sizeof(*client));
+	client->sock = -1;
+
+	if (!LoadConfig(client, config_file)) {
+		LOGE("Failed to load config\n");
+		return RUN_FATAL;
+	}
+
+	LOGI("Configuration loaded\n");
+
+	// Establish TCP connection to server and store socket descriptor in client
+	client->sock = connect_server(client->gateway_server.addr, client->gateway_server.port);
+
+	if (client->sock == -1) {
+		LOGE("Failed to connect to %s:%d\n", client->gateway_server.addr, client->gateway_server.port);
+		return RUN_UNREACHABLE;
+	}
+
+	LOGI("Connected gateway server: %s:%u\n", client->gateway_server.addr, client->gateway_server.port);
+	LOGI("Game client: v%u.%u.%u\n", client->app.version_major, client->app.version_minor, client->app.version_patch);
+
+	RequestGuestLogIn(client);
+
+	r = ProcessConnection(client);
+
+	if (r == PS_REJECTED)
+		return RUN_FATAL;
+
+	if (r == PS_KICKED)
+		return RUN_KICKED;
+
+	if (!client->lobby_login) {
+		LOGE("Login failed!\n");
+		disconnect(client);
+		return RUN_UNREACHABLE;
+	}
+
+	// Establish TCP connection to game server
+	client->sock = connect_server(client->game_server.addr, client->game_server.port);
+
+	if (client->sock == -1) {
+		LOGE("Failed to connect game server %s:%d\n", client->game_server.addr, client->game_server.port);
+		return RUN_UNREACHABLE;
+	}
+
+	if (set_nonblocking(client) != 0) {
+		LOGE("set_nonblocking\n");
+	}
+
+	LOGI("IGG ID: %lu\n", client->auth.igg_id);
+	LOGI("Connected game server: %s:%u\n", client->game_server.addr, client->game_server.port);
+
+	// clear old buffer
+	memset(&client->stream, 0, sizeof(client->stream));
+
+	// Game login
+	LOGI("Logging game server\n");
+	RequestLogIn(client);
+	RequestClientInitOver(client);
+
+	r = ProcessConnection(client);
+	disconnect(client);
+
+	if (r == PS_REJECTED)
+		return RUN_FATAL;
+
+	if (r == PS_KICKED)
+		return RUN_KICKED;
+
+	return (client->game_logged_in || client->server_time != 0) ? RUN_DROPPED : RUN_UNREACHABLE;
+}
+
 int main(int argc, const char *argv[]) {
 	if (argc < 2) {
 		PrintUsage();
@@ -832,68 +948,46 @@ int main(int argc, const char *argv[]) {
         return EXIT_FAILURE;
     }
 	
-	Connection client = {0};
-	
-	// Configuration(&client);
-	
-	if (!LoadConfig(&client, argv[1])) {
-		LOGE("Failed to load config\n");
-		return EXIT_FAILURE;
+	Connection client;
+	uint32_t failures = 0;
+
+	for (;;) {
+		RunResult result = RunSession(&client, argv[1]);
+
+		if (result == RUN_FATAL)
+			return EXIT_FAILURE;
+
+		if (!client.reconnect.enabled)
+			return result == RUN_DROPPED ? 0 : EXIT_FAILURE;
+
+		// A session that reached the game and then dropped is not a failed attempt.
+		if (result == RUN_DROPPED || result == RUN_KICKED)
+			failures = 0;
+		else
+			failures++;
+
+		if (client.reconnect.max_attempts != 0 && failures >= client.reconnect.max_attempts) {
+			LOGE("Giving up after %u consecutive failed connection attempts\n", failures);
+			return EXIT_FAILURE;
+		}
+
+		// Never hammer the servers: at least 10 seconds, doubling on repeated
+		// failures up to x8.
+		uint32_t delay = client.reconnect.delay < 10 ? 10 : client.reconnect.delay;
+		uint32_t doublings = failures > 1 ? failures - 1 : 0;
+
+		if (doublings > 3)
+			doublings = 3;
+
+		delay <<= doublings;
+
+		if (result == RUN_KICKED)
+			LOGW("Account logged in from another device, reconnecting in %u seconds\n", delay);
+		else if (result == RUN_DROPPED)
+			LOGW("Connection lost, reconnecting in %u seconds\n", delay);
+		else
+			LOGW("Could not establish a session (attempt %u), retrying in %u seconds\n", failures, delay);
+
+		SleepSeconds(delay);
 	}
-	
-	LOGI("Configuration loaded\n");
-	
-	// Establish TCP connection to server and store socket descriptor in client
-	client.sock = connect_server(client.gateway_server.addr, client.gateway_server.port);
-	
-	// Validate socket creation; -1 indicates connection failure
-	if (client.sock == -1) {
-		LOGE("Failed to connect to %s:%d\n", client.gateway_server.addr, client.gateway_server.port);
-		return EXIT_FAILURE;
-	}
-	
-	LOGI("Connected gateway server: %s:%u\n", client.gateway_server.addr, client.gateway_server.port);
-	LOGI("Game client: v%u.%u.%u\n", client.app.version_major, client.app.version_minor, client.app.version_patch);
-	
-	RequestGuestLogIn(&client);
-		
-	ProcessConnection(&client);
-	
-	if (!client.lobby_login) {
-		LOGE("Login failed!\n");
-		return EXIT_FAILURE;
-	}
-	
-	// Establish TCP connection to game server 
-	client.sock = connect_server(client.game_server.addr, client.game_server.port);
-	
-	if (client.sock == -1) {
-		// LOGE("Failed to connect game server!");
-		LOGE("Failed to connect game server %s:%d\n", client.game_server.addr, client.game_server.port);
-		return EXIT_FAILURE;
-	}
-	
-	if (set_nonblocking(&client) != 0) {
-		LOGE("set_nonblocking\n");
-	}
-	
-	LOGI("IGG ID: %lu\n", client.auth.igg_id);
-	
-	LOGI("Connected game server: %s:%u\n", client.game_server.addr, client.game_server.port);
-	
-	// clear old buffer 
-	memset(&client.stream, 0, sizeof(client.stream));
-	
-	// Game login
-	LOGI("Logging game server\n");
-	RequestLogIn(&client);
-	
-	RequestClientInitOver(&client);
-	
-	// Handle 
-	ProcessConnection(&client);
-	
-	disconnect(&client);
-	
-	return 0;
 }
