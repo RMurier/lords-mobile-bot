@@ -123,6 +123,7 @@ typedef enum {
 	PS_GATEWAY_OK,     // gateway accepted the login, game server address received
 	PS_DISCONNECTED,   // connection dropped or recv error
 	PS_KICKED,         // account logged in from another device
+	PS_REFUSED,        // login refused with an error code we do not know: may be temporary
 	PS_REJECTED        // server rejected the credentials, retrying will not help
 } SessionResult;
 
@@ -214,8 +215,12 @@ static SessionResult ProcessConnection(Connection *c)
 				case _MSG_LOGIN_LOGINERRORRESP: 
 					RecvLoginError(c, s->buffer + s->parse_pos + 4);
 					disconnect(c);
-					// kind 9: logged in from another device (can be retried), anything else is fatal
-					return read_u8(s->buffer + s->parse_pos + 4) == 9 ? PS_KICKED : PS_REJECTED;
+					// 9: logged in from another device; 110: client too old (fatal);
+					// any other code (8 was seen after repeated kicks) is retried with a growing delay
+					{
+						uint8_t kind = read_u8(s->buffer + s->parse_pos + 4);
+						return kind == 9 ? PS_KICKED : kind == 110 ? PS_REJECTED : PS_REFUSED;
+					}
 				case _MSG_CLIENT_LOGINTOLRESP: 
 					if (s->packet_size - 4 >= 4) {
 						LOGE("Bootstrap login rejected by server (code=%d, first byte=%u). Payload size=%u. Run with --debug to see the raw response.\n",
@@ -838,7 +843,8 @@ typedef enum {
 	RUN_FATAL,       // do not retry: bad config, credentials rejected, client too old
 	RUN_UNREACHABLE, // could not connect, or dropped before the game login
 	RUN_DROPPED,     // was logged in to the game, then disconnected
-	RUN_KICKED       // account logged in from another device
+	RUN_KICKED,      // account logged in from another device
+	RUN_REFUSED      // login refused with an unknown code, retried slowly
 } RunResult;
 
 static void SleepSeconds(uint32_t seconds)
@@ -890,6 +896,9 @@ static RunResult RunSession(Connection *client, const char *config_file)
 	if (r == PS_KICKED)
 		return RUN_KICKED;
 
+	if (r == PS_REFUSED)
+		return RUN_REFUSED;
+
 	if (!client->lobby_login) {
 		LOGE("Login failed!\n");
 		disconnect(client);
@@ -927,6 +936,9 @@ static RunResult RunSession(Connection *client, const char *config_file)
 
 	if (r == PS_KICKED)
 		return RUN_KICKED;
+
+	if (r == PS_REFUSED)
+		return RUN_REFUSED;
 
 	return (client->game_logged_in || client->server_time != 0) ? RUN_DROPPED : RUN_UNREACHABLE;
 }
@@ -999,6 +1011,13 @@ int main(int argc, const char *argv[]) {
 		else
 			failures++;
 
+		// An unknown refusal is retried slowly, but not for ever: after 8 in a row the credentials are
+		// most likely dead and the bot stops.
+		if (result == RUN_REFUSED && failures >= 8) {
+			LOGE("Login refused %u times in a row: the access key is probably no longer valid. Capture the credentials again.\n", failures);
+			return EXIT_FAILURE;
+		}
+
 		if (client.reconnect.max_attempts != 0 && failures >= client.reconnect.max_attempts) {
 			LOGE("Giving up after %u consecutive failed connection attempts\n", failures);
 			return EXIT_FAILURE;
@@ -1008,7 +1027,8 @@ int main(int argc, const char *argv[]) {
 		// failures up to x8.
 		// After being logged out by another device (you playing), kicked_delay applies.
 		uint32_t base  = result == RUN_KICKED ? client.reconnect.kicked_delay : client.reconnect.delay;
-		uint32_t delay = base < 10 ? 10 : base;
+		uint32_t minimum = result == RUN_REFUSED ? 60 : 10;
+		uint32_t delay = base < minimum ? minimum : base;
 		uint32_t doublings = failures > 1 ? failures - 1 : 0;
 
 		if (doublings > 3)
@@ -1018,6 +1038,8 @@ int main(int argc, const char *argv[]) {
 
 		if (result == RUN_KICKED)
 			LOGW("Account logged in from another device, reconnecting in %u seconds\n", delay);
+		else if (result == RUN_REFUSED)
+			LOGW("Login refused by the server (attempt %u of 8), retrying in %u seconds\n", failures, delay);
 		else if (result == RUN_DROPPED)
 			LOGW("Connection lost, reconnecting in %u seconds\n", delay);
 		else
