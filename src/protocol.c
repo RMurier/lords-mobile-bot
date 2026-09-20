@@ -4685,3 +4685,156 @@ void BagApply(Connection *c, const BagUse *plan, int count)
 			c->items[plan[i].item_id].quantity -= plan[i].quantity;
 	}
 }
+
+
+/* ------------------------------------------------------------------------
+ * Kingdom migration. Layouts read from a capture of the official PC client:
+ *
+ *   request  _MSG_GUESTLOGIN_REQUESTIPTOP                  kingdom u16, session[512]
+ *   answer   _MSG_GUESTLOGIN_RESP_TOC                      status u8, port u32, ip (text)
+ *   request  _MSG_REQUEST_OLDPLAYERBACK_FREECROSSTELEPORT  kingdom u16, zone u16, point u8
+ *   answer   _MSG_RESP_OLDPLAYERBACK_FREECROSSTELEPORT     status u8 (0 = accepted)
+ *   then     _MSG_LOGIN_CROSSKINGDOM_CLOSE                 the server closes the connection
+ *
+ * Only the free migration (the one offered to returning players) was captured. Migrating with a
+ * migration scroll uses another request that is not known yet.
+ * ------------------------------------------------------------------------ */
+
+void RequestKingdomServer(Connection *c, uint16_t kingdom_id)
+{
+	c->size = 2; // reserve space for packet length
+	
+	write_u16(c->data + c->size, _MSG_GUESTLOGIN_REQUESTIPTOP);
+	c->size += 2;
+	
+	write_u32(c->data + c->size, ++c->protocol.seq_id);
+	c->size += 4;
+	
+	write_u16(c->data + c->size, kingdom_id);
+	c->size += 2;
+	
+	write_raw(c->data + c->size, c->auth.session, 512);
+	c->size += 512;
+	
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+void RequestFreeCrossTeleport(Connection *c, uint16_t kingdom_id, uint16_t zone_id, uint8_t point_id)
+{
+	c->size = 2; // reserve space for packet length
+	
+	write_u16(c->data + c->size, _MSG_REQUEST_OLDPLAYERBACK_FREECROSSTELEPORT);
+	c->size += 2;
+	
+	write_u32(c->data + c->size, ++c->protocol.seq_id);
+	c->size += 4;
+	
+	write_u16(c->data + c->size, kingdom_id);
+	c->size += 2;
+	
+	write_u16(c->data + c->size, zone_id);
+	c->size += 2;
+	
+	write_u8(c->data + c->size, point_id);
+	c->size += 1;
+	
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/* Starts a migration asked by `requester`. False if one is already running. */
+bool MigrationStart(Connection *c, const char *requester, uint16_t kingdom_id, uint16_t x, uint16_t y, uint16_t zone_id, uint8_t point_id)
+{
+	if (c->migration.state != MIGRATION_IDLE)
+		return false;
+	
+	memset(&c->migration, 0, sizeof(c->migration));
+	snprintf(c->migration.requester, sizeof(c->migration.requester), "%s", requester);
+	c->migration.kingdom_id = kingdom_id;
+	c->migration.x          = x;
+	c->migration.y          = y;
+	c->migration.zone_id    = zone_id;
+	c->migration.point_id   = point_id;
+	c->migration.state      = MIGRATION_WAIT_SERVER;
+	c->migration.deadline   = time(NULL) + 10;
+	
+	// like the game: look the target kingdom up first
+	RequestKingdomServer(c, kingdom_id);
+	return true;
+}
+
+void RecvKingdomServer(Connection *c, const uint8_t *data, uint16_t size)
+{
+	if (c->migration.state != MIGRATION_WAIT_SERVER || size < 1)
+		return;
+	
+	uint8_t status = read_u8(data);
+	
+	if (status != 0) {
+		BotReply(c, c->migration.requester, "Migration", "Le royaume %u est introuvable ou fermé (code %u).",
+			c->migration.kingdom_id, status);
+		c->migration.state = MIGRATION_IDLE;
+		return;
+	}
+	
+	if (size >= 6)
+		LOGI("[MIGRATION] Serveur du royaume %u : port %u\n", c->migration.kingdom_id, read_u32(data + 1));
+	
+	RequestFreeCrossTeleport(c, c->migration.kingdom_id, c->migration.zone_id, c->migration.point_id);
+	c->migration.state    = MIGRATION_WAIT_RESULT;
+	c->migration.deadline = time(NULL) + 15;
+}
+
+void RecvFreeCrossTeleport(Connection *c, const uint8_t *data)
+{
+	if (c->migration.state != MIGRATION_WAIT_RESULT)
+		return;
+	
+	uint8_t status = read_u8(data);
+	
+	c->migration.state = MIGRATION_IDLE;
+	
+	if (status == 0) {
+		LOGI("[MIGRATION] Migration acceptée vers le royaume %u\n", c->migration.kingdom_id);
+		BotReply(c, c->migration.requester, "Migration",
+			"Migration acceptée : le château part vers le royaume %u en X:%u Y:%u. Le serveur ferme la connexion et le bot se reconnecte tout seul.",
+			c->migration.kingdom_id, c->migration.x, c->migration.y);
+		return;
+	}
+	
+	LOGW("[MIGRATION] Migration refusée par le serveur (code %u)\n", status);
+	
+	if (c->items_loaded && c->items[MIGRATION_SCROLL].quantity == 0) {
+		BotReply(c, c->migration.requester, "Migration",
+			"Migration refusée (code %u). Aucune migration gratuite n'est disponible et vous n'avez plus de vélin de migration.", status);
+	} else if (c->items_loaded) {
+		BotReply(c, c->migration.requester, "Migration",
+			"Migration gratuite refusée (code %u). Vous avez %u vélin(s) de migration, mais le bot ne sait pas encore les utiliser : faites la migration dans le jeu.",
+			status, c->items[MIGRATION_SCROLL].quantity);
+	} else {
+		BotReply(c, c->migration.requester, "Migration", "Migration refusée par le serveur (code %u).", status);
+	}
+}
+
+void RecvCrossKingdomClose(Connection *c, const uint8_t *data, uint16_t size)
+{
+	(void)c;
+	
+	if (size >= 3)
+		LOGI("[MIGRATION] Le serveur ferme la connexion pour un changement de royaume (vers %u)\n", read_u16(data + 1));
+}
+
+/* Gives up when the server does not answer. */
+void MigrationTick(Connection *c)
+{
+	if (c->migration.state == MIGRATION_IDLE || time(NULL) <= c->migration.deadline)
+		return;
+	
+	if (c->migration.state == MIGRATION_WAIT_SERVER)
+		BotReply(c, c->migration.requester, "Migration", "Pas de réponse du serveur pour le royaume %u : migration abandonnée.", c->migration.kingdom_id);
+	else
+		BotReply(c, c->migration.requester, "Migration", "Pas de réponse à la demande de migration : vérifiez dans le jeu où en est le château.");
+	
+	c->migration.state = MIGRATION_IDLE;
+}

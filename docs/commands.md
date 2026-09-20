@@ -27,6 +27,7 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$admin remove <player>` | administrators | Removes an administrator added in game |
 | `$relocate random` | administrators | Moves the castle to a place chosen by the game (uses a random relocator), after a confirmation |
 | `$relocate <x> <y>` | administrators | Moves the castle to these coordinates in the current kingdom (uses an advanced relocator), after a confirmation |
+| `$migrate <kingdom> <x> <y>` | administrators | Migrates the castle to another kingdom at these coordinates, after a confirmation |
 | `$confirm` | the administrator who asked | Confirms the pending action; it expires after 60 seconds |
 | `$cancel` | administrators | Cancels the pending action |
 | `$su <player>` | administrators | Old command, same as `$admin add` |
@@ -43,6 +44,7 @@ $admin remove Bob
 $bank bal
 $relocate random   then  $confirm   (or $cancel)
 $relocate 100 100  then  $confirm
+$migrate 796 301 491  then  $confirm
 ```
 
 ## Who can do what
@@ -74,6 +76,26 @@ can be pending at a time.
   different from the current position. The destination is in the kingdom the castle is in.
 - After the confirmation the bot reports where the castle landed, or that the server refused.
   Rallies and marches are affected by a relocation like in the game: think before confirming.
+
+## Migration
+
+`$migrate <kingdom> <x> <y>` moves the castle to another kingdom, at the coordinates you choose. Like
+`$relocate` it is for administrators only, describes what it is about to do and waits for `$confirm` (60 seconds).
+
+What the bot does after the confirmation, in the same order as the official client:
+
+1. It asks the game for the server of the target kingdom. An unknown or closed kingdom is reported and nothing is sent.
+2. It sends the migration request with the kingdom and the destination tile.
+3. The server accepts (or refuses) and closes the connection; the bot reconnects by itself, into the new kingdom.
+
+The bot only knows the **free migration** offered to returning players, because that is the one that was captured
+from the official client. When it is not available the bot says so, and tells you whether migration scrolls are left in the bag:
+
+- no scroll: *"Aucune migration gratuite n'est disponible et vous n'avez plus de vélin de migration."*
+- scrolls left: it says how many, and that the migration has to be done in the game, because using a scroll goes
+  through another request that is not known yet.
+
+The confirmation message already warns when the bag has no migration scroll.
 
 ## The bank
 
@@ -114,6 +136,9 @@ been run against the live game yet:
 - the delivery distance against real player positions;
 - accented characters (é, è, à...) in the bot's French mails and chat lines: they are sent as UTF-8
   like any text, but if the game shows them wrongly, tell me and I will remove the accents;
+- migration: both requests are byte for byte the ones captured from the official client (a free migration to
+  kingdom 796), and the server's answers are decoded from the same capture. Only the accepted case was seen: the codes
+  of a refusal are unknown, so the bot shows the number it receives. Try it on a spare account first;
 - relocation: the packets are the ones the bot already had for the two relocators, and the answer is
   decoded by the existing code, but no relocation was run on a live account. Try it on a spare account.
 

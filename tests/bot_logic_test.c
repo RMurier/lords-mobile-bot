@@ -66,6 +66,14 @@ static bool replied(const char *needle)
 	return false;
 }
 
+static int find_packet(uint16_t type)
+{
+	for (int i = 0; i < sent_count && i < 64; i++)
+		if (sent_size[i] >= 4 && (uint16_t)(sent[i][2] | (sent[i][3] << 8)) == type)
+			return i;
+	return -1;
+}
+
 static void reset_sent(void) { sent_count = 0; useitem_count = 0; }
 
 static int failures = 0;
@@ -519,6 +527,122 @@ int main(void)
 			RecvUseItem(c, refused, sizeof(refused));
 			CHECK(sent_count == 0, "a late answer is not reported");
 		}
+		free(c);
+	}
+
+
+	/* ---- kingdom migration: the packets must match the ones of the official client ---- */
+	{
+		/* as sent by the real client for 796 / X:301 Y:491: kingdom 0x031c, zone 0x01e9, point 0xb6 */
+		map_pos_t landing = { 301, 491 };
+		uint16_t lz; uint8_t lp;
+		MapPosToPointCode(landing, &lz, &lp);
+		CHECK(lz == 489 && lp == 182, "X:301 Y:491 is zone 489 / point 182, like in the capture");
+
+		c = fresh("boss");
+		c->items_loaded = true;
+		c->player.current_kingdom_id = 232;
+		snprintf(c->auth.session, sizeof(c->auth.session), "SESSIONKEY-FOR-TEST");
+
+		say(c, "eve", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_NONE && replied("Seuls les administrateurs"), "migration refused for a stranger");
+		reset_sent();
+		say(c, "boss", "$migrate 796", COMMAND_CHANNEL_MAIL);
+		CHECK(replied("Usage : $migrate <royaume> <x> <y>"), "missing coordinates show the usage");
+		reset_sent();
+		say(c, "boss", "$migrate 232 301 491", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_NONE && replied("déjà dans le royaume 232") && replied("$relocate"), "migrating to the current kingdom points to $relocate");
+		reset_sent();
+		say(c, "boss", "$migrate 796 99999 5", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_NONE && replied("Coordonnées invalides"), "coordinates outside the map are refused");
+		reset_sent();
+		say(c, "boss", "$migrate 0 301 491", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_NONE && replied("Numéro de royaume invalide"), "kingdom 0 is refused");
+
+		/* no scroll in the bag: the administrator is told, and the request still waits for a confirmation */
+		reset_sent();
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_MIGRATE && replied("aucun vélin de migration dans le sac") && replied("royaume 796 en X:301 Y:491")
+			&& replied("Confirmez avec $confirm") && find_packet(1011) < 0 && find_packet(3156) < 0, "no scroll: warned, asks for a confirmation, sends nothing yet");
+		reset_sent();
+		c->items[MIGRATION_SCROLL].quantity = 2;
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		CHECK(replied("Vélins de migration dans le sac : 2"), "scrolls in the bag are counted");
+
+		/* confirm: the game first looks the kingdom up (kingdom u16 + session[512]) */
+		reset_sent();
+		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
+		{
+			int k = find_packet(1011);
+			CHECK(k >= 0 && c->migration.state == MIGRATION_WAIT_SERVER, "confirm asks for the server of the target kingdom");
+			if (k >= 0) {
+				const uint8_t *pk = sent[k];
+				CHECK((uint16_t)(pk[0] | (pk[1] << 8)) == 4 + 4 + 2 + 512, "kingdom lookup: same size as the real client (522 bytes)");
+				CHECK((uint16_t)(pk[8] | (pk[9] << 8)) == 796 && memcmp(pk + 10, "SESSIONKEY-FOR-TEST", 19) == 0 && pk[10 + 19] == 0 && pk[10 + 511] == 0,
+					"kingdom lookup: kingdom, then the session key padded with zeros");
+			}
+			CHECK(find_packet(3156) < 0, "the teleport is not sent before the server answered");
+		}
+
+		/* the real answer to that lookup: status 0, port 10796 (u32), ip */
+		reset_sent();
+		{
+			uint8_t toc[21] = { 0x00, 0x2c, 0x2a, 0x00, 0x00, '2','0','4','.','1','4','1','.','1','7','7','.','1','3','5', 0 };
+			RecvKingdomServer(c, toc, sizeof(toc));
+		}
+		{
+			int k = find_packet(3156);
+			CHECK(k >= 0 && c->migration.state == MIGRATION_WAIT_RESULT, "server found: the teleport request goes out");
+			if (k >= 0) {
+				const uint8_t *pk = sent[k];
+				const uint8_t captured[5] = { 0x1c, 0x03, 0xe9, 0x01, 0xb6 };   /* payload of the real request */
+				CHECK((uint16_t)(pk[0] | (pk[1] << 8)) == 4 + 4 + 5 && memcmp(pk + 8, captured, 5) == 0,
+					"the teleport packet is byte for byte the one of the official client (1c03 e901 b6)");
+			}
+		}
+
+		/* accepted */
+		reset_sent();
+		{ uint8_t ok = 0; RecvFreeCrossTeleport(c, &ok); }
+		CHECK(c->migration.state == MIGRATION_IDLE && replied("Migration acceptée : le château part vers le royaume 796 en X:301 Y:491"), "an accepted migration is reported");
+
+		/* refused, no scroll: the message the administrator asked for */
+		c->items[MIGRATION_SCROLL].quantity = 0;
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+		reset_sent();
+		{ uint8_t refused = 5; RecvFreeCrossTeleport(c, &refused); }
+		CHECK(replied("vous n'avez plus de vélin de migration") && replied("code 5"), "refused with no scroll left: the bot says there is none");
+
+		/* refused, scrolls available: honest about what the bot cannot do */
+		c->items[MIGRATION_SCROLL].quantity = 3;
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+		reset_sent();
+		{ uint8_t refused = 5; RecvFreeCrossTeleport(c, &refused); }
+		CHECK(replied("Vous avez 3 vélin(s) de migration") && replied("ne sait pas encore les utiliser"), "refused with scrolls: the bot says it cannot use them yet");
+
+		/* unknown or closed kingdom */
+		say(c, "boss", "$migrate 9999 301 491", COMMAND_CHANNEL_MAIL);
+		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
+		reset_sent();
+		{ uint8_t missing[1] = { 1 }; RecvKingdomServer(c, missing, sizeof(missing)); }
+		CHECK(c->migration.state == MIGRATION_IDLE && replied("royaume 9999 est introuvable ou fermé") && find_packet(3156) < 0, "an unknown kingdom is reported and nothing is teleported");
+
+		/* only one at a time, and a silent server is given up on */
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
+		reset_sent();
+		say(c, "boss", "$migrate 800 301 491", COMMAND_CHANNEL_MAIL);
+		CHECK(replied("Une migration est déjà en cours"), "a second migration is refused while one runs");
+		reset_sent();
+		MigrationTick(c);
+		CHECK(c->migration.state == MIGRATION_WAIT_SERVER && sent_count == 0, "no answer yet: keep waiting");
+		c->migration.deadline = time(NULL) - 1;
+		MigrationTick(c);
+		CHECK(c->migration.state == MIGRATION_IDLE && replied("Pas de réponse du serveur pour le royaume 796"), "a silent server is given up on with a message");
 		free(c);
 	}
 

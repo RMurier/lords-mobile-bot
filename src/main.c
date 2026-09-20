@@ -70,6 +70,8 @@ void BotTick(Connection *c)
 	
 	AllianceGiftTick(c);
 	
+	MigrationTick(c);
+	
 	// 
 	// DarknestRallyTick(c);
 	
@@ -225,6 +227,15 @@ static SessionResult ProcessConnection(Connection *c)
 					}
 					disconnect(c);
 					return PS_REJECTED;
+				case _MSG_GUESTLOGIN_RESP_TOC:
+					RecvKingdomServer(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_OLDPLAYERBACK_FREECROSSTELEPORT:
+					RecvFreeCrossTeleport(c, s->buffer + s->parse_pos + 4);
+					break;
+				case _MSG_LOGIN_CROSSKINGDOM_CLOSE:
+					RecvCrossKingdomClose(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
 				case _MSG_RESP_ACTIVE: 
 					c->server_time = read_u64(s->buffer + s->parse_pos + 4);
 					break;

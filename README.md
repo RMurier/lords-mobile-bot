@@ -171,6 +171,7 @@ Commands start with the prefix `$` by default and are answered by mail.
 | `$bank bal` | administrators | Mails the bank, bag and total balance |
 | `$admin list` / `add <player>` / `remove <player>` | administrators | Manages administrators (added ones are saved) |
 | `$relocate random` / `$relocate <x> <y>` | administrators | Moves the castle; always asks for `$confirm` first |
+| `$migrate <kingdom> <x> <y>` | administrators | Migrates to another kingdom (free migration); always asks for `$confirm` first |
 | `$su <player>` | administrators | Same as `$admin add` |
 
 Command words are English; the bot's answers and `$help` are in French. Commands are read from the channels in `command.input` (alliance chat and mail by default) and

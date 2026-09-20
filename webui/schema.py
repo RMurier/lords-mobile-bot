@@ -290,6 +290,15 @@ COMMANDS = [
      "details": ["Refusé si les coordonnées sont hors de la carte, si le château y est déjà ou s'il n'y a pas de relocalisateur avancé.",
                  "Même confirmation obligatoire que pour relocate random."],
      "example": "relocate 100 100"},
+    {"group": "Administration", "name": "migrate", "usage": "migrate <royaume> <x> <y>", "who": "Administrateurs",
+     "summary": "Fait migrer le château vers un autre royaume, aux coordonnées choisies.",
+     "details": ["Le bot vérifie d'abord que le royaume existe, puis envoie la migration. Une confirmation est toujours demandée.",
+                 "Il utilise la migration gratuite (offerte aux joueurs de retour) si elle est disponible. Sinon il le dit, et "
+                 "indique s'il reste des vélins de migration dans le sac. Avec un vélin, la migration doit encore se faire dans le jeu : "
+                 "le bot ne sait pas encore l'utiliser.",
+                 "Après la migration, le jeu ferme la connexion et le bot se reconnecte tout seul, dans le nouveau royaume.",
+                 "Les coordonnées doivent être sur la carte du royaume de destination."],
+     "example": "migrate 796 301 491"},
     {"group": "Administration", "name": "confirm", "usage": "confirm", "who": "L'administrateur qui a demandé l'action",
      "summary": "Valide l'action en attente (par exemple une relocalisation). Elle expire au bout de 60 secondes.",
      "example": "confirm"},

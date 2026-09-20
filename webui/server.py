@@ -867,6 +867,19 @@ def api_capture_cancel(h, query):
     capture.cancel()
 
 
+def start_accounts(account_ids):
+    """--start: start these accounts' bots, one after the other, and say what happened for each."""
+    delay = int(settings.get("stagger") or 0)
+    for number, account_id in enumerate(account_ids):
+        if number and delay:
+            time.sleep(delay)
+        try:
+            status = bots.start(account_id)
+            print(f"[webui] bot {account_id} started (pid {status.get('pid')})", flush=True)
+        except ApiError as e:
+            print(f"[webui] bot {account_id} NOT started: {e.message}", flush=True)
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -876,6 +889,9 @@ def main():
     parser = argparse.ArgumentParser(description="Web interface for the Lords Mobile bot")
     parser.add_argument("--port", type=int, default=8765, help="port to listen on (default 8765)")
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser automatically")
+    parser.add_argument("--start", nargs="+", metavar="ACCOUNT", default=[],
+                        help="start the bots of these accounts as soon as the console is up (one after the other, "
+                             "with the start delay of the settings)")
     args = parser.parse_args()
 
     server = None
@@ -896,6 +912,8 @@ def main():
           flush=True)
     if not args.no_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    if args.start:
+        threading.Thread(target=start_accounts, args=(args.start,), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

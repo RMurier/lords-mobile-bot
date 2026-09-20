@@ -419,6 +419,72 @@ static void RelocateCommand(Connection *c, const char *player_name, bool is_admi
 		"Confirmez avec %cconfirm dans les %d secondes, ou %ccancel.", x, y, c->player.current_kingdom_id, p, CONFIRM_SECONDS, p);
 }
 
+static void MigrateCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
+{
+	char p = c->bot.command_prefix;
+	unsigned kingdom, x, y;
+	
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent faire migrer le château.");
+		return;
+	}
+	
+	if (!c->items_loaded) {
+		BotReply(c, player_name, "Migration", "Le sac n'est pas encore chargé, réessayez dans un instant.");
+		return;
+	}
+	
+	if (sscanf(args, "%u %u %u", &kingdom, &x, &y) != 3) {
+		BotReply(c, player_name, "Migration", "Usage : %cmigrate <royaume> <x> <y>", p);
+		return;
+	}
+	
+	if (kingdom < 1 || kingdom > 65535) {
+		BotReply(c, player_name, "Migration", "Numéro de royaume invalide : %u.", kingdom);
+		return;
+	}
+	
+	if (kingdom == c->player.current_kingdom_id) {
+		BotReply(c, player_name, "Migration", "Le château est déjà dans le royaume %u : utilisez %crelocate pour changer de coordonnées.", kingdom, p);
+		return;
+	}
+	
+	if (!CheckTileMapPos((int)x, (int)y)) {
+		BotReply(c, player_name, "Migration", "Coordonnées invalides : X:%u Y:%u n'est pas une case du royaume.", x, y);
+		return;
+	}
+	
+	if (c->migration.state != MIGRATION_IDLE) {
+		BotReply(c, player_name, "Migration", "Une migration est déjà en cours.");
+		return;
+	}
+	
+	// the free migration (offered to returning players) is tried first; otherwise a migration scroll is needed
+	char note[200];
+	uint16_t scrolls = c->items[MIGRATION_SCROLL].quantity;
+	
+	if (scrolls == 0)
+		snprintf(note, sizeof(note), "Attention : il n'y a aucun vélin de migration dans le sac, la migration ne marchera que si une migration gratuite est disponible.");
+	else
+		snprintf(note, sizeof(note), "Vélins de migration dans le sac : %u.", scrolls);
+	
+	map_pos_t target = { (uint16_t)x, (uint16_t)y };
+	
+	PendingClear(c);
+	c->pending.kind = PENDING_MIGRATE;
+	snprintf(c->pending.requester, sizeof(c->pending.requester), "%s", player_name);
+	c->pending.expires = time(NULL) + CONFIRM_SECONDS;
+	c->pending.kingdom_id = (uint16_t)kingdom;
+	c->pending.x = (uint16_t)x;
+	c->pending.y = (uint16_t)y;
+	MapPosToPointCode(target, &c->pending.zone_id, &c->pending.point_id);
+	
+	BotReply(c, player_name, "Migration",
+		"Le château migrera vers le royaume %u en X:%u Y:%u (migration gratuite si elle est disponible). %s "
+		"Le jeu ferme ensuite la connexion et le bot se reconnecte. Confirmez avec %cconfirm dans les %d secondes, ou %ccancel.",
+		kingdom, x, y, note, p, CONFIRM_SECONDS, p);
+}
+
 static void ConfirmCommand(Connection *c, const char *player_name, bool is_admin)
 {
 	if (!is_admin) {
@@ -442,6 +508,20 @@ static void ConfirmCommand(Connection *c, const char *player_name, bool is_admin
 		return;
 	}
 
+	if (c->pending.kind == PENDING_MIGRATE) {
+		uint16_t kingdom = c->pending.kingdom_id, x = c->pending.x, y = c->pending.y, zone = c->pending.zone_id;
+		uint8_t point = c->pending.point_id;
+		
+		PendingClear(c);
+		
+		if (!MigrationStart(c, player_name, kingdom, x, y, zone, point))
+			BotReply(c, player_name, "Migration", "Une migration est déjà en cours.");
+		else
+			BotReply(c, player_name, "Migration", "Migration demandée : vérification du royaume %u, puis envoi. Le résultat arrive dans un instant.", kingdom);
+		
+		return;
+	}
+	
 	if (c->pending.kind == PENDING_RELOCATE_RANDOM)
 		RequestSimpleUseItem(c, RANDOM_RELOCATOR, 1);
 	else
@@ -548,6 +628,7 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cbank bal - solde de la banque, du sac et total", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <joueur>|remove <joueur> - gérer les administrateurs", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château (confirmation demandée)", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate <royaume> <x> <y> - migrer vers un autre royaume (confirmation demandée)", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cconfirm / %ccancel - valider ou annuler l'action en attente", p, p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%csu <joueur> - équivaut à %cadmin add", p, p);
 	}
@@ -620,6 +701,11 @@ void command_handler(Connection *c, const char *player_name, const char *message
 		return;
 	}
 
+	if (IsCommand(message, "migrate", &args)) {
+		MigrateCommand(c, player_name, is_admin, args);
+		return;
+	}
+	
 	if (IsCommand(message, "confirm", &args)) {
 		ConfirmCommand(c, player_name, is_admin);
 		return;

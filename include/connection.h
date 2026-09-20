@@ -785,7 +785,8 @@ typedef enum {
 typedef enum {
     PENDING_NONE,
     PENDING_RELOCATE_RANDOM,
-    PENDING_RELOCATE_TO
+    PENDING_RELOCATE_TO,
+    PENDING_MIGRATE
 } PendingKind;
 
 /* An action that only happens after the administrator who asked for it confirms. */
@@ -793,12 +794,30 @@ typedef struct {
     PendingKind kind;
     char     requester[13];
     time_t   expires;
-    uint16_t x, y;            /* target of a relocation */
+    uint16_t x, y;            /* target of a relocation or a migration */
+    uint16_t kingdom_id;      /* target kingdom of a migration */
     uint16_t zone_id;
     uint8_t  point_id;
     char     report_to[13];   /* who receives the server's answer once the action was sent */
     time_t   report_until;
 } PendingAction;
+
+/* Kingdom migration in progress: ask the target kingdom's server, then send the teleport request. */
+typedef enum {
+    MIGRATION_IDLE,
+    MIGRATION_WAIT_SERVER,
+    MIGRATION_WAIT_RESULT
+} MigrationState;
+
+typedef struct {
+    MigrationState state;
+    char     requester[13];
+    uint16_t kingdom_id;
+    uint16_t x, y;
+    uint16_t zone_id;
+    uint8_t  point_id;
+    time_t   deadline;
+} Migration;
 
 typedef struct {
 	char issued_name[13]; // Who initiated resource command?
@@ -958,6 +977,7 @@ typedef struct {
 	
 	ResourceTransfer transfer;
 	PendingAction pending;
+	Migration migration;
 	
 	AllianceMemberList alliance_member;
 } Connection;
