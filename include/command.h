@@ -4,14 +4,14 @@
 #include <stdint.h>
 #include "connection.h"
 
-void command_handler(Connection*, const char*, const char*);
+/* Handles a message that may be a bot command. `source` is where it came from (world chat, alliance chat or mail). */
+void command_handler(Connection *c, const char *player_name, const char *message, CommandChannel source);
 
-static void ResourceCommandHandler(
-    Connection *c,
-    const char *player_name,
-    const char *message,
-    ResourceType type,
-    const char *name
-);
+/* Administrators (admin.names in the config file, plus the ones added in game). */
+bool IsAdmin(const Connection *c, const char *name);
+bool AdminAdd(Connection *c, const char *name);
+bool AdminRemove(Connection *c, const char *name);
+bool AdminSaveRuntime(const Connection *c);
+void AdminLoadRuntime(Connection *c);
 
 #endif

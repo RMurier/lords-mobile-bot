@@ -176,6 +176,7 @@ typedef struct {
 typedef struct {
     char player_name[13];
     char message[1024];
+    uint8_t channel; /* channel the last message came from: 0 = world, 1 = alliance */
     bool pending;
 } ChatState;
 
@@ -439,20 +440,29 @@ typedef enum {
     COMMAND_CHANNEL_MAIL
 } CommandChannel;
 
+#define MAX_ADMINS 16
+
 typedef struct {
-    char admin_name[13];
+    /* Administrators: the first admin_config_count come from the config file
+     * and cannot be removed by commands, the others were added in game and are
+     * stored in <data.path>/admins.txt. */
+    char admin_names[MAX_ADMINS][13];
+    uint8_t admin_count;
+    uint8_t admin_config_count;
+    
     char command_prefix;
     bool admin_only;
     char data_path[256];
     
-    CommandChannel command_input;
-    CommandChannel command_output;
+    uint8_t command_input_mask;   /* bit mask of 1 << CommandChannel: where commands are read */
+    CommandChannel command_output; /* where replies are sent */
 } BotSettings;
 
 /* Automatic reconnection after a dropped connection. */
 typedef struct {
     bool enabled;
-    uint32_t delay;        /* seconds to wait before reconnecting */
+    uint32_t delay;        /* seconds to wait before reconnecting after a dropped connection */
+    uint32_t kicked_delay; /* seconds to wait after the account was logged in from another device, 0 = do not reconnect */
     uint32_t max_attempts; /* consecutive failed attempts before giving up, 0 = unlimited */
 } ReconnectSettings;
 
@@ -789,6 +799,8 @@ typedef struct {
 
     uint16_t zone_id;
     uint8_t point_id;
+    
+    time_t not_before; /* do not start before this time (waiting for used bag items to be credited) */
 
     TransferState state;
 } ResourceTransfer;
@@ -846,6 +858,8 @@ typedef struct {
 	bool lobby_login;
 	// set once the game server accepted the login
 	bool game_logged_in;
+	// cargo ship: wait until bag items used for a trade are credited
+	time_t market_bag_wait;
 	// game server 
 	ServerInfo game_server;
 	ServerInfo gateway_server;

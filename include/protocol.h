@@ -147,6 +147,23 @@ void RecvHelp_Home(Connection *c, const uint8_t *data);
 
 void format_number2(uint64_t num, char *out, size_t size);
 
+void EvaluateBlackMarket(Connection *c);
+
+/* Resource items in the bag (bank.use_bag_*, cargo_ship.use_bag_rss) */
+#define BAG_PLAN_MAX 8
+
+typedef struct {
+	uint16_t item_id;
+	uint16_t quantity;
+} BagUse;
+
+uint64_t BagTotal(const Connection *c, ResourceType type);
+int  BagPlan(const Connection *c, ResourceType type, uint64_t need, BagUse out[BAG_PLAN_MAX]);
+void BagApply(Connection *c, const BagUse *plan, int count);
+
+/* Answers a player through the configured command.output channel. Defined in command.c. */
+void BotReply(Connection *c, const char *player_name, const char *subject, const char *fmt, ...);
+
 void RecvAllianceMemberInfo(Connection *c, const uint8_t *data);
 void RequestAllianceMemberInfo(Connection *c);
 

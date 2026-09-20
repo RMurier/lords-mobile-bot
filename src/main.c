@@ -231,7 +231,7 @@ static SessionResult ProcessConnection(Connection *c)
 				case _MSG_RESP_CHATMESSAGE: 
 					RecvChatMessage(c, s->buffer + s->parse_pos + 4);
 					
-					command_handler(c, c->chat.player_name, c->chat.message);
+					command_handler(c, c->chat.player_name, c->chat.message, c->chat.channel == 0 ? COMMAND_CHANNEL_WORLD : COMMAND_CHANNEL_GUILD);
 					
 					if (c->chat.message[0] != c->bot.command_prefix) {
 						printf("[MSG] [%s]: %s\n", c->chat.player_name, c->chat.message);
@@ -301,7 +301,7 @@ static SessionResult ProcessConnection(Connection *c)
 				case _MSG_RESP_MAILINFO: 
 					RecvMailInfo(c, s->buffer + s->parse_pos + 4);
 					
-					command_handler(c, c->mail.sender_name, c->mail.content);
+					command_handler(c, c->mail.sender_name, c->mail.content, COMMAND_CHANNEL_MAIL);
 					
 					if (c->chat.message[0] != c->bot.command_prefix) {
 						printf("[MAIL] [%s]: %s\n", c->mail.sender_name, c->mail.content);
@@ -464,7 +464,7 @@ void Configuration(Connection *client)
 	// Data folder 
 	strcpy(client->bot.data_path, "./lmbot/");
 	// default admin
-	strcpy(client->bot.admin_name, "halloweeks");
+	// no default administrator: set admin.names in the configuration
 	
 	/*
 	client->lobby_server_addr = 0;
@@ -677,11 +677,12 @@ bool CreateDefaultConfig(const char *filename)
 		"client.platform = 1\n\n"
 		
 		"# Directory used to store bot data (logs, databases, cache, etc.).\n"
-		"data.path = /sdcard/lmbot/\n\n"
+		"data.path = ./data/\n\n"
 		
-		"# Privileged player.\n"
-		"# This player can execute administrator commands and bypass normal restrictions.\n"
-		"admin.name = halloweeks\n\n"
+		"# Administrators: in-game players allowed to use every command (comma separated, 16 at most).\n"
+		"# Administrators can also be added in game with the admin command; those are stored in data.path.\n"
+		"# Nobody is administrator until you set this.\n"
+		"# admin.names = YourName, AnotherName\n\n"
 		
 		"# Replace the example values below with your own account information.\n"
 		"account.igg_id = 1234567890\n"
@@ -693,17 +694,22 @@ bool CreateDefaultConfig(const char *filename)
 
 		"# Automatic reconnection when the connection drops or the account is logged in\n"
 		"# from another device (for example after you play on your phone).\n"
-		"# delay: seconds to wait before reconnecting (minimum 10).\n"
+		"# delay: seconds to wait before reconnecting after a dropped connection (minimum 10).\n"
+		"# kicked_delay: seconds to wait when the account was logged in from another device\n"
+		"# (you started the game); 0 = do not reconnect in that case (minimum 10 otherwise).\n"
 		"# max_attempts: consecutive failed attempts before giving up, 0 = never give up.\n"
 		"reconnect.enabled = true\n"
 		"reconnect.delay = 60\n"
+		"reconnect.kicked_delay = 60\n"
 		"reconnect.max_attempts = 0\n\n"
 		
 		"# Prefix used to identify bot commands.\n"
 		"command.prefix = $\n\n"
 		
 		"# Command channels: WORLD, GUILD, MAIL\n"
-		"command.input = GUILD\n"
+		"# input: where commands are read (one or several, comma separated).\n"
+		"# output: where the bot answers (one).\n"
+		"command.input = GUILD, MAIL\n"
 		"command.output = MAIL\n\n"
 		
 		"# Bank\n"
@@ -965,6 +971,12 @@ int main(int argc, const char *argv[]) {
 
 		if (!client.reconnect.enabled)
 			return result == RUN_DROPPED ? 0 : EXIT_FAILURE;
+		
+		// reconnect.kicked_delay = 0: stay disconnected when the account is used elsewhere
+		if (result == RUN_KICKED && client.reconnect.kicked_delay == 0) {
+			LOGW("Account logged in from another device, not reconnecting (reconnect.kicked_delay = 0)\n");
+			return 0;
+		}
 
 		// A session that reached the game and then dropped is not a failed attempt.
 		if (result == RUN_DROPPED || result == RUN_KICKED)
@@ -979,7 +991,9 @@ int main(int argc, const char *argv[]) {
 
 		// Never hammer the servers: at least 10 seconds, doubling on repeated
 		// failures up to x8.
-		uint32_t delay = client.reconnect.delay < 10 ? 10 : client.reconnect.delay;
+		// After being logged out by another device (you playing), kicked_delay applies.
+		uint32_t base  = result == RUN_KICKED ? client.reconnect.kicked_delay : client.reconnect.delay;
+		uint32_t delay = base < 10 ? 10 : base;
 		uint32_t doublings = failures > 1 ? failures - 1 : 0;
 
 		if (doublings > 3)

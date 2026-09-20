@@ -25,4 +25,8 @@ void MapPosToPointCode(map_pos_t pos, uint16_t *zoneId, uint8_t *pointId);
 map_pos_t getTileMapPosbyPointCode(uint16_t zoneID, uint8_t pointID);
 PointCode getPointCodeByMapPos(uint16_t x, uint16_t y);
 
+/* Squared euclidean distance between two tiles, and its rounded up square root (no libm needed). */
+uint64_t MapDistanceSq(map_pos_t a, map_pos_t b);
+uint32_t MapDistance(map_pos_t a, map_pos_t b);
+
 #endif

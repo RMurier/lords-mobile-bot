@@ -17,6 +17,7 @@
  */
 
 #include "config.h"
+#include "command.h"
 #include "log.h"
 #include <stdlib.h>
 
@@ -122,6 +123,72 @@ static bool ParseBool(const char *value)
     return strcmp(value, "true") == 0 || strcmp(value, "1") == 0;
 }
 
+/* "WORLD, GUILD, MAIL" -> bit mask of 1 << CommandChannel. At least one valid channel is required. */
+static bool ParseChannelMask(const char *value, uint8_t *mask)
+{
+    char buffer[128];
+    uint8_t result = 0;
+
+    strncpy(buffer, value, sizeof(buffer));
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    for (char *token = strtok(buffer, ","); token; token = strtok(NULL, ",")) {
+        while (*token == ' ')
+            token++;
+
+        char *end = token + strlen(token);
+
+        while (end > token && end[-1] == ' ')
+            *--end = '\0';
+
+        if (strcmp(token, "WORLD") == 0)
+            result |= 1u << COMMAND_CHANNEL_WORLD;
+        else if (strcmp(token, "GUILD") == 0)
+            result |= 1u << COMMAND_CHANNEL_GUILD;
+        else if (strcmp(token, "MAIL") == 0)
+            result |= 1u << COMMAND_CHANNEL_MAIL;
+        else {
+            printf("Invalid command channel: %s (use WORLD, GUILD or MAIL)\n", token);
+            return false;
+        }
+    }
+
+    if (result == 0)
+        return false;
+
+    *mask = result;
+    return true;
+}
+
+/* "name1, name2" -> administrators (admin.name and admin.names may both be used and are merged). */
+static bool ParseAdminList(Connection *c, const char *value)
+{
+    char buffer[256];
+
+    strncpy(buffer, value, sizeof(buffer));
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    for (char *token = strtok(buffer, ","); token; token = strtok(NULL, ",")) {
+        while (*token == ' ')
+            token++;
+
+        char *end = token + strlen(token);
+
+        while (end > token && end[-1] == ' ')
+            *--end = '\0';
+
+        if (*token == '\0')
+            continue;
+
+        if (!AdminAdd(c, token)) {
+            printf("Invalid administrator name: %s (1 to 12 characters, at most %d administrators)\n", token, MAX_ADMINS);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 uint64_t parse_number_u64(const char *str);
 
 static bool ParserConfig(Connection *c, const char *key, const char *value) {
@@ -144,6 +211,11 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 	
 	if (strcmp(key, "reconnect.delay") == 0) {
 		c->reconnect.delay = (uint32_t)strtoul(value, NULL, 10);
+		return true;
+	}
+	
+	if (strcmp(key, "reconnect.kicked_delay") == 0) {
+		c->reconnect.kicked_delay = (uint32_t)strtoul(value, NULL, 10);
 		return true;
 	}
 	
@@ -203,8 +275,7 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 	
 	// command 
 	if (strcmp(key, "command.input") == 0) {
-		c->bot.command_input = ParseCommandChannel(value);
-		return true;
+		return ParseChannelMask(value, &c->bot.command_input_mask);
 	}
 	
 	if (strcmp(key, "command.output") == 0) {
@@ -368,10 +439,8 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 
-	if (strcmp(key, "admin.name") == 0) {
-		strncpy(c->bot.admin_name, value, sizeof(c->bot.admin_name) - 1);
-		c->bot.admin_name[sizeof(c->bot.admin_name) - 1] = '\0';
-		return true;
+	if (strcmp(key, "admin.name") == 0 || strcmp(key, "admin.names") == 0) {
+		return ParseAdminList(c, value);
 	}
 	
 	// Cargo ship setting 
@@ -463,7 +532,11 @@ bool LoadConfig(Connection *c, const char *filename)
 	c->app.platform = 1;
 	c->reconnect.enabled      = true;
 	c->reconnect.delay        = 60;
+	c->reconnect.kicked_delay = 60;
 	c->reconnect.max_attempts = 0;
+	c->bot.command_input_mask = (1u << COMMAND_CHANNEL_GUILD) | (1u << COMMAND_CHANNEL_MAIL);
+	c->bot.command_output     = COMMAND_CHANNEL_MAIL;
+	snprintf(c->bot.data_path, sizeof(c->bot.data_path), "./data/");
 	
 	while (fgets(line, sizeof(line), fp)) {
 		line_num++;
@@ -494,5 +567,10 @@ bool LoadConfig(Connection *c, const char *filename)
     }
 
     fclose(fp);
+
+    /* Administrators listed in the file cannot be removed by commands; the ones added in game are loaded now. */
+    c->bot.admin_config_count = c->bot.admin_count;
+    AdminLoadRuntime(c);
+
     return true;
 }

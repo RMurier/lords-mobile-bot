@@ -1,5 +1,12 @@
 #include "command.h"
 #include <ctype.h>
+#include <stdarg.h>
+#include <time.h>
+#ifdef _WIN32
+  #include <direct.h>
+#else
+  #include <sys/stat.h>
+#endif
 #include "items.h"
 #include "protocol.h"
 
@@ -29,52 +36,259 @@ void format_number2(uint64_t num, char *out, size_t size) {
 }*/
 
 void ShowBankBalance(Connection *c, const char *player_name);
+static void ResourceCommandHandler(
+    Connection *c,
+    const char *player_name,
+    const char *message,
+    ResourceType type,
+    const char *name
+);
 
+/* ------------------------------------------------------------------------
+ * Replies: mail, alliance chat or world chat, depending on command.output
+ * ------------------------------------------------------------------------ */
 
-void SuperUserAccess(Connection *c,
-                     const char *player_name,
-                     const char *new_admin)
+void BotReply(Connection *c, const char *player_name, const char *subject, const char *fmt, ...)
 {
-	
-    // Only current admin may change admin 
-    if (strcmp(player_name, c->bot.admin_name) != 0)
-    {
-        RequestSendMail(
-            c,
-            player_name,
-            "Unauthorized",
-            "You don't have permission to grant admin access."
-        );
-        return;
-    }
+	char text[1024];
+	va_list args;
 
-    snprintf(c->bot.admin_name,
-             sizeof(c->bot.admin_name),
-             "%s",
-             new_admin);
+	va_start(args, fmt);
+	vsnprintf(text, sizeof(text), fmt, args);
+	va_end(args);
 
-    RequestSendMailFmt(
-        c,
-        player_name,
-        "Admin Updated",
-        "%s is now the system administrator.",
-        c->bot.admin_name
-    );
+	if (c->bot.command_output == COMMAND_CHANNEL_MAIL) {
+		RequestSendMail(c, player_name, subject, text);
+		return;
+	}
+
+	/* chat messages are a single short line */
+	for (char *p = text; *p; p++) {
+		if (*p == '\n' || *p == '\r')
+			*p = ' ';
+	}
+
+	char line[300];
+	snprintf(line, sizeof(line), "@%s %.240s", player_name, text); // chat lines are kept short on purpose
+
+	RequestSendChat(c, c->bot.command_output == COMMAND_CHANNEL_GUILD ? 1 : 0, line);
 }
 
+/* ------------------------------------------------------------------------
+ * Administrators: the config file (admin.names), plus the ones added in game,
+ * which are kept in <data.path>/admins.txt
+ * ------------------------------------------------------------------------ */
+
+bool IsAdmin(const Connection *c, const char *name)
+{
+	for (int i = 0; i < c->bot.admin_count; i++) {
+		if (strcmp(c->bot.admin_names[i], name) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+/* Adds an administrator (or does nothing if already there). False if the name is invalid or the list is full. */
+bool AdminAdd(Connection *c, const char *name)
+{
+	size_t length = strlen(name);
+
+	if (length == 0 || length > 12)
+		return false;
+
+	for (size_t i = 0; i < length; i++) {
+		if ((unsigned char)name[i] < 0x20 || name[i] == 0x7f)
+			return false;
+	}
+
+	if (IsAdmin(c, name))
+		return true;
+
+	if (c->bot.admin_count >= MAX_ADMINS)
+		return false;
+
+	memcpy(c->bot.admin_names[c->bot.admin_count], name, length + 1);
+	c->bot.admin_count++;
+
+	return true;
+}
+
+/* Removes an administrator added in game. Administrators from the config file cannot be removed. */
+bool AdminRemove(Connection *c, const char *name)
+{
+	for (int i = c->bot.admin_config_count; i < c->bot.admin_count; i++) {
+		if (strcmp(c->bot.admin_names[i], name) == 0) {
+			for (int j = i; j < c->bot.admin_count - 1; j++)
+				memcpy(c->bot.admin_names[j], c->bot.admin_names[j + 1], sizeof(c->bot.admin_names[j]));
+
+			c->bot.admin_count--;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool AdminFilePath(const Connection *c, char *out, size_t size)
+{
+	size_t length = strlen(c->bot.data_path);
+
+	if (length == 0)
+		return false;
+
+	char last = c->bot.data_path[length - 1];
+	int written = snprintf(out, size, "%s%sadmins.txt", c->bot.data_path, (last == '/' || last == '\\') ? "" : "/");
+
+	return written > 0 && (size_t)written < size;
+}
+
+static void MakeDirectories(const char *path)
+{
+	char buffer[300];
+
+	snprintf(buffer, sizeof(buffer), "%s", path);
+
+	for (char *p = buffer + 1; *p; p++) {
+		if (*p == '/' || *p == '\\') {
+			char saved = *p;
+			*p = '\0';
+#ifdef _WIN32
+			_mkdir(buffer);
+#else
+			mkdir(buffer, 0700);
+#endif
+			*p = saved;
+		}
+	}
+}
+
+/* Stores the administrators added in game so they survive a reconnection or restart. */
+bool AdminSaveRuntime(const Connection *c)
+{
+	char path[400];
+
+	if (!AdminFilePath(c, path, sizeof(path)))
+		return false;
+
+	MakeDirectories(path);
+
+	FILE *fp = fopen(path, "w");
+
+	if (!fp)
+		return false;
+
+	for (int i = c->bot.admin_config_count; i < c->bot.admin_count; i++)
+		fprintf(fp, "%s\n", c->bot.admin_names[i]);
+
+	fclose(fp);
+	return true;
+}
+
+/* Loads the administrators added in game. Called after the configuration file was read. */
+void AdminLoadRuntime(Connection *c)
+{
+	char path[400];
+	char line[64];
+
+	if (!AdminFilePath(c, path, sizeof(path)))
+		return;
+
+	FILE *fp = fopen(path, "r");
+
+	if (!fp)
+		return;
+
+	while (fgets(line, sizeof(line), fp)) {
+		line[strcspn(line, "\r\n")] = '\0';
+		AdminAdd(c, line);
+	}
+
+	fclose(fp);
+}
+
+static void AdminCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
+{
+	char list[512] = {0};
+
+	if (strncmp(args, "list", 4) == 0 && (args[4] == '\0' || args[4] == ' ')) {
+		if (!is_admin) {
+			BotReply(c, player_name, "Unauthorized", "You don't have permission to see the administrators.");
+			return;
+		}
+
+		size_t used = 0;
+
+		for (int i = 0; i < c->bot.admin_count; i++) {
+			used += (size_t)snprintf(list + used, sizeof(list) - used, "%s%s%s", i ? ", " : "", c->bot.admin_names[i],
+				i < c->bot.admin_config_count ? " (config)" : "");
+
+			if (used >= sizeof(list))
+				break;
+		}
+
+		BotReply(c, player_name, "Administrators", "%s", c->bot.admin_count ? list : "No administrator configured.");
+		return;
+	}
+
+	bool add    = strncmp(args, "add ", 4) == 0;
+	bool remove = strncmp(args, "remove ", 7) == 0;
+
+	if (!add && !remove) {
+		BotReply(c, player_name, "Administrators", "Usage: %cadmin list | %cadmin add <player> | %cadmin remove <player>",
+			c->bot.command_prefix, c->bot.command_prefix, c->bot.command_prefix);
+		return;
+	}
+
+	if (!is_admin) {
+		BotReply(c, player_name, "Unauthorized", "You don't have permission to manage administrators.");
+		return;
+	}
+
+	const char *target = args + (add ? 4 : 7);
+
+	while (*target == ' ')
+		target++;
+
+	if (add) {
+		if (!AdminAdd(c, target)) {
+			BotReply(c, player_name, "Administrators", "Cannot add \"%s\" (invalid name, or at most %d administrators).", target, MAX_ADMINS);
+			return;
+		}
+
+		BotReply(c, player_name, "Administrators", "%s is now an administrator.%s", target,
+			AdminSaveRuntime(c) ? "" : " (not saved: data.path is not writable)");
+		return;
+	}
+
+	if (!AdminRemove(c, target)) {
+		BotReply(c, player_name, "Administrators", IsAdmin(c, target)
+			? "%s is defined in the configuration file: remove it there."
+			: "%s is not an administrator.", target);
+		return;
+	}
+
+	BotReply(c, player_name, "Administrators", "%s is no longer an administrator.%s", target,
+		AdminSaveRuntime(c) ? "" : " (not saved: data.path is not writable)");
+}
+
+/* ------------------------------------------------------------------------
+ * Bank permissions
+ * ------------------------------------------------------------------------ */
+
 /*
- * Banking is opt-in. The administrator can always use it; everybody else needs
+ * Banking is opt-in. Administrators can always use it; everybody else needs
  * bank.enabled and the matching bank.send_* flag. Without this check any player
  * able to write in a channel the bot reads could drain the account.
  */
 static bool BankAllows(Connection *c, const char *player_name, ResourceType type)
 {
-	if (strcmp(c->bot.admin_name, player_name) == 0)
+	if (IsAdmin(c, player_name))
 		return true;
-	
+
 	if (!c->bank.enabled)
 		return false;
-	
+
 	switch (type) {
 		case RESOURCE_FOOD: return c->bank.send_food;
 		case RESOURCE_ROCK: return c->bank.send_rock;
@@ -82,83 +296,171 @@ static bool BankAllows(Connection *c, const char *player_name, ResourceType type
 		case RESOURCE_ORE:  return c->bank.send_ore;
 		case RESOURCE_GOLD: return c->bank.send_gold;
 	}
-	
+
 	return false;
 }
 
-void command_handler(Connection *c, const char *player_name, const char *message) {
+/* bank.use_bag_rss is the master switch, bank.use_bag_<resource> chooses which resources may use the bag. */
+static bool BankMayUseBag(const Connection *c, ResourceType type)
+{
+	if (!c->bank.use_bag_rss)
+		return false;
+
+	switch (type) {
+		case RESOURCE_FOOD: return c->bank.use_bag_food;
+		case RESOURCE_ROCK: return c->bank.use_bag_rock;
+		case RESOURCE_WOOD: return c->bank.use_bag_wood;
+		case RESOURCE_ORE:  return c->bank.use_bag_ore;
+		case RESOURCE_GOLD: return c->bank.use_bag_gold;
+	}
+
+	return false;
+}
+
+/* ------------------------------------------------------------------------
+ * Commands
+ * ------------------------------------------------------------------------ */
+
+static const struct {
+	const char   *name;
+	ResourceType  type;
+} RESOURCE_COMMANDS[] = {
+	{ "food",  RESOURCE_FOOD },
+	{ "stone", RESOURCE_ROCK },
+	{ "wood",  RESOURCE_WOOD },
+	{ "ore",   RESOURCE_ORE  },
+	{ "gold",  RESOURCE_GOLD }
+};
+
+/* True when `message` is exactly the command `name` or starts with it followed by a space. args = the rest, without leading spaces. */
+static bool IsCommand(const char *message, const char *name, const char **args)
+{
+	size_t length = strlen(name);
+
+	if (strncmp(message, name, length) != 0)
+		return false;
+
+	if (message[length] != '\0' && message[length] != ' ')
+		return false;
+
+	const char *rest = message + length;
+
+	while (*rest == ' ')
+		rest++;
+
+	*args = rest;
+	return true;
+}
+
+static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
+{
+	char text[900];
+	char names[64] = {0};
+	char p = c->bot.command_prefix;
+	const char *first = "";
+	size_t used = 0, count = 0;
+
+	for (size_t i = 0; i < sizeof(RESOURCE_COMMANDS) / sizeof(RESOURCE_COMMANDS[0]); i++) {
+		if (BankAllows(c, player_name, RESOURCE_COMMANDS[i].type)) {
+			used += (size_t)snprintf(names + used, sizeof(names) - used, "%s%s", count ? "|" : "", RESOURCE_COMMANDS[i].name);
+			if (count == 0)
+				first = RESOURCE_COMMANDS[i].name;
+
+			count++;
+		}
+	}
+
+	size_t n = (size_t)snprintf(text, sizeof(text), "Commands (prefix %c):\n", p);
+
+	if (count)
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "%c<%s> <amount> - receive resources, e.g. %c%s 5M\n",
+			p, names, p, first);
+
+	n += (size_t)snprintf(text + n, sizeof(text) - n, "%cstop - cancel your pending transfer\n", p);
+	n += (size_t)snprintf(text + n, sizeof(text) - n, "%chelp - this list", p);
+
+	if (is_admin) {
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cbank bal - bank, bag and total balance", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <player>|remove <player> - manage administrators", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%csu <player> - same as admin add", p);
+	}
+
+	(void)n;
+	BotReply(c, player_name, "Commands", "%s", text);
+}
+
+static void StopTransfer(Connection *c, const char *player_name, bool is_admin)
+{
+	if (c->transfer.state == TRANSFER_IDLE) {
+		BotReply(c, player_name, "Transfer", "No transfer in progress.");
+		return;
+	}
+
+	if (!is_admin && strcmp(c->transfer.target_name, player_name) != 0) {
+		BotReply(c, player_name, "Transfer", "This transfer is not yours.");
+		return;
+	}
+
+	memset(&c->transfer, 0, sizeof(c->transfer));
+	c->transfer.state = TRANSFER_IDLE;
+
+	BotReply(c, player_name, "Transfer Cancelled", "Transfer cancelled. Marches already sent will still arrive.");
+}
+
+void command_handler(Connection *c, const char *player_name, const char *message, CommandChannel source)
+{
 	if (c->bot.command_prefix == 0) return;
-	
+
 	if (message[0] != c->bot.command_prefix) return;
-	
-	message++; // skip prefix 
-	
-	// handle food command 
-	if (memcmp(message, "food", 4) == 0 && (message[4] == '\0' || message[4] == ' '))
-	{
-		// if (c->bank.enabled || strcmp(c->bot.admin_name, player_name) == 0) {
-			ResourceCommandHandler(c, player_name, message + 4, RESOURCE_FOOD, "food");
-		// }
+
+	// command.input: only the listed channels are read
+	if (!(c->bot.command_input_mask & (1u << source))) return;
+
+	message++; // skip prefix
+
+	const char *args;
+	bool is_admin = IsAdmin(c, player_name);
+
+	if (IsCommand(message, "help", &args)) {
+		ShowHelp(c, player_name, is_admin);
 		return;
 	}
-	
-	// handle stone command
-	if (memcmp(message, "stone", 5) == 0 && (message[5] == '\0' || message[5] == ' '))
-	{
-		ResourceCommandHandler(c, player_name, message + 5, RESOURCE_ROCK, "stone");
+
+	if (IsCommand(message, "stop", &args)) {
+		StopTransfer(c, player_name, is_admin);
 		return;
 	}
-	
-	// handle wood command
-	if (memcmp(message, "wood", 4) == 0 && (message[4] == '\0' || message[4] == ' '))
-	{
-		ResourceCommandHandler(c, player_name, message + 4, RESOURCE_WOOD, "wood");
-		return;
+
+	for (size_t i = 0; i < sizeof(RESOURCE_COMMANDS) / sizeof(RESOURCE_COMMANDS[0]); i++) {
+		if (IsCommand(message, RESOURCE_COMMANDS[i].name, &args)) {
+			ResourceCommandHandler(c, player_name, args, RESOURCE_COMMANDS[i].type, RESOURCE_COMMANDS[i].name);
+			return;
+		}
 	}
-	
-	// handle ore command
-	if (memcmp(message, "ore", 3) == 0 && (message[3] == '\0' || message[3] == ' '))
-	{
-		ResourceCommandHandler(c, player_name, message + 3, RESOURCE_ORE, "ore");
-		return;
-	}
-	
-	// handle gold command
-	if (memcmp(message, "gold", 4) == 0 && (message[4] == '\0' || message[4] == ' '))
-	{
-		ResourceCommandHandler(c, player_name, message + 4, RESOURCE_GOLD, "gold");
-		return;
-	}
-	
-	
-	if (memcmp(message, "bank bal", 8) == 0 && (message[8] == '\0' || message[8] == ' '))
-	{
+
+	if (IsCommand(message, "bank", &args) && strncmp(args, "bal", 3) == 0 && (args[3] == '\0' || args[3] == ' ')) {
 		ShowBankBalance(c, player_name);
 		return;
 	}
-	
-	if (memcmp(message, "su", 2) == 0)
-	{
-		if (message[2] == '\0') {
-			RequestSendMailFmt(
-				c,
-				player_name,
-				"Sudo access",
-				"Usage: %csu %s",
-				c->bot.command_prefix,
-				c->transfer.target_name
-			);
-			return;
-		}
-		
-		if (message[2] == ' ') {
-			SuperUserAccess(c, player_name, message + 3);
-			return;
-		}
-		
+
+	if (IsCommand(message, "admin", &args)) {
+		AdminCommand(c, player_name, is_admin, args);
 		return;
 	}
-	
+
+	if (IsCommand(message, "su", &args)) {
+		if (*args == '\0') {
+			BotReply(c, player_name, "Administrators", "Usage: %csu <player>", c->bot.command_prefix);
+			return;
+		}
+
+		// kept for compatibility: same as "admin add"
+		char add[64];
+
+		snprintf(add, sizeof(add), "add %s", args);
+		AdminCommand(c, player_name, is_admin, add);
+		return;
+	}
 }
 
 uint64_t parse_number_u64(const char *str) {
@@ -203,7 +505,7 @@ static void ResourceCommandHandler(
 			// Continue below and assign the new request 
 		} else {
 			// Different player -> reject
-			RequestSendMailFmt(
+			BotReply(
 				c,
 				player_name,
 				"Transfer Busy",
@@ -252,27 +554,44 @@ static void ResourceCommandHandler(
 			break;
 	}
 	
-	if (current <= reserve || amount > (current - reserve)) {
-		char curr_amount_str[20];
+	uint32_t available = current > reserve ? current - reserve : 0;
+	time_t not_before = 0;
+	
+	if (amount > available) {
+		// bank.use_bag_*: cover the difference with resource items from the bag
+		BagUse plan[BAG_PLAN_MAX];
+		int used = BankMayUseBag(c, type) ? BagPlan(c, type, amount - available, plan) : -1;
 		
-		format_number2(current > reserve ? current - reserve : 0, curr_amount_str, sizeof(curr_amount_str));
-		
-		RequestSendMailFmt(
-			c,
-			player_name,
-			"Not Enough Resources",
-			"Only %s %s available.",
-			curr_amount_str,
-			name
-		);
-		return;
+		if (used > 0) {
+			BagApply(c, plan, used);
+			not_before = time(NULL) + 3; // wait for the resources to be credited
+		} else {
+			char available_str[20];
+			uint64_t reachable = available;
+			
+			if (BankMayUseBag(c, type))
+				reachable += BagTotal(c, type);
+			
+			format_number2(reachable, available_str, sizeof(available_str));
+			
+			BotReply(
+				c,
+				player_name,
+				"Not Enough Resources",
+				"Only %s %s available.",
+				available_str,
+				name
+			);
+			return;
+		}
 	}
 	
 	c->transfer.amount = (uint32_t)amount;
 	c->transfer.remaining = (uint32_t)amount;
 	c->transfer.resource_type = type;
+	c->transfer.not_before = not_before;
 	
-	strcpy(c->transfer.target_name, player_name);
+	snprintf(c->transfer.target_name, sizeof(c->transfer.target_name), "%s", player_name);
 	
 	c->transfer.state = TRANSFER_FIND_TARGET;
 }
@@ -342,14 +661,14 @@ uint64_t GetBagGold(Connection *c) {
 
 
 void ShowBankBalance(Connection *c, const char *player_name) {
-	if (strcmp(c->bot.admin_name, player_name) != 0) {
+	if (!IsAdmin(c, player_name)) {
 		// Return message if necessary 
-		RequestSendMail(c, player_name, "Unauthorize", "You don't have permission to see bank balance!.");
+		BotReply(c, player_name, "Unauthorize", "You don't have permission to see bank balance!.");
 		return;
 	}
 	
 	if (!c->items_loaded) {
-		RequestSendMail(c, player_name, "Problem encounter", "Something went wrong please try again later.");
+		BotReply(c, player_name, "Problem encounter", "Something went wrong please try again later.");
 		return;
 	}
 	
@@ -400,7 +719,7 @@ void ShowBankBalance(Connection *c, const char *player_name) {
 	format_number2(c->resources.ore  + BagOre,   sum_ore,  sizeof(sum_ore));
 	format_number2(c->resources.gold + BagGold,  sum_gold, sizeof(sum_gold));
 	
-	RequestSendMailFmt(c, player_name, "Bank Balance", 
+	BotReply(c, player_name, "Bank Balance", 
 		"[BNK] Food: %s | Stone: %s | Wood: %s | Ore: %s | Gold: %s\n"
 		"[BAG] Food: %s | Stone: %s | Wood: %s | Ore: %s | Gold: %s\n"
 		"[SUM] Food: %s | Stone: %s | Wood: %s | Ore: %s | Gold: %s",

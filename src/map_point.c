@@ -86,3 +86,22 @@ PointCode getPointCodeByMapPos(uint16_t x, uint16_t y) {
 	MapIDToPointCode(PositionToMapId(x, y), &DesPoint.zoneID, &DesPoint.pointID);
 	return DesPoint;
 }
+
+uint64_t MapDistanceSq(map_pos_t a, map_pos_t b)
+{
+	int64_t dx = (int64_t)a.x - (int64_t)b.x;
+	int64_t dy = (int64_t)a.y - (int64_t)b.y;
+	
+	return (uint64_t)(dx * dx + dy * dy);
+}
+
+uint32_t MapDistance(map_pos_t a, map_pos_t b)
+{
+	uint64_t squared = MapDistanceSq(a, b);
+	uint32_t root = 0;
+	
+	while ((uint64_t)root * root < squared)
+		root++;
+	
+	return root;
+}

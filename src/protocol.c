@@ -1103,27 +1103,30 @@ void RecvChatMessage(Connection *c, const uint8_t *data) {
 	uint16_t offset = 0;
 	
 	memset(c->chat.player_name, 0,   13);
-	memset(c->chat.message,     0, 4096);
+	memset(c->chat.message,     0, sizeof(c->chat.message));
 	
 	
-	printf("RecvChatMessage\n");
+	LOGD("RecvChatMessage\n");
 	
 	uint8_t b2 = read_u8(data + offset);
 	offset += 1;
 	
-	printf("b2: %u\n", b2);
+	LOGD("b2: %u\n", b2);
+	
+	// channel of this message: 0 = world, 1 = alliance
+	c->chat.channel = b2;
 	
 	if (c->app.version_major != 0) {
 		uint8_t num3 = read_u8(data + offset);
 		offset += 1;
 		
-		printf("num3: %u\n", num3);
+		LOGD("num3: %u\n", num3);
 	}
 	
 	if (b2 == 0 || b2 == 1) {
 		uint16_t num4 = read_u16(data + offset);
 		offset += 2;
-		printf("num4: %u\n", num4);
+		LOGD("num4: %u\n", num4);
 		
 		for (uint16_t i = 0; i < num4; i++) {
 			// talkTime
@@ -1181,9 +1184,12 @@ void RecvChatMessage(Connection *c, const uint8_t *data) {
 				printf("message_emoji_key: %u\n", message_emoji_key);
 				printf("message_num10: %u\n", message_num10);
 			} else if (num8 == 0) {
-				read_bytes(c->chat.message, data + offset, num9);
+				// never copy more than the buffer holds
+				uint16_t copy = num9 < sizeof(c->chat.message) ? num9 : (uint16_t)(sizeof(c->chat.message) - 1);
+				
+				read_bytes(c->chat.message, data + offset, copy);
 				offset += num9;
-				c->chat.message[num9] = '\0';
+				c->chat.message[copy] = '\0';
 				// memcpy(res.player_name, player_name, 13);
 				//p.read_bytes(message, num9);
 			}
@@ -1669,6 +1675,12 @@ void BlackMarketTick(Connection *c)
 	if (!c->market.loaded)
 		return;
 	
+	/* bag items were used for a trade: evaluate again once they are credited */
+	if (c->market_bag_wait != 0 && time(NULL) >= c->market_bag_wait) {
+		c->market_bag_wait = 0;
+		EvaluateBlackMarket(c);
+	}
+	
 	if (c->server_time >= c->market.refresh_time + 5) {
 		printf("[MARKET] Refresh expired, requesting new data\n");
 		RequestMissionInfo(c, 0);
@@ -1820,6 +1832,43 @@ bool CanSpendResource(Connection *c, ResourceType type)
 	return false;
 }
 
+/* cargo_ship.use_bag_rss: use bag items to cover what a trade lacks. Returns true when items were used. */
+static bool TopUpFromBag(Connection *c, const MarketItem *item)
+{
+	ResourceType type = (ResourceType)item->resource_kind;
+	
+	if (!c->market.settings.use_bag_rss)
+		return false;
+	
+	uint64_t have    = GetResourceAmount(c, type);
+	uint64_t reserve = 0;
+	
+	switch (type) {
+		case RESOURCE_FOOD: reserve = c->market.reserve.food; break;
+		case RESOURCE_ROCK: reserve = c->market.reserve.rock; break;
+		case RESOURCE_WOOD: reserve = c->market.reserve.wood; break;
+		case RESOURCE_ORE:  reserve = c->market.reserve.ore;  break;
+		case RESOURCE_GOLD: reserve = c->market.reserve.gold; break;
+	}
+	
+	uint64_t required = reserve + item->resource_count;
+	
+	if (have >= required)
+		return false;
+	
+	BagUse plan[BAG_PLAN_MAX];
+	int used = BagPlan(c, type, required - have, plan);
+	
+	if (used <= 0)
+		return false;
+	
+	LOGI("[MARKET] Using %d kind(s) of %s items from the bag to cover a trade\n", used, GetResourceName(type));
+	BagApply(c, plan, used);
+	c->market_bag_wait = time(NULL) + 3;
+	
+	return true;
+}
+
 void EvaluateBlackMarket(Connection *c)
 {
 	if (!c->market.settings.auto_trade)
@@ -1829,6 +1878,9 @@ void EvaluateBlackMarket(Connection *c)
 		return;
 	
 	if (c->market.buy_pending)
+		return;
+	
+	if (c->market_bag_wait != 0)
 		return;
 		
 	for (int i = 0; i < 4; i++) 
@@ -1851,6 +1903,11 @@ void EvaluateBlackMarket(Connection *c)
 			);
 			
 			continue;
+		}
+		
+		if (!CanAffordMarketItem(c, item) && TopUpFromBag(c, item)) {
+			// items were used, wait for the resources to be credited
+			break;
 		}
 		
 		if (!CanAffordMarketItem(c, item)) {
@@ -2276,6 +2333,21 @@ void RecvAllyPoint(Connection *c, const uint8_t *data)
 			);
 			
 			if (c->transfer.state == TRANSFER_WAIT_TARGET) {
+				// bank.max_delivery_distance: 0 = no limit
+				if (c->bank.max_delivery_distance != 0) {
+					map_pos_t self = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
+					uint64_t limit = c->bank.max_delivery_distance;
+					
+					if (MapDistanceSq(self, pos) > limit * limit) {
+						BotReply(c, c->transfer.target_name, "Too Far",
+							"Your castle is %u tiles away, the delivery limit is %u tiles.",
+							MapDistance(self, pos), c->bank.max_delivery_distance);
+						
+						c->transfer.state = TRANSFER_FAILED;
+						break;
+					}
+				}
+				
 				c->transfer.zone_id  = zone_id;
 				c->transfer.point_id = point_id;
 				c->transfer.state = TRANSFER_SEND_MARCH;
@@ -4233,6 +4305,10 @@ void ResourceTransferTick(Connection *c)
 	
 	switch (c->transfer.state) {
 		case TRANSFER_FIND_TARGET:
+			/* bag items were just used: wait until the resources are credited */
+			if (time(NULL) < c->transfer.not_before)
+				break;
+			
 			/* Find player's location */
 			RequestAllyPoint(c, c->transfer.target_name);
 			c->transfer.timeout = time(NULL) + 10;   // wait up to 10 seconds
@@ -4441,3 +4517,166 @@ void RecvAllianceMemberInfo(Connection *c, const uint8_t *data) {
 	}
 	
 }
+
+
+/* ------------------------------------------------------------------------
+ * Resource items in the bag (used by the bank and the cargo ship)
+ * ------------------------------------------------------------------------ */
+
+typedef struct {
+	uint16_t item_id;
+	uint32_t value;
+} ResourceItem;
+
+/* Every table is sorted from the biggest item to the smallest one. */
+static const ResourceItem FOOD_ITEMS[]  = { {FOOD_60M, 60000000}, {FOOD_20M, 20000000}, {FOOD_6M, 6000000}, {FOOD_2M, 2000000}, {FOOD_500K, 500000}, {FOOD_150K, 150000}, {FOOD_30K, 30000}, {FOOD_5K, 5000} };
+static const ResourceItem STONE_ITEMS[] = { {STONE_15M, 15000000}, {STONE_5M, 5000000}, {STONE_1_5M, 1500000}, {STONE_500K, 500000}, {STONE_150K, 150000}, {STONE_50K, 50000}, {STONE_10K, 10000}, {STONE_3K, 3000} };
+static const ResourceItem WOOD_ITEMS[]  = { {TIMBER_15M, 15000000}, {TIMBER_5M, 5000000}, {TIMBER_1_5M, 1500000}, {TIMBER_500K, 500000}, {TIMBER_150K, 150000}, {TIMBER_50K, 50000}, {TIMBER_10K, 10000}, {TIMBER_3K, 3000} };
+static const ResourceItem ORE_ITEMS[]   = { {ORE_15M, 15000000}, {ORE_5M, 5000000}, {ORE_1_5M, 1500000}, {ORE_500K, 500000}, {ORE_150K, 150000}, {ORE_50K, 50000}, {ORE_10K, 10000}, {ORE_3K, 3000} };
+static const ResourceItem GOLD_ITEMS[]  = { {GOLD_6M, 6000000}, {GOLD_2M, 2000000}, {GOLD_600K, 600000}, {GOLD_200K, 200000}, {GOLD_50K, 50000}, {GOLD_15K, 15000}, {GOLD_3K, 3000} };
+
+static const ResourceItem *ResourceItemsFor(ResourceType type, int *count)
+{
+	switch (type) {
+		case RESOURCE_FOOD: *count = (int)(sizeof(FOOD_ITEMS) / sizeof(FOOD_ITEMS[0]));   return FOOD_ITEMS;
+		case RESOURCE_ROCK: *count = (int)(sizeof(STONE_ITEMS) / sizeof(STONE_ITEMS[0])); return STONE_ITEMS;
+		case RESOURCE_WOOD: *count = (int)(sizeof(WOOD_ITEMS) / sizeof(WOOD_ITEMS[0]));   return WOOD_ITEMS;
+		case RESOURCE_ORE:  *count = (int)(sizeof(ORE_ITEMS) / sizeof(ORE_ITEMS[0]));     return ORE_ITEMS;
+		case RESOURCE_GOLD: *count = (int)(sizeof(GOLD_ITEMS) / sizeof(GOLD_ITEMS[0]));   return GOLD_ITEMS;
+	}
+
+	*count = 0;
+	return NULL;
+}
+
+/* Total value of the resource items of this type in the bag. */
+uint64_t BagTotal(const Connection *c, ResourceType type)
+{
+	int count;
+	const ResourceItem *items = ResourceItemsFor(type, &count);
+	uint64_t total = 0;
+
+	for (int i = 0; i < count; i++)
+		total += (uint64_t)c->items[items[i].item_id].quantity * items[i].value;
+
+	return total;
+}
+
+/*
+ * One candidate plan: use the biggest items that fit, but only among the first `cut`
+ * items of the table, then cover what is left with the smallest single item that is
+ * big enough. With cut == count it may also fall back on using more big items.
+ */
+static bool BagPlanWithCut(const Connection *c, const ResourceItem *items, int count, uint64_t need, int cut,
+                           uint32_t used[16], uint64_t *gained)
+{
+	uint64_t remaining = need;
+
+	memset(used, 0, 16 * sizeof(used[0]));
+
+	for (int i = 0; i < cut && remaining > 0; i++) {
+		uint64_t stock = c->items[items[i].item_id].quantity;
+		uint64_t take  = remaining / items[i].value;
+
+		if (take > stock)
+			take = stock;
+
+		used[i] += (uint32_t)take;
+		remaining -= take * items[i].value;
+	}
+
+	if (remaining > 0) {
+		for (int i = count - 1; i >= 0; i--) {
+			if (c->items[items[i].item_id].quantity > used[i] && items[i].value >= remaining) {
+				used[i]++;
+				remaining = 0;
+				break;
+			}
+		}
+	}
+
+	if (remaining > 0 && cut == count) {
+		for (int i = 0; i < count && remaining > 0; i++) {
+			while (c->items[items[i].item_id].quantity > used[i] && remaining > 0) {
+				used[i]++;
+				remaining = remaining > items[i].value ? remaining - items[i].value : 0;
+			}
+		}
+	}
+
+	if (remaining > 0)
+		return false;
+
+	*gained = 0;
+
+	for (int i = 0; i < count; i++)
+		*gained += (uint64_t)used[i] * items[i].value;
+
+	return true;
+}
+
+/*
+ * Chooses which bag items to use to gain at least `need` of a resource, wasting as
+ * little as possible (and, for the same waste, using as few items as possible).
+ *
+ * Returns the number of entries written to `out`, 0 when nothing is needed, or -1
+ * when the bag does not hold enough (nothing must be used in that case).
+ */
+int BagPlan(const Connection *c, ResourceType type, uint64_t need, BagUse out[BAG_PLAN_MAX])
+{
+	int count;
+	const ResourceItem *items = ResourceItemsFor(type, &count);
+	uint32_t best[16] = {0};
+	uint64_t best_gain = 0, best_pieces = 0;
+	bool found = false;
+
+	if (need == 0)
+		return 0;
+
+	if (items == NULL || BagTotal(c, type) < need)
+		return -1;
+
+	for (int cut = 0; cut <= count; cut++) {
+		uint32_t used[16];
+		uint64_t gained, pieces = 0;
+
+		if (!BagPlanWithCut(c, items, count, need, cut, used, &gained))
+			continue;
+
+		for (int i = 0; i < count; i++)
+			pieces += used[i];
+
+		if (!found || gained < best_gain || (gained == best_gain && pieces < best_pieces)) {
+			memcpy(best, used, sizeof(best));
+			best_gain = gained;
+			best_pieces = pieces;
+			found = true;
+		}
+	}
+
+	if (!found)
+		return -1; /* cannot happen since the total was checked */
+
+	int written = 0;
+
+	for (int i = 0; i < count && written < BAG_PLAN_MAX; i++) {
+		if (best[i] > 0) {
+			out[written].item_id  = items[i].item_id;
+			out[written].quantity = (uint16_t)best[i];
+			written++;
+		}
+	}
+
+	return written;
+}
+
+/* Uses the planned items. The server sends back the real quantities and the new resources. */
+void BagApply(Connection *c, const BagUse *plan, int count)
+{
+	for (int i = 0; i < count; i++) {
+		RequestSimpleUseItem(c, plan[i].item_id, plan[i].quantity);
+
+		if (c->items[plan[i].item_id].quantity >= plan[i].quantity)
+			c->items[plan[i].item_id].quantity -= plan[i].quantity;
+	}
+}
