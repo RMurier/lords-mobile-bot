@@ -245,6 +245,19 @@ details li { margin: 6px 0; }
 .cmd-example .code pre { padding-right: 76px; }
 .channels { display: flex; gap: 18px; flex-wrap: wrap; }
 code { font-family: var(--mono); background: var(--surface-2); padding: 1px 6px; border-radius: 5px; }
+#ctrl-chip, #ctrl-btns { display: contents; }
+.acc-row { display: flex; align-items: center; gap: 2px; }
+.acc-row .acc { flex: 1; min-width: 0; }
+.acc-edit { opacity: 0; }
+.acc-row:hover .acc-edit, .acc-edit:focus-visible { opacity: 1; }
+@media (hover: none) { .acc-edit { opacity: .6; } }
+.rename { margin-bottom: 4px; }
+.rename input { max-width: 320px; }
+.chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.chip-btn { border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 2px 12px; cursor: pointer; font-weight: 600; }
+.chip-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+.rec { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--danger); animation: pulse 1.2s ease-in-out infinite; vertical-align: 0; }
+@keyframes pulse { 50% { opacity: .25; } }
 .radio { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
 .radio input { width: auto; min-height: 0; }
 .mono { font-family: var(--mono); font-size: 13px; }

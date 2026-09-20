@@ -26,6 +26,7 @@
     logTimer: null,
     importResult: null,
     importing: false,
+    nav: 0,              // bumped on every navigation, so a late answer cannot pull you back
   };
 
   // ------------------------------------------------------------------ api
@@ -55,13 +56,26 @@
     const el = document.createElement("div");
     el.className = "toast " + kind;
     el.textContent = message;
-    $("#toasts").appendChild(el);
+    const list = $("#toasts");
+    list.appendChild(el);
+    while (list.children.length > 3) list.firstChild.remove(); // never let notifications cover the page
     setTimeout(() => el.remove(), kind === "err" ? 7000 : 3500);
   }
 
   // -------------------------------------------------------------- helpers
 
   const accountById = (id) => S.accounts.find((a) => a.id === id);
+
+  // Areas refreshed by polling are only rewritten when their content really changed: replacing a
+  // button between the mouse press and release would swallow the click.
+  const slots = {};
+  const slot = (id, html) => { slots[id] = html; return html; };   // remember what a template just rendered
+  function setSlot(id, html) {
+    if (slots[id] === html) return;
+    slots[id] = html;
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = html;
+  }
 
   function displayName(account) {
     if (account.alias) return account.alias;
@@ -160,14 +174,14 @@
       const kind = statusKind(a.status);
       const current = S.view === "account" && S.id === a.id;
       const sub = a.igg_id ? `IGG ${a.igg_id}` : (a.has_key ? a.id : "identifiants manquants");
-      return `<button class="acc" data-act="open-account" data-id="${esc(a.id)}" ${current ? 'aria-current="true"' : ""}>
+      return `<div class="acc-row"><button class="acc" data-act="open-account" data-id="${esc(a.id)}" ${current ? 'aria-current="true"' : ""}>
         <span class="dot ${kind}" title="${esc(statusText(a.status))}"></span>
         <span class="txt"><div class="name">${esc(displayName(a))}</div><div class="sub">${esc(sub)}</div></span>
-      </button>`;
+      </button><button class="iconbtn acc-edit" data-act="rename-account" data-id="${esc(a.id)}" title="Renommer" aria-label="Renommer ${esc(displayName(a))}">✎</button></div>`;
     }).join("");
     const running = S.accounts.filter((a) => a.status.state === "running").length;
     const multi = S.accounts.length > 1;
-    $("#sidebar").innerHTML = `
+    const sidebarHtml = `
       <div class="side-title">Comptes</div>
       ${items || '<p class="help" style="padding:0 8px">Aucun compte pour l\'instant.</p>'}
       <div class="side-actions"><button class="btn wide" data-act="add-view">＋ Ajouter un compte</button></div>
@@ -175,10 +189,13 @@
         <button class="btn wide" data-act="start-all">Tout démarrer</button>
         <button class="btn wide" data-act="stop-all" ${running ? "" : "disabled"}>Tout arrêter</button>
       </div>` : ""}`;
+    setSlot("sidebar", sidebarHtml);
   }
 
   function renderMain() {
     stopLogs();
+    clearInterval(S.capTimer);
+    clearTimeout(S.capPoll);
     const main = $("#main");
     if (S.view === "account" && S.acc) {
       main.innerHTML = accountView();
@@ -186,6 +203,11 @@
       if (S.tab === "logs") startLogs();
     } else if (S.view === "add") {
       main.innerHTML = addView();
+      S.capTimer = setInterval(() => {
+        const clock = $("#cap-timer");
+        if (clock && S.capture && S.capture.since) clock.textContent = fmtClock(Date.now() / 1000 - S.capture.since);
+      }, 1000);
+      pollCapture();
     } else if (S.view === "settings") {
       main.innerHTML = settingsView();
     } else if (S.view === "help") {
@@ -227,24 +249,27 @@
     return `
       <div class="head">
         <div class="title">
-          <h1>${esc(displayName(summary))} <button class="iconbtn" data-act="alias" title="Renommer" aria-label="Renommer le compte">✎</button></h1>
+          <h1 id="acc-title">${esc(displayName(summary))} <button class="iconbtn" data-act="rename" title="Renommer le compte" aria-label="Renommer le compte">✎</button></h1>
           <div class="subtitle mono">accounts/${esc(a.id)}.cfg</div>
         </div>
-        <div class="actions" id="ctrl">${ctrlHtml()}</div>
+        <div class="actions" id="ctrl"><span id="ctrl-chip">${slot("ctrl-chip", chipHtml())}</span><span id="ctrl-btns">${slot("ctrl-btns", btnsHtml())}</span></div>
       </div>
-      <div id="notes">${notesHtml()}</div>
+      <div id="notes">${slot("notes", notesHtml())}</div>
       <div class="tabs" role="tablist">${tabs}${logsTab}</div>
       ${S.tab === "logs" ? logsView() : categoryView(category)}`;
   }
 
-  function ctrlHtml() {
+  function chipHtml() {
     const status = S.acc.status;
     const kind = statusKind(status);
-    const chip = `<span class="chip ${kind}"><span class="dot ${kind}"></span>${esc(statusText(status))}</span>`;
-    if (status.state === "running") {
-      return `${chip}<button class="btn" data-act="restart">Redémarrer</button><button class="btn danger" data-act="stop">Arrêter</button>`;
+    return `<span class="chip ${kind}"><span class="dot ${kind}"></span>${esc(statusText(status))}</span>`;
+  }
+
+  function btnsHtml() {
+    if (S.acc.status.state === "running") {
+      return `<button class="btn" data-act="restart">Redémarrer</button><button class="btn danger" data-act="stop">Arrêter</button>`;
     }
-    return `${chip}<button class="btn ok" data-act="start">Démarrer</button>`;
+    return `<button class="btn ok" data-act="start">Démarrer</button>`;
   }
 
   function notesHtml() {
@@ -421,25 +446,73 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     return `<div class="code"><pre>${esc(text)}</pre><button class="btn small" data-act="copy" data-text="${esc(text)}">Copier</button></div>`;
   }
 
-  function addView() {
-    const results = (S.importResult || []).map((r) => `<div class="result">
+  function resultsHtml() {
+    if (!S.importResult) return "";
+    return `<section class="card"><h2>Comptes importés</h2>${S.importResult.map((r) => `<div class="result">
       <div class="grow"><strong>Compte ${esc(r.id)}</strong> <span class="badge">${r.created ? "créé" : "mis à jour"}</span>
         <div class="help">Client ${esc(r.version)}${r.gateway ? " · passerelle " + esc(r.gateway) : ""} · clé de ${r.key_length} caractères</div></div>
-      <button class="btn small" data-act="open-account" data-id="${esc(r.id)}">Ouvrir</button></div>`).join("");
+      <button class="btn small" data-act="open-account" data-id="${esc(r.id)}">Ouvrir</button></div>`).join("")}
+      <p class="help">Donnez-leur un nom (Bank, Filler…) avec le crayon ✎ à côté du nom du compte.</p></section>`;
+  }
+
+  const fmtClock = (seconds) => {
+    seconds = Math.max(0, Math.round(seconds));
+    return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  };
+
+  function captureCard() {
+    const c = S.capture || { state: "idle", available: false };
+    let body;
+    if (!c.available) {
+      body = `<p class="help">La capture automatique n'est disponible que sous Windows. Faites la capture avec Wireshark
+        (ou tcpdump), puis importez le fichier avec la carte « Importer une capture réseau » ci-dessous.</p>`;
+    } else if (c.state === "starting") {
+      body = `<p><span class="spin"></span> En attente de l'autorisation Windows… Acceptez la fenêtre
+        « Contrôle de compte d'utilisateur » : elle porte le nom <strong>Windows PowerShell</strong> (c'est lui qui lance la capture)
+        et peut se cacher derrière d'autres fenêtres.</p>
+        <button class="btn" data-act="capture-cancel">Annuler</button>`;
+    } else if (c.state === "recording") {
+      body = `<p><span class="rec"></span> <strong>Capture en cours</strong> · <span id="cap-timer">${fmtClock(Date.now() / 1000 - c.since)}</span></p>
+        <p class="help">Lancez maintenant le jeu et connectez-vous au compte. Pour ajouter plusieurs comptes : déconnectez-vous
+        dans le jeu, puis connectez-vous au suivant. Quand vous avez fini, cliquez sur <strong>Terminer</strong>.</p>
+        <div class="inline"><button class="btn primary" data-act="capture-stop">Terminer et importer</button>
+        <button class="btn" data-act="capture-cancel">Annuler</button></div>`;
+    } else if (c.state === "processing") {
+      body = `<p><span class="spin"></span> Arrêt de la capture et analyse…</p>`;
+    } else {
+      body = `${c.state === "error" && c.message ? `<div class="notice err"><p>${esc(c.message)}</p></div>` : ""}
+        <p class="help">Recommandé. La console lance la capture réseau pour vous, vous vous connectez à vos comptes dans le jeu,
+        puis elle importe tout et supprime la capture.</p>
+        <ol><li>Fermez le jeu.</li>
+          <li>Cliquez sur <strong>Démarrer</strong> : Windows demande l'autorisation administrateur.</li>
+          <li>Lancez le jeu et connectez-vous au compte (pour plusieurs comptes, déconnectez-vous dans le jeu puis connectez-vous au suivant).</li>
+          <li>Cliquez sur <strong>Terminer et importer</strong>.</li></ol>
+        <label class="inline"><input type="checkbox" id="cap-all" style="width:auto;min-height:0">
+          Capturer tout le trafic TCP (plus lourd ; à essayer si aucun login n'est trouvé)</label>
+        <p class="help">Par défaut seul le trafic vers le port 5999 est enregistré. Le fichier reste dans un dossier temporaire privé et est
+        supprimé dès l'import ; la console ne garde que les comptes.</p>
+        <button class="btn primary" data-act="capture-start">Démarrer la capture</button>`;
+    }
+    return `<section class="card" id="capture-card"><h2>Capturer depuis cet ordinateur</h2>${body}</section>`;
+  }
+
+  function addView() {
     const copyOptions = S.accounts.map((a) => `<option value="${esc(a.id)}">${esc(displayName(a))}</option>`).join("");
     return `
       <div class="head"><div class="title"><h1>Ajouter un compte</h1>
         <div class="subtitle">Chaque compte a son fichier de configuration, son bot et son journal.</div></div></div>
+      ${resultsHtml()}
+      ${captureCard()}
       <div class="two">
         <section class="card">
           <h2>Importer une capture réseau</h2>
-          <p class="help">Recommandé. La console retrouve toute seule le compte, la clé d'accès, la version du client et la passerelle.
-            Si le compte existe déjà, seuls ses identifiants sont mis à jour et vos autres réglages sont conservés.</p>
+          <p class="help">Si vous avez déjà un fichier <code>.pcap</code> / <code>.pcapng</code> (Wireshark, autre machine…). La console retrouve toute seule le
+            compte, la clé d'accès, la version du client et la passerelle. Un compte qui existe déjà voit seulement ses identifiants
+            mis à jour ; vos autres réglages sont conservés.</p>
           <label class="drop" id="drop"><input type="file" id="file" accept=".pcap,.pcapng,.cap">
             ${S.importing ? '<span class="spin"></span><strong>Analyse de la capture…</strong>'
               : "<strong>Choisir la capture</strong><span>ou déposer le fichier ici (.pcap, .pcapng)</span>"}</label>
-          ${results}
-          <details ${S.accounts.length ? "" : "open"}><summary>Comment faire la capture ?</summary>
+          <details><summary>Faire la capture à la main</summary>
             <ol>
               <li>Fermez complètement le jeu.</li>
               <li>${S.os === "windows" ? "Ouvrez PowerShell <strong>en administrateur</strong> et lancez :" : "Démarrez une capture du trafic TCP (Wireshark, tcpdump…), puis lancez le jeu."}
@@ -447,7 +520,6 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
               <li>Démarrez la capture <strong>avant</strong> d'ouvrir le jeu, et arrêtez-la seulement une fois en jeu.</li>
               <li>Importez le fichier ici, puis <strong>supprimez-le</strong> : il contient la clé d'accès du compte.</li>
             </ol>
-            <p class="help">Avec un VPN actif, ça fonctionne aussi. Les captures faites sur le PC ou dans un émulateur sont acceptées.</p>
           </details>
         </section>
         <section class="card">
@@ -455,7 +527,8 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
           <p class="help">Pour saisir les identifiants à la main, ou préparer un compte avant d'importer sa capture.</p>
           <div class="fields">
             <div class="field"><label class="lbl" for="new-name">Nom du compte</label>
-              <input type="text" id="new-name" maxlength="48" placeholder="ex. principal, ferme-1" spellcheck="false"></div>
+              <input type="text" id="new-name" maxlength="40" placeholder="ex. Bank, Filler, Farm" spellcheck="false">
+              <p class="help">C'est le nom affiché dans la console. Vous pourrez le changer à tout moment.</p></div>
             ${S.accounts.length ? `<div class="field"><label class="lbl" for="new-copy">Copier les réglages de</label>
               <select id="new-copy"><option value="">Réglages par défaut</option>${copyOptions}</select>
               <p class="help">Les identifiants ne sont jamais copiés.</p></div>` : ""}
@@ -533,22 +606,21 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
   function renderSavebar() {
     const bar = $("#savebar");
     const count = S.view === "account" ? dirtyKeys().length : 0;
-    if (!count) { bar.hidden = true; return; }
+    if (!count) { bar.hidden = true; setSlot("savebar", ""); return; }
     const running = S.acc.status.state === "running";
-    bar.innerHTML = `<strong>${count} modification${count > 1 ? "s" : ""} non enregistrée${count > 1 ? "s" : ""}</strong>
+    setSlot("savebar", `<strong>${count} modification${count > 1 ? "s" : ""} non enregistrée${count > 1 ? "s" : ""}</strong>
       <span class="spacer"></span>
       <button class="btn" data-act="discard">Annuler</button>
       <button class="btn ${running ? "" : "primary"}" data-act="save">Enregistrer</button>
-      ${running ? '<button class="btn primary" data-act="save-restart">Enregistrer et redémarrer</button>' : ""}`;
+      ${running ? '<button class="btn primary" data-act="save-restart">Enregistrer et redémarrer</button>' : ""}`);
     bar.hidden = false;
   }
 
   function refreshControls() {
     if (S.view !== "account" || !S.acc) return;
-    const ctrl = $("#ctrl");
-    if (ctrl) ctrl.innerHTML = ctrlHtml();
-    const notes = $("#notes");
-    if (notes) notes.innerHTML = notesHtml();
+    setSlot("ctrl-chip", chipHtml());
+    setSlot("ctrl-btns", btnsHtml());
+    setSlot("notes", notesHtml());
     renderSavebar();
   }
 
@@ -623,8 +695,10 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
 
   async function openAccount(id, tab) {
     if (!confirmDiscard()) return;
+    const ticket = ++S.nav;
     try {
       const payload = await api("GET", `/api/accounts/${enc(id)}`);
+      if (ticket !== S.nav) return;   // you went somewhere else while it loaded
       S.view = "account";
       S.id = id;
       S.acc = payload;
@@ -641,12 +715,14 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
 
   function showView(view) {
     if (!confirmDiscard()) return;
+    S.nav++;
     S.view = view;
     S.acc = view === "account" ? S.acc : null;
     S.form = {};
     S.errors = {};
     if (view === "add") S.importResult = null;
     render();
+    if (view === "add") loadCapture();
   }
 
   async function save(restart) {
@@ -742,6 +818,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
   }
 
   async function createEmpty() {
+    S.nav++;
     const name = $("#new-name").value;
     const copy = $("#new-copy") ? $("#new-copy").value : "";
     try {
@@ -798,20 +875,27 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     save: () => save(false),
     "save-restart": () => save(true),
     discard: () => { S.form = initialForm(S.acc); S.errors = {}; renderMain(); },
-    alias: async () => {
-      const summary = accountById(S.id);
-      const alias = prompt("Nom affiché pour ce compte (vide pour revenir au nom par défaut) :", (summary && summary.alias) || "");
-      if (alias === null) return;
-      try { await api("PUT", `/api/accounts/${enc(S.id)}/alias`, { alias }); await refreshState(); render(); }
-      catch (error) { toast(error.message, "err"); }
+    rename: () => startRename(),
+    "rename-account": async (el) => {
+      if (S.view === "account" && S.id === el.dataset.id) { startRename(); return; }
+      await openAccount(el.dataset.id, "account");
+      if (S.view === "account" && S.id === el.dataset.id) startRename();
     },
+    "rename-save": () => saveRename(),
+    "rename-cancel": () => cancelRename(),
+    "rename-chip": (el) => { const input = $("#rename-input"); if (input) { input.value = el.dataset.name; input.focus(); } },
+    "capture-start": () => captureStart(),
+    "capture-stop": () => captureStop(),
+    "capture-cancel": () => captureCancel(),
     "delete-account": async () => {
       if (!confirm(`Supprimer définitivement le compte « ${S.id} » et ses identifiants ?`)) return;
+      const ticket = ++S.nav;   // we are leaving this account: anything slower than the user must not navigate for them
       try {
         await api("DELETE", `/api/accounts/${enc(S.id)}`);
         toast("Compte supprimé");
-        S.acc = null; S.form = {}; S.view = "welcome";
+        if (ticket === S.nav) { S.acc = null; S.form = {}; S.view = "welcome"; }
         await refreshState();
+        if (ticket !== S.nav) { renderSidebar(); return; }   // the user already went somewhere else
         if (S.accounts.length) await openAccount(S.accounts[0].id, "account"); else render();
       } catch (error) { toast(error.message, "err"); }
     },
@@ -911,6 +995,114 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     });
   }
 
+  // ---------------------------------------------------------------- rename
+
+  const NAME_SUGGESTIONS = ["Bank", "Filler", "Farm", "Main"];
+
+  function startRename() {
+    const title = $("#acc-title");
+    if (!title || $("#rename-box")) return;
+    const summary = accountById(S.id) || {};
+    const box = document.createElement("div");
+    box.id = "rename-box";
+    box.className = "rename";
+    box.innerHTML = `<div class="inline">
+        <input type="text" id="rename-input" maxlength="40" value="${esc(summary.alias || "")}" placeholder="${esc(summary.igg_id ? "Compte " + summary.igg_id : S.id)}" aria-label="Nom du compte" spellcheck="false">
+        <button class="btn primary small" data-act="rename-save">Enregistrer</button>
+        <button class="btn small" data-act="rename-cancel">Annuler</button></div>
+      <div class="chips"><span class="help">Suggestions :</span>${NAME_SUGGESTIONS.map((n) =>
+        `<button class="chip-btn" data-act="rename-chip" data-name="${n}">${n}</button>`).join("")}
+        <span class="help">ou tapez ce que vous voulez. Vide = nom par défaut.</span></div>`;
+    title.hidden = true;
+    title.after(box);
+    const input = $("#rename-input");
+    input.focus();
+    input.select();
+  }
+
+  function cancelRename() {
+    const box = $("#rename-box");
+    if (box) box.remove();
+    const title = $("#acc-title");
+    if (title) title.hidden = false;
+  }
+
+  async function saveRename() {
+    const input = $("#rename-input");
+    if (!input) return;
+    try {
+      await api("PUT", `/api/accounts/${enc(S.id)}/alias`, { alias: input.value });
+      await refreshState();
+      render();
+      toast("Compte renommé", "ok");
+    } catch (error) {
+      toast(error.message, "err");
+    }
+  }
+
+  // --------------------------------------------------------------- capture
+
+  async function loadCapture() {
+    try { S.capture = await api("GET", "/api/capture"); } catch (error) {
+      if (error.status === 401) return authProblem();
+    }
+    refreshCaptureCard();
+    pollCapture();
+  }
+
+  function refreshCaptureCard() {
+    const card = $("#capture-card");
+    if (card) card.outerHTML = captureCard();
+  }
+
+  function pollCapture() {
+    clearTimeout(S.capPoll);
+    if (S.view !== "add" || !S.capture || !["starting", "recording"].includes(S.capture.state)) return;
+    S.capPoll = setTimeout(async () => {
+      try {
+        const next = await api("GET", "/api/capture");
+        const changed = next.state !== S.capture.state;
+        S.capture = next;
+        if (changed) refreshCaptureCard();
+      } catch (_) { /* try again on the next tick */ }
+      pollCapture();
+    }, 1000);
+  }
+
+  async function captureStart() {
+    const all = $("#cap-all") && $("#cap-all").checked;
+    try {
+      S.capture = { ...(await api("POST", "/api/capture/start", { all_tcp: !!all })), available: true };
+    } catch (error) {
+      S.capture = { state: "error", available: S.capture ? S.capture.available : true, message: error.message };
+    }
+    refreshCaptureCard();
+    pollCapture();
+  }
+
+  async function captureStop() {
+    S.capture = { ...S.capture, state: "processing" };
+    refreshCaptureCard();
+    try {
+      const result = await api("POST", "/api/capture/stop");
+      S.importResult = result.accounts;
+      S.capture = { state: "idle", available: true };
+      toast(`${result.accounts.length} compte(s) importé(s)`, "ok");
+      await refreshState();
+    } catch (error) {
+      S.capture = { state: "error", available: true, message: error.message };
+      toast(error.message, "err");
+    }
+    renderSidebar();
+    if (S.view === "add") renderMain();
+  }
+
+  async function captureCancel() {
+    try { await api("POST", "/api/capture/cancel"); } catch (_) { /* nothing to cancel */ }
+    S.capture = { state: "idle", available: true };
+    refreshCaptureCard();
+  }
+
   // ------------------------------------------------------------------ boot
 
   function initToken() {
@@ -939,6 +1131,12 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && S.view === "account" && dirtyKeys().length) {
         event.preventDefault();
         save(false);
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.target && event.target.id === "rename-input") {
+        if (event.key === "Enter") { event.preventDefault(); saveRename(); }
+        if (event.key === "Escape") { event.preventDefault(); cancelRename(); }
       }
     });
     window.addEventListener("beforeunload", (event) => { if (dirtyKeys().length) { event.preventDefault(); event.returnValue = ""; } });

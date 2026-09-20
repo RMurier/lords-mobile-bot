@@ -24,6 +24,12 @@ extractor reads it from the capture and writes a ready-to-use config file:
 | Platform (`1` mobile, `9` official PC client) | `client.platform` |
 | Gateway address and port | `server.addr`, `server.port` |
 
+## Fastest way: from the web console (Windows)
+
+Open the console, **Add an account**, **Capture from this computer**. It runs everything below for
+you (including the Windows administrator prompt), lets you log in to one or several accounts in the
+game, then imports them and deletes the capture. The rest of this page describes the manual way.
+
 ## 1. Capture the game starting
 
 The capture must **start before you open the game** and **stop once you are in game**,

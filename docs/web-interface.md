@@ -21,16 +21,24 @@ Each account is a file `accounts/<name>.cfg` with its own bot process and its ow
 their status; **Start all** starts them one by one with a delay (Settings) so they do not
 all connect at the same instant.
 
-**Add an account** offers two ways:
+**Add an account** offers three ways:
 
+- **Capture from this computer** (Windows): the console runs the network capture for you.
+  Close the game, click **Start**, accept the Windows administrator prompt, start the game and log
+  in to the account (for several accounts: log out in the game, then log in to the next one), then
+  click **Finish and import**. The console stops the capture, creates or refreshes the accounts and
+  deletes the capture. See below for what it does with your system.
 - **Import a network capture**: drop the `.pcap` / `.pcapng` file. The console extracts
   the accounts, keys, client version, platform and gateway by itself. An account that
   already exists only gets its credentials refreshed. See [credentials.md](credentials.md).
 - **Create an empty account**: optionally copy the settings (never the credentials) of
   another account, then fill in the credentials by hand.
 
-You can rename an account (a display name only), and delete it (which deletes its config
-file).
+**Naming accounts.** Click the pencil next to an account's name (or in the account list) and type
+what you want, for example `Bank` or `Filler`, or pick a suggestion. It is a display name only:
+it appears in the list, the header and the notifications, and an empty name goes back to the
+default. The name you type when you create an empty account is used the same way. The file
+`accounts/<id>.cfg` keeps its name. Deleting an account deletes its config file.
 
 ## Settings by category
 
@@ -50,6 +58,24 @@ Account, Connection, Reconnection, Commands, Bank, Protection, Cargo, Alliance, 
   when you save. **Command channels** are check boxes: the bot only reads the ticked ones.
 - **Reconnection** has two delays: after a dropped connection, and after you log in yourself
   (`reconnect.kicked_delay`, the time you get to play; 0 = the bot stops instead of reconnecting).
+
+## What the automatic capture does
+
+- It needs administrator rights for `pktmon`, the packet capture tool built into Windows. A helper
+  is started with the usual Windows prompt (UAC); it starts a capture limited to TCP port 5999, waits
+  for you, then stops it, converts it and removes the capture filter it created.
+- The helper receives its instructions on its command line rather than from a file, calls `pktmon`
+  by absolute path, and works in a private temporary folder that it refuses to use if it is a link.
+- Only the gateway traffic (port 5999) is recorded. If no login is found, tick *Capture all TCP
+  traffic* and try again: that records everything TCP the computer does during the capture, so keep
+  it short and do nothing else in the meantime.
+- The capture holds session keys, so it is deleted as soon as it has been imported (or cancelled).
+  Ctrl+C on the console also cancels a running capture.
+- `pktmon` allows one capture at a time: if you already started one yourself, stop it first
+  (`pktmon stop`). Filters are also global: the helper removes all `pktmon` filters when it starts
+  and when it ends.
+- On Linux and macOS the card explains that it is not available: use Wireshark or tcpdump and import
+  the file.
 
 ## Commands page
 

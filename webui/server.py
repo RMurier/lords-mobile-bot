@@ -14,6 +14,7 @@ means adding config files.
 """
 
 import argparse
+import base64
 import json
 import mimetypes
 import os
@@ -559,7 +560,13 @@ def api_account_delete(h, query, account_id):
 def api_account_create(h, query):
     body = h.read_json()
     copy_from = body.get("copy_from") or None
-    account_id = create_account(str(body.get("name") or ""), copy_from)
+    name = str(body.get("name") or "").strip()
+    account_id = create_account(name, copy_from)
+    if name and name != account_id:
+        # the typed name is the display name; the file name is a safe version of it
+        aliases = dict(settings.get("aliases"))
+        aliases[account_id] = name[:40]
+        settings.update(aliases=aliases)
     return account_payload(account_id)
 
 
@@ -637,6 +644,229 @@ def api_settings(h, query):
     return api_state(h, {})["settings"]
 
 
+# --------------------------------------------------------------------------
+# Capture the game's login from this computer (Windows, pktmon)
+# --------------------------------------------------------------------------
+#
+# A helper started with administrator rights runs pktmon: it starts the capture, waits for a
+# "stop" file, stops, converts to pcapng and writes done.json. The console talks to it only through
+# files in a private temporary directory:
+#
+#   started    the capture is running          stop / cancel   asked by the console
+#   done.json  {"status": "ok" | "error" | "cancelled", "message": "..."}
+#
+# Because the helper is elevated, its code is passed on its command line (-EncodedCommand), never as a
+# file someone else could edit between the launch and the elevation, it calls pktmon by absolute
+# path and it refuses a working directory that is a link. It only ever reads whether "stop" and
+# "cancel" exist. The capture holds the whole game login, so it is deleted as soon as it is imported.
+
+CAPTURE_START_TIMEOUT = 90     # seconds to accept the Windows administrator prompt
+CAPTURE_STOP_TIMEOUT = 120     # seconds to stop, convert and read the capture
+CAPTURE_MAX_MINUTES = 30       # the helper stops by itself after this
+
+POWERSHELL_HELPER = r"""
+$ErrorActionPreference = 'Stop'
+$dir  = '@DIR@'
+$etl  = Join-Path $dir 'capture.etl'
+$pcap = Join-Path $dir 'capture.pcapng'
+$pkt  = Join-Path $env:SystemRoot 'System32\pktmon.exe'
+function Done($status, $message) {
+  $text = '{"status":"' + $status + '","message":"' + ($message -replace '["\\\r\n]', ' ') + '"}'
+  Set-Content -LiteralPath (Join-Path $dir 'done.json') -Value $text -Encoding ASCII
+}
+try {
+  if ((Get-Item -LiteralPath $dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'unsafe directory' }
+  $filterArgs = @(@FILTER@)
+  & $pkt filter remove | Out-Null
+  & $pkt filter add LordsBot @filterArgs | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'pktmon filter add failed' }
+  & $pkt start --capture --pkt-size 0 -f $etl | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'pktmon start failed (is another capture already running? try: pktmon stop)' }
+  Set-Content -LiteralPath (Join-Path $dir 'started') -Value '1'
+  $deadline = (Get-Date).AddMinutes(@MINUTES@)
+  while (-not (Test-Path -LiteralPath (Join-Path $dir 'stop')) -and -not (Test-Path -LiteralPath (Join-Path $dir 'cancel')) -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 500
+  }
+  & $pkt stop | Out-Null
+  & $pkt filter remove | Out-Null
+  if (Test-Path -LiteralPath (Join-Path $dir 'cancel')) { Done 'cancelled' ''; exit 0 }
+  & $pkt etl2pcap $etl -o $pcap | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'pktmon etl2pcap failed' }
+  Done 'ok' ''
+} catch {
+  try { & $pkt stop | Out-Null; & $pkt filter remove | Out-Null } catch {}
+  Done 'error' $_.Exception.Message
+}
+"""
+
+
+def powershell_helper_script(directory, port=None):
+    """The elevated helper. `port` limits the capture to that TCP port, None captures all TCP."""
+    quote = lambda text: str(text).replace("'", "''")
+    filter_args = "'-t','TCP'" + (f",'-p','{int(port)}'" if port else "")
+    return (POWERSHELL_HELPER.replace("@DIR@", quote(directory)).replace("@FILTER@", filter_args)
+            .replace("@MINUTES@", str(CAPTURE_MAX_MINUTES)))
+
+
+def encode_powershell(script):
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
+class Capture:
+    """At most one capture at a time. Everything happens in a private directory, deleted afterwards."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.dir = None
+        self.proc = None
+        self.started_at = 0.0
+        self.finishing = False
+        self.error = ""
+
+    def _file(self, name):
+        return os.path.join(self.dir, name)
+
+    def _read_done(self):
+        try:
+            with open(self._file("done.json"), encoding="ascii", errors="replace") as f:
+                return json.loads(f.read())
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _cleanup(self):
+        if self.dir:
+            shutil.rmtree(self.dir, ignore_errors=True)
+        self.dir = None
+        self.proc = None
+        self.finishing = False
+
+    def available(self):
+        return IS_WINDOWS or bool(os.environ.get("LMBOT_CAPTURE_HELPER"))
+
+    def start(self, all_tcp=False, port=5999):
+        if not self.available():
+            raise ApiError(501, "La capture automatique n'est disponible que sous Windows (elle utilise pktmon). "
+                                "Faites la capture avec Wireshark ou tcpdump puis importez le fichier.")
+        with self.lock:
+            if self.dir:
+                raise ApiError(409, "Une capture est déjà en cours.")
+            self.error = ""
+            directory = tempfile.mkdtemp(prefix="lmbot-capture-")
+            self.dir = directory
+            self.started_at = time.time()
+            self.finishing = False
+            capture_port = None if all_tcp else port
+            helper = os.environ.get("LMBOT_CAPTURE_HELPER")  # test hook: a script following the same file protocol
+            try:
+                if helper:
+                    command = [sys.executable, helper, directory, str(capture_port or 0)]
+                    flags = 0
+                else:
+                    script = encode_powershell(powershell_helper_script(directory, capture_port))
+                    shell = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell",
+                                         "v1.0", "powershell.exe")
+                    launcher = ("Start-Process -FilePath '{}' -Verb RunAs -WindowStyle Hidden -ArgumentList "
+                                "'-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','{}'").format(
+                                    shell.replace("'", "''"), script)
+                    command = [shell, "-NoProfile", "-NonInteractive", "-Command", launcher]
+                    flags = subprocess.CREATE_NO_WINDOW
+                self.proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL, creationflags=flags)
+            except OSError as e:
+                self._cleanup()
+                raise ApiError(500, f"Impossible de lancer la capture : {e}")
+        return self.status()
+
+    def status(self):
+        with self.lock:
+            if not self.dir:
+                return {"state": "error", "message": self.error} if self.error else {"state": "idle"}
+            if self.finishing:
+                return {"state": "processing", "since": self.started_at}
+            done = self._read_done()
+            if done and done.get("status") in ("error", "cancelled"):
+                self.error = done.get("message") or "La capture a échoué." if done["status"] == "error" else ""
+                self._cleanup()
+                return {"state": "error", "message": self.error} if self.error else {"state": "idle"}
+            if os.path.exists(self._file("started")):
+                return {"state": "recording", "since": self.started_at}
+            elapsed = time.time() - self.started_at
+            if self.proc is not None and self.proc.poll() not in (None, 0):
+                self.error = ("L'autorisation administrateur a été refusée ou n'a pas pu être demandée. "
+                              "La capture réseau en a besoin.")
+                self._cleanup()
+                return {"state": "error", "message": self.error}
+            if elapsed > CAPTURE_START_TIMEOUT:
+                open(self._file("cancel"), "w").close()
+                self.error = "Windows n'a pas confirmé l'autorisation administrateur à temps. Recommencez."
+                self._cleanup()
+                return {"state": "error", "message": self.error}
+            return {"state": "starting", "since": self.started_at}
+
+    def stop(self):
+        with self.lock:
+            if not self.dir or self.finishing or not os.path.exists(self._file("started")):
+                raise ApiError(409, "Aucune capture en cours.")
+            self.finishing = True
+            open(self._file("stop"), "w").close()
+        deadline = time.time() + CAPTURE_STOP_TIMEOUT
+        done = None
+        while time.time() < deadline:
+            done = self._read_done()
+            if done:
+                break
+            time.sleep(0.3)
+        try:
+            if not done:
+                raise ApiError(504, "L'arrêt de la capture a pris trop de temps.")
+            if done.get("status") != "ok":
+                raise ApiError(500, done.get("message") or "La capture a échoué.")
+            return import_capture(self._file("capture.pcapng"))
+        finally:
+            with self.lock:
+                self._cleanup()
+
+    def cancel(self):
+        with self.lock:
+            if not self.dir:
+                self.error = ""
+                return
+            try:
+                open(self._file("cancel"), "w").close()
+            except OSError:
+                pass
+            # give the helper a moment to stop pktmon before its directory disappears
+            deadline = time.time() + 15
+            while time.time() < deadline and not self._read_done():
+                time.sleep(0.2)
+            self._cleanup()
+            self.error = ""
+
+
+capture = Capture()
+
+
+@route("GET", "/api/capture")
+def api_capture_status(h, query):
+    return {**capture.status(), "available": capture.available()}
+
+
+@route("POST", "/api/capture/start")
+def api_capture_start(h, query):
+    body = h.read_json()
+    return capture.start(all_tcp=bool(body.get("all_tcp")))
+
+
+@route("POST", "/api/capture/stop")
+def api_capture_stop(h, query):
+    return {"accounts": capture.stop()}
+
+
+@route("POST", "/api/capture/cancel")
+def api_capture_cancel(h, query):
+    capture.cancel()
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -671,6 +901,7 @@ def main():
     except KeyboardInterrupt:
         print("\nStopping bots...")
     finally:
+        capture.cancel()
         bots.stop_all()
         server.server_close()
 

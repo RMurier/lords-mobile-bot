@@ -102,7 +102,10 @@ this automatically.
 The bot logs in with your IGG ID and a session key. Extract them from a network capture
 of **your own device** while the official game starts, instead of copying them by hand.
 
-Windows, official PC client, nothing to install (PowerShell as administrator):
+**Easiest, on Windows:** start the web console (below), choose *Add an account*, then *Capture from
+this computer*: it runs the capture for you, you log in to your accounts in the game, and it imports them.
+
+By hand, Windows, official PC client, nothing to install (PowerShell as administrator):
 
 ```powershell
 pktmon start --capture --pkt-size 0 -f capture.etl
