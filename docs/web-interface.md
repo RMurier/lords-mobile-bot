@@ -45,8 +45,17 @@ Account, Connection, Reconnection, Commands, Bank, Protection, Cargo, Alliance, 
   previous version as `<name>.cfg.bak`.
 - Ctrl+S saves. **Save and restart** applies changes to a running bot; otherwise they apply
   at the next start.
-- Options that the bot does not act on yet carry a **not yet active** badge. See
-  [commands.md](commands.md).
+- Every option is applied by the bot. Should one ever not be, it carries a **not yet active** badge.
+- Administrators are one comma separated list; the old single `admin.name` key is merged into it
+  when you save. **Command channels** are check boxes: the bot only reads the ticked ones.
+- **Reconnection** has two delays: after a dropped connection, and after you log in yourself
+  (`reconnect.kicked_delay`, the time you get to play; 0 = the bot stops instead of reconnecting).
+
+## Commands page
+
+The **Commands** button (top bar) lists every in-game command with its usage, who may use it,
+examples with copy buttons and the rules that apply (reserve, distance, bag items, channels). The
+prefix shown is the one of the account you opened last. See [commands.md](commands.md).
 
 ## Logs
 

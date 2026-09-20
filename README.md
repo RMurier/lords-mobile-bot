@@ -141,8 +141,8 @@ Close the game on that account first: an account cannot be logged in twice.
 If the connection drops, or you log in elsewhere, the bot reconnects by itself
 (see [reconnection](docs/configuration.md#automatic-reconnection)).
 
-Before you rely on it, set `admin.name` to your in-game name in the config: it is the only
-player allowed to use every command.
+Before you rely on it, set `admin.names` to your in-game name in the config: administrators are
+the only players allowed to use every command, and nobody is one until you set it.
 
 ## Command Line Options
 
@@ -162,11 +162,17 @@ Commands start with the prefix `$` by default and are answered by mail.
 
 | Command | Who | What it does |
 |---|---|---|
-| `$food` / `$stone` / `$wood` / `$ore` / `$gold <amount>` | administrator; others only if the bank allows it | Sends the resource to the player who asked |
-| `$bank bal` | administrator | Mails the bank, bag and total balance |
-| `$su <player>` | administrator | Hands the administrator role over until the next reconnect |
+| `$help` | everybody | Lists the commands the requester may use |
+| `$stop` | requester, or an administrator | Cancels the transfer in progress |
+| `$food` / `$stone` / `$wood` / `$ore` / `$gold <amount>` | administrators; others only if the bank allows it | Sends the resource to the player who asked (`$gold 5M`) |
+| `$bank bal` | administrators | Mails the bank, bag and total balance |
+| `$admin list` / `add <player>` / `remove <player>` | administrators | Manages administrators (added ones are saved) |
+| `$su <player>` | administrators | Same as `$admin add` |
 
-The bank is **off by default**. Details, permissions and security notes: [docs/commands.md](docs/commands.md).
+Commands are read from the channels in `command.input` (alliance chat and mail by default) and
+answered in `command.output` (mail by default). The bank is **off by default**. Every command with
+its usage, the permissions and the security notes: [docs/commands.md](docs/commands.md).
+The web console also lists them (Commands button).
 
 ## Project Structure
 

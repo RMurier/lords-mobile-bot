@@ -88,9 +88,8 @@ client.language_code = 1
 
 ## Data Path
 
-> **Not used by the bot yet.** The option is accepted but nothing reads it.
-
-Directory used to store bot data such as logs, databases, and cache.
+The bot stores the administrators added in game there (`admins.txt`), so they survive a
+reconnection or a restart. The directory is created when needed.
 
 ```cfg
 data.path = ./data/
@@ -98,15 +97,20 @@ data.path = ./data/
 
 ---
 
-## Administrator
+## Administrators
 
-Defines the privileged player.
-
-This player can execute administrator commands and bypass normal restrictions.
+Players who can use every command (see [commands.md](commands.md)). Comma separated, at most
+16 names of at most 12 characters.
 
 ```cfg
-admin.name = Zyco
+admin.names = Alice, Bob
 ```
+
+- Nobody is administrator until you set this. Names are case-sensitive.
+- The old single-name key `admin.name` still works and is merged into the list.
+- An administrator can add or remove others in game with `$admin add <name>` and
+  `$admin remove <name>`. Those are stored in `<data.path>/admins.txt`. Administrators listed
+  in the configuration file can only be removed by editing it.
 
 ---
 
@@ -160,13 +164,15 @@ When the connection drops, or when the account is logged in from another device
 ```cfg
 reconnect.enabled = true
 reconnect.delay = 60
+reconnect.kicked_delay = 60
 reconnect.max_attempts = 0
 ```
 
 | Option | Description |
 |---|---|
 | `reconnect.enabled` | Reconnect automatically (`true` by default) |
-| `reconnect.delay` | Seconds to wait before reconnecting (minimum 10, default 60) |
+| `reconnect.delay` | Seconds to wait before reconnecting after a dropped connection (minimum 10, default 60) |
+| `reconnect.kicked_delay` | Seconds to wait when the account was logged in from another device, i.e. **you started the game** and the bot was disconnected (default 60). `0` = do not reconnect: the bot stops. Otherwise minimum 10 |
 | `reconnect.max_attempts` | Consecutive failed attempts before giving up, `0` = never give up |
 
 Notes:
@@ -176,16 +182,16 @@ Notes:
   `account.access_key` is picked up without restarting the bot.
 - If the server **rejects the credentials** (invalid or expired access key, client
   version too old) the bot stops instead of retrying, since retrying cannot succeed.
-- Reconnecting while you are playing on another device logs that device out again.
-  Use a longer `reconnect.delay` if you want time to play.
+- `reconnect.kicked_delay` is the time you get to play: when the bot is disconnected because you
+  logged in, it waits that long before reconnecting, which logs you out again. Set it to about
+  how long you play, or to `0` to make the bot stop and restart it yourself when you are done.
+  It grows with repeated failures like `reconnect.delay`.
 
 ---
 
 ## Command System
 
 > The available commands and who may use them are described in [commands.md](commands.md).
-> `command.input` and `command.output` are accepted but **not applied yet**: the bot reads
-> commands from chat and mail and always answers by mail.
 
 Controls bot command handling.
 
@@ -206,15 +212,17 @@ MAIL
 Example:
 
 ```cfg
-command.input = GUILD
+command.input = GUILD, MAIL
 command.output = MAIL
 ```
 
 | Option | Description |
 |---|---|
 | `command.prefix` | Prefix used for bot commands |
-| `command.input` | Channel where commands are received |
-| `command.output` | Channel where responses are sent |
+| `command.input` | Channels where commands are read, one or several separated by commas (default `GUILD, MAIL`). A command written elsewhere is ignored |
+| `command.output` | Channel where the bot answers (default `MAIL`). In chat, the answer is one line addressed to the player (`@name ...`) |
+
+`WORLD` is public chat: only tick it if you want everybody there to be able to reach the bot.
 
 ---
 
@@ -222,8 +230,7 @@ command.output = MAIL
 
 > The bank is **off by default**. When enabled, any player who can write to the bot can ask
 > for the resources whose `bank.send_*` flag is on, up to the reserve; the administrator can
-> always use it. `bank.max_delivery_distance` and `bank.use_bag_*` are accepted but **not
-> applied yet**. See [commands.md](commands.md).
+> always use it. See [commands.md](commands.md).
 
 The banking system handles resource transfer commands.
 
@@ -263,7 +270,8 @@ bank.reserve_gold = 0
 
 ### Delivery Distance
 
-Maximum map distance for resource delivery.
+Maximum distance, in tiles (straight line), between the bot and the player asking for resources.
+Farther players are refused and told the distance. `0` = no limit.
 
 ```cfg
 bank.max_delivery_distance = 100
@@ -271,7 +279,13 @@ bank.max_delivery_distance = 100
 
 ### Use Resource Items
 
-Allows using resource items from the bag if required.
+When a command asks for more than is available above the reserve, the bot uses resource items from
+the bag to cover the difference (wasting as little as possible), waits for them to be credited,
+then delivers. If the bag cannot cover it either, nothing is used and the player is told how much
+is available.
+
+`bank.use_bag_rss` is the master switch; the per-resource options choose which resources may use
+the bag.
 
 ```cfg
 bank.use_bag_rss = false

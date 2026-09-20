@@ -14,6 +14,8 @@ Field types:
     select   one value out of `options`
     size     number with an optional K / M / B suffix (20M = 20 000 000)
     shields  ordered subset of SHIELDS
+    names    comma separated in-game player names
+    channels one or several of CHANNELS, comma separated
 """
 
 import re
@@ -104,7 +106,14 @@ CATEGORIES = [
                   "Le bot se reconnecte tout seul après une coupure.", default=True),
             {"key": "reconnect.delay", "label": "Délai avant reconnexion", "type": "int", "min": 10,
              "max": 86400, "default": "60", "unit": "secondes", "depends": "reconnect.enabled",
-             "help": "Minimum 10 s. Le délai double après des échecs répétés, jusqu'à 8 fois sa valeur."},
+             "help": "Délai après une coupure de connexion. Minimum 10 s ; il double après des échecs répétés, "
+                     "jusqu'à 8 fois sa valeur."},
+            {"key": "reconnect.kicked_delay", "label": "Délai après une connexion sur un autre appareil", "type": "int",
+             "min": 0, "max": 86400, "default": "60", "unit": "secondes", "depends": "reconnect.enabled",
+             "zero_or_min": 10,
+             "help": "Quand vous vous connectez au compte (le bot est alors déconnecté), le bot attend ce délai avant de "
+                     "se reconnecter : réglez-le à la durée pendant laquelle vous jouez. 0 = ne pas se reconnecter, le "
+                     "bot s'arrête. Sinon 10 secondes minimum."},
             {"key": "reconnect.max_attempts", "label": "Échecs consécutifs avant abandon", "type": "int",
              "min": 0, "max": 1000, "default": "0", "depends": "reconnect.enabled",
              "help": "0 = ne jamais abandonner. Un login refusé (clé invalide ou expirée) arrête toujours le bot."},
@@ -113,18 +122,22 @@ CATEGORIES = [
     {
         "id": "commands",
         "label": "Commandes",
-        "description": "Le bot obéit à des commandes écrites en jeu. Le pseudo administrateur peut tout faire ; sans pseudo configuré, personne ne peut prendre ce rôle. Les commandes sont acceptées depuis le chat et le courrier.",
+        "description": "Le bot obéit à des commandes écrites en jeu (liste complète : bouton Commandes en haut). Les administrateurs peuvent tout faire ; sans administrateur, personne n'a ces droits. Le bot ne lit que les canaux cochés.",
         "fields": [
-            {"key": "admin.name", "label": "Pseudo administrateur", "type": "text", "minlen": 1, "maxlen": 12,
-             "default": "", "warn_if": "halloweeks",
-             "warn": "C'est le pseudo de l'auteur du projet : il aurait les droits administrateur sur votre bot.",
-             "help": "Pseudo en jeu autorisé à commander le bot (12 caractères maximum)."},
+            {"key": "admin.names", "label": "Administrateurs", "type": "names", "default": "", "optional": True,
+             "warn_if": "halloweeks",
+             "warn": "halloweeks est le pseudo de l'auteur du projet : il aurait les droits administrateur sur votre bot.",
+             "help": "Pseudos en jeu autorisés à utiliser toutes les commandes, séparés par des virgules (16 au plus, "
+                     "12 caractères chacun). Un administrateur peut aussi en ajouter en jeu avec la commande admin ; "
+                     "ceux-là sont enregistrés dans le dossier de données."},
             {"key": "command.prefix", "label": "Préfixe des commandes", "type": "text", "minlen": 1,
              "maxlen": 1, "default": "$", "help": "Un seul caractère, par exemple $."},
-            {"key": "command.input", "label": "Canal de réception", "type": "select", "default": "GUILD",
-             "options": CHANNELS, "help": "Où le bot lit vos commandes."},
+            {"key": "command.input", "label": "Canaux de réception", "type": "channels", "default": "GUILD, MAIL",
+             "options": CHANNELS, "help": "Où le bot lit les commandes. Un canal non coché est ignoré. Le chat du monde "
+                                           "est public : ne le cochez que si vous le voulez."},
             {"key": "command.output", "label": "Canal de réponse", "type": "select", "default": "MAIL",
-             "options": CHANNELS, "help": "Où le bot envoie ses réponses."},
+             "options": CHANNELS, "help": "Où le bot répond. Le courrier est privé ; en chat, la réponse est adressée "
+                                           "au joueur (@pseudo) sur une seule ligne."},
         ],
     },
     {
@@ -138,10 +151,14 @@ CATEGORIES = [
             + _resource_sizes("bank.reserve_", {"food": "20M", "rock": "50M", "wood": "50M", "ore": "30M"},
                               "bank.enabled")
             + [{"key": "bank.max_delivery_distance", "label": "Distance maximale de livraison", "type": "int",
-                "min": 0, "max": 100000, "default": "100", "unit": "cases", "depends": "bank.enabled"},
+                "min": 0, "max": 100000, "default": "100", "unit": "cases", "depends": "bank.enabled",
+                "help": "Le bot refuse de livrer à un joueur plus loin que cette distance (en cases, à vol d'oiseau) "
+                        "et le lui dit. 0 = pas de limite."},
                _bool("bank.use_bag_rss", "Utiliser les objets de ressources du sac",
-                     "Si les ressources manquent, utiliser les objets du sac.", depends="bank.enabled")]
-            + _resource_flags("bank.use_bag_", "Sac", "bank.enabled")
+                     "Si les ressources manquent pour une commande, le bot utilise les objets du sac (en gaspillant le "
+                     "moins possible) puis livre. Choisissez ci-dessous les ressources concernées.",
+                     depends="bank.enabled")]
+            + _resource_flags("bank.use_bag_", "Sac", "bank.use_bag_rss")
         ),
     },
     {
@@ -177,7 +194,8 @@ CATEGORIES = [
             [_bool("cargo_ship.auto_trade", "Échanges automatiques", "Interrupteur général.")]
             + _resource_flags("cargo_ship.spend_", "Dépenser", "cargo_ship.auto_trade")
             + [_bool("cargo_ship.use_bag_rss", "Utiliser les objets de ressources du sac",
-                     "Sinon, le bot ne consomme jamais d'objets du sac.", depends="cargo_ship.auto_trade")]
+                     "Si un échange manque de ressources (réserve comprise), le bot utilise les objets du sac pour le "
+                     "compléter. Sinon il ne consomme jamais d'objets du sac.", depends="cargo_ship.auto_trade")]
             + _resource_sizes("cargo_ship.reserve_", {n: "10M" for n, _ in RESOURCES}, "cargo_ship.auto_trade")
         ),
     },
@@ -196,7 +214,7 @@ CATEGORIES = [
         "description": "Dossier de données et diagnostic.",
         "fields": [
             {"key": "data.path", "label": "Dossier de données", "type": "text", "maxlen": 255, "default": "./data/",
-             "help": "Base de données et cache du bot. Un dossier par compte."},
+             "help": "Le bot y enregistre les administrateurs ajoutés en jeu (admins.txt). Un dossier par compte."},
             _bool("log.debug", "Mode debug",
                   "Affiche chaque paquet reçu. Les journaux peuvent alors contenir des données de session : "
                   "ne les partagez pas."),
@@ -222,28 +240,48 @@ for _category in CATEGORIES:
                 _field["group"] = _name
                 break
 
-# Settings the bot parses but does not act on yet. The interface says so instead of promising a behaviour
-# that does not exist. Checked against the bot's source: nothing reads these values.
-_NOT_YET = "Pas encore pris en compte par le bot."
-INACTIVE = {
-    "bank.max_delivery_distance": _NOT_YET,
-    "bank.use_bag_rss": _NOT_YET,
-    "bank.use_bag_food": _NOT_YET,
-    "bank.use_bag_rock": _NOT_YET,
-    "bank.use_bag_wood": _NOT_YET,
-    "bank.use_bag_ore": _NOT_YET,
-    "bank.use_bag_gold": _NOT_YET,
-    "cargo_ship.use_bag_rss": _NOT_YET,
-    "command.input": "Pas encore pris en compte : le bot lit toutes les commandes reçues (chat et courrier).",
-    "command.output": "Pas encore pris en compte : le bot répond toujours par courrier.",
-    "data.path": "Pas encore utilisé par le bot.",
-}
+# Settings the bot parses but does not act on yet. The interface flags them instead of promising a behaviour that
+# does not exist. Checked against the bot's source; currently every setting is applied.
+INACTIVE = {}
 for _category in CATEGORIES:
     for _field in _category["fields"]:
         if _field["key"] in INACTIVE:
             _field["inactive"] = INACTIVE[_field["key"]]
 
 FIELDS = {f["key"]: f for c in CATEGORIES for f in c["fields"]}
+
+
+# In-game commands, for the reference page of the console. `usage` is written without the prefix.
+COMMANDS = [
+    {"group": "Pour tous", "name": "help", "usage": "help", "who": "Tout le monde",
+     "summary": "Le bot répond avec la liste des commandes que vous avez le droit d'utiliser, avec leur usage.",
+     "example": "help"},
+    {"group": "Pour tous", "name": "stop", "usage": "stop", "who": "Le joueur qui a demandé la livraison, ou un administrateur",
+     "summary": "Annule la livraison de ressources en cours. Les marches déjà parties arrivent quand même.",
+     "example": "stop"},
+    {"group": "Banque", "name": "resources", "usage": "<food|stone|wood|ore|gold> <montant>",
+     "who": "Les administrateurs ; les autres seulement si la banque est activée et la ressource autorisée",
+     "summary": "Le bot envoie la ressource au joueur qui écrit la commande. Le montant accepte K, M et B.",
+     "details": ["Le bot ne descend jamais sous la réserve de la ressource.",
+                 "Un joueur plus loin que la distance maximale de livraison est refusé, avec la distance indiquée.",
+                 "Si la ressource manque, le bot peut compléter avec les objets du sac (si activé), sinon il répond "
+                 "ce qui est disponible.",
+                 "Une seule livraison à la fois : un autre joueur reçoit « Transfer Busy » jusqu'à la fin ou à un stop."],
+     "example": "gold 5M"},
+    {"group": "Administration", "name": "bank bal", "usage": "bank bal", "who": "Administrateurs",
+     "summary": "Répond avec le solde de la banque, du sac et le total de chaque ressource.", "example": "bank bal"},
+    {"group": "Administration", "name": "admin list", "usage": "admin list", "who": "Administrateurs",
+     "summary": "Liste les administrateurs, en indiquant ceux qui viennent du fichier de configuration.",
+     "example": "admin list"},
+    {"group": "Administration", "name": "admin add", "usage": "admin add <pseudo>", "who": "Administrateurs",
+     "summary": "Ajoute un administrateur. Il est enregistré dans le dossier de données et survit aux redémarrages.",
+     "example": "admin add Bob"},
+    {"group": "Administration", "name": "admin remove", "usage": "admin remove <pseudo>", "who": "Administrateurs",
+     "summary": "Retire un administrateur ajouté en jeu. Ceux du fichier de configuration se retirent dans la console.",
+     "example": "admin remove Bob"},
+    {"group": "Administration", "name": "su", "usage": "su <pseudo>", "who": "Administrateurs",
+     "summary": "Ancienne commande, équivalente à admin add.", "example": "su Bob"},
+]
 
 _SIZE = re.compile(r"^(\d+(?:\.\d+)?)([kKmMbB]?)$")
 _IPV4 = re.compile(r"^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$")
@@ -290,6 +328,8 @@ def validate(field, raw):
         number = int(text)
         if number < field.get("min", 0) or number > field.get("max", _U32_MAX):
             raise ValueError(f"Doit être entre {field.get('min', 0)} et {field.get('max', _U32_MAX)}.")
+        if field.get("zero_or_min") and 0 < number < field["zero_or_min"]:
+            raise ValueError(f"Doit être 0 ou au moins {field['zero_or_min']}.")
         return str(number)
 
     if kind in ("text", "secret"):
@@ -329,6 +369,31 @@ def validate(field, raw):
             raise ValueError("Maximum 8 boucliers.")
         return ", ".join(names)
 
+    if kind == "names":
+        names = []
+        for part in text.split(","):
+            name = part.strip()
+            if not name:
+                continue
+            if len(name) > 12:
+                raise ValueError(f"« {name} » dépasse 12 caractères.")
+            if not name.isprintable():
+                raise ValueError(f"« {name} » contient des caractères non imprimables.")
+            if name not in names:
+                names.append(name)
+        if len(names) > 16:
+            raise ValueError("16 administrateurs au maximum.")
+        return ", ".join(names)
+
+    if kind == "channels":
+        wanted = {part.strip() for part in text.split(",") if part.strip()}
+        known = [value for value, _ in field["options"]]
+        if not wanted:
+            raise ValueError("Choisissez au moins un canal.")
+        if wanted - set(known):
+            raise ValueError("Canal inconnu.")
+        return ", ".join(value for value in known if value in wanted)
+
     raise ValueError(f"Type inconnu : {kind}")
 
 
@@ -341,4 +406,5 @@ def public_schema():
             for c in CATEGORIES
         ],
         "shields": [list(s) for s in SHIELDS],
+        "commands": COMMANDS,
     }

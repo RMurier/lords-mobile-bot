@@ -235,6 +235,16 @@ details li { margin: 6px 0; }
 .toast.ok { border-left-color: var(--ok); }
 .toast.err { border-left-color: var(--danger); }
 
+.cmd { padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.cmd:last-child { border-bottom: 0; padding-bottom: 0; }
+.cmd-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.cmd .usage { font: 600 14px var(--mono); background: var(--surface-2); padding: 3px 8px; border-radius: 6px; }
+.cmd ul { margin: 6px 0 0; padding-left: 20px; }
+.cmd-example { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.cmd-example .code { margin: 0; flex: 1; min-width: 160px; }
+.cmd-example .code pre { padding-right: 76px; }
+.channels { display: flex; gap: 18px; flex-wrap: wrap; }
+code { font-family: var(--mono); background: var(--surface-2); padding: 1px 6px; border-radius: 5px; }
 .radio { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
 .radio input { width: auto; min-height: 0; }
 .mono { font-family: var(--mono); font-size: 13px; }

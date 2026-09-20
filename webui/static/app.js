@@ -13,7 +13,8 @@
     accounts: [],
     settings: {},
     os: "posix",
-    view: "welcome",     // welcome | account | add | settings
+    view: "welcome",     // welcome | account | add | settings | help
+    prefix: "$",         // command prefix of the last opened account, for the commands page
     id: null,
     tab: "account",
     acc: null,           // last payload of the open account
@@ -92,6 +93,9 @@
       + "(Ajouter un compte → Importer une capture)."],
     [/UPDATE CLIENT VERSION/i,
       "Le jeu a été mis à jour : la version du client est trop ancienne. Réimportez une capture pour récupérer la nouvelle."],
+    [/another device.*not reconnecting/i,
+      "Le bot s'est arrêté volontairement : le compte a été utilisé sur un autre appareil et le délai de reconnexion "
+      + "est réglé à 0. Redémarrez-le quand vous avez fini de jouer."],
     [/LOGGING FROM ANOTHER DEVICE/i, "Le compte s'est connecté depuis un autre appareil."],
     [/Failed to load config/i, "Le fichier de configuration est invalide. Vérifiez les réglages."],
     [/Failed to connect/i, "Serveur injoignable. Vérifiez votre connexion et l'adresse de la passerelle."],
@@ -105,6 +109,13 @@
 
   const fieldId = (key) => "f_" + key.replace(/\./g, "_");
   const splitShields = (value) => String(value || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const splitList = splitShields;
+  const warnActive = (f, value) => !!f.warn_if
+    && (f.type === "names" ? splitList(value).includes(f.warn_if) : value === f.warn_if);
+  const namesHint = (value) => {
+    const n = splitList(value).length;
+    return n ? `${n} administrateur${n > 1 ? "s" : ""}` : "Aucun administrateur : personne n'a les droits complets.";
+  };
 
   function initialForm(payload) {
     const form = { ...payload.values };
@@ -134,6 +145,7 @@
       <header class="topbar">
         <span class="brand">Lords Mobile Bot<small>Console</small></span>
         <span class="spacer"></span>
+        <button class="btn" data-act="help-view">Commandes</button>
         <button class="btn" data-act="settings-view">Paramètres</button>
       </header>
       <div class="layout">
@@ -176,6 +188,8 @@
       main.innerHTML = addView();
     } else if (S.view === "settings") {
       main.innerHTML = settingsView();
+    } else if (S.view === "help") {
+      main.innerHTML = helpView();
     } else {
       main.innerHTML = welcomeView();
     }
@@ -292,7 +306,7 @@
     const help = (f.help ? `<p class="help">${esc(f.help)}</p>` : "")
       + (f.inactive ? `<p class="help">${esc(f.inactive)}</p>` : "");
     const tail = `<p class="error" data-err="${esc(key)}" ${error ? "" : "hidden"}>${esc(error || "")}</p>
-      <p class="warnmsg" data-warn="${esc(key)}" ${f.warn_if && value === f.warn_if ? "" : "hidden"}>${esc(f.warn || "")}</p>`;
+      <p class="warnmsg" data-warn="${esc(key)}" ${warnActive(f, value) ? "" : "hidden"}>${esc(f.warn || "")}</p>`;
     const dep = f.depends ? ` data-depends="${esc(f.depends)}"` : "";
     const invalid = error ? " invalid" : "";
 
@@ -325,6 +339,11 @@
         <span class="hint ${hint.bad ? "bad" : ""}" data-hint="${esc(key)}">${esc(hint.text)}</span>`;
     } else if (f.type === "shields") {
       control = shieldsHtml(f);
+    } else if (f.type === "channels") {
+      control = channelsHtml(f);
+    } else if (f.type === "names") {
+      control = `<input type="text" id="${id}" class="${invalid}" data-key="${esc(key)}" spellcheck="false" placeholder="pseudo1, pseudo2" value="${esc(value)}">
+        <span class="hint" data-names-hint="${esc(key)}">${esc(namesHint(value))}</span>`;
     } else {
       control = `<input type="text" id="${id}" class="${invalid}" data-key="${esc(key)}" spellcheck="false"
         ${f.maxlen ? `maxlength="${f.maxlen}"` : ""} value="${esc(value)}">`;
@@ -344,6 +363,43 @@
     const add = rest.length ? `<select data-shield-add="${esc(key)}" aria-label="Ajouter un bouclier">
       <option value="">Ajouter un bouclier…</option>${rest.map(([name, text]) => `<option value="${esc(name)}">${esc(text)}</option>`).join("")}</select>` : "";
     return `<div class="shields" id="${fieldId(key)}" data-shields="${esc(key)}">${rows}${add}</div>`;
+  }
+
+  function channelsHtml(f) {
+    const current = splitList(S.form[f.key]);
+    return `<div class="channels" id="${fieldId(f.key)}" data-channels="${esc(f.key)}">${f.options.map(([value, label]) =>
+      `<label class="radio"><input type="checkbox" data-channel="${esc(value)}" data-channel-key="${esc(f.key)}" ${current.includes(value) ? "checked" : ""}> ${esc(label)}</label>`).join("")}</div>`;
+  }
+
+  function codeLine(text) {
+    return `<div class="code inline-code"><pre>${esc(text)}</pre><button class="btn small" data-act="copy" data-text="${esc(text)}">Copier</button></div>`;
+  }
+
+  function helpView() {
+    const commands = S.schema.commands || [];
+    const groups = [];
+    commands.forEach((c) => {
+      let group = groups.find((g) => g.name === c.group);
+      if (!group) { group = { name: c.group, items: [] }; groups.push(group); }
+      group.items.push(c);
+    });
+    const p = S.prefix || "$";
+    const cards = groups.map((g) => `<section class="card"><h3>${esc(g.name)}</h3><div class="fields">${g.items.map((c) => `
+      <div class="cmd">
+        <div class="cmd-head"><code class="usage">${esc(p + c.usage)}</code><span class="badge">${esc(c.who)}</span></div>
+        <p class="help">${esc(c.summary)}</p>
+        ${(c.details || []).length ? `<ul class="help">${c.details.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}
+        <div class="cmd-example"><span class="help">Exemple :</span> ${codeLine(p + c.example)}</div>
+      </div>`).join("")}</div></section>`).join("");
+    return `
+      <div class="head"><div class="title"><h1>Commandes en jeu</h1>
+        <div class="subtitle">Ce que le bot comprend, comment l'utiliser et qui peut le faire.</div></div></div>
+      <div class="notice">
+        <p>Écrivez la commande dans un canal accepté par le bot (réglage <strong>Commandes → Canaux de réception</strong>).
+        Le bot répond dans le canal de réponse choisi. Le préfixe actuel est <code>${esc(p)}</code>.</p>
+        <p>En jeu, <code>${esc(p)}help</code> donne la liste adaptée aux droits de la personne qui la demande.</p>
+      </div>
+      ${cards}`;
   }
 
   function logsView() {
@@ -447,10 +503,11 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       el.textContent = hint.text;
       el.classList.toggle("bad", hint.bad);
     });
+    $$("[data-names-hint]").forEach((el) => { el.textContent = namesHint(S.form[el.dataset.namesHint]); });
     S.schema.categories.forEach((c) => c.fields.forEach((f) => {
       if (!f.warn_if) return;
       const el = $(`[data-warn="${f.key}"]`);
-      if (el) el.hidden = S.form[f.key] !== f.warn_if;
+      if (el) el.hidden = !warnActive(f, S.form[f.key]);
     }));
   }
 
@@ -573,6 +630,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       S.acc = payload;
       S.form = initialForm(payload);
       S.errors = {};
+      S.prefix = payload.values["command.prefix"] || "$";
       if (tab) S.tab = tab;
       try { sessionStorage.setItem("lmbot-last", id); } catch (_) { /* optional */ }
       render();
@@ -732,6 +790,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     "open-account": (el) => openAccount(el.dataset.id, S.view === "account" ? undefined : "account"),
     "add-view": () => showView("add"),
     "settings-view": () => showView("settings"),
+    "help-view": () => showView("help"),
     tab: (el) => { S.tab = el.dataset.tab; renderMain(); },
     start: () => control("start"),
     stop: () => control("stop"),
@@ -809,6 +868,17 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       if (!el.value) return;
       const key = el.dataset.shieldAdd;
       setShields(key, [...splitShields(S.form[key]), el.value]);
+      return;
+    }
+    if (el.dataset.channelKey !== undefined) {
+      const channelKey = el.dataset.channelKey;
+      const field = S.schema.categories.flatMap((c) => c.fields).find((f) => f.key === channelKey);
+      const checked = $$(`[data-channel-key="${channelKey}"]`).filter((box) => box.checked).map((box) => box.dataset.channel);
+      if (!checked.length) { el.checked = true; toast("Gardez au moins un canal.", ""); return; }
+      S.form[channelKey] = field.options.map(([value]) => value).filter((value) => checked.includes(value)).join(", ");
+      delete S.errors[channelKey];
+      refreshTabCounts();
+      renderSavebar();
       return;
     }
     const key = el.dataset.key;

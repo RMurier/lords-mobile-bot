@@ -125,6 +125,9 @@ def _chmod_private(path):
         pass  # not supported on every filesystem (e.g. Windows drives mounted in WSL)
 
 
+LEGACY_KEYS = {"admin.name"}  # still read by the bot, merged into admin.names by the interface
+
+
 def extra_keys(text):
     """Active keys of the file that the web interface has no field for."""
-    return {k: v for k, v in read_values(text).items() if k not in FIELDS}
+    return {k: v for k, v in read_values(text).items() if k not in FIELDS and k not in LEGACY_KEYS}

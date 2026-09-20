@@ -124,12 +124,29 @@ def list_account_ids():
     return sorted(p.stem for p in ACCOUNTS_DIR.glob("*.cfg") if ACCOUNT_ID.match(p.stem))
 
 
+def merged_admins(present):
+    """Administrators of a config: the legacy admin.name and admin.names are merged, like the bot does."""
+    names = []
+    for raw in (present.get("admin.name", ""), present.get("admin.names", "")):
+        for part in raw.split(","):
+            part = part.strip()
+            if part and part not in names:
+                names.append(part)
+    return ", ".join(names)
+
+
 def account_payload(account_id):
     text = cf.read_file(account_path(account_id))
     present = cf.read_values(text)
     values, secrets_info, defaults_used = {}, {}, []
     for key, field in schema.FIELDS.items():
-        if field["type"] == "secret":
+        if key == "admin.names":
+            if "admin.name" in present or key in present:
+                values[key] = merged_admins(present)
+            else:
+                values[key] = field["default"]
+                defaults_used.append(key)
+        elif field["type"] == "secret":
             value = present.get(key, "")
             secrets_info[key] = {"set": bool(value), "length": len(value),
                                  "preview": value[:4] + "…" if len(value) > 8 else ""}
@@ -181,6 +198,8 @@ def save_changes(account_id, changes):
             errors[key] = str(e)
     if errors:
         raise ApiError(400, "Certains réglages sont invalides.", errors=errors)
+    if "admin.names" in normalised:
+        normalised["admin.name"] = ""  # the legacy single-admin key is now part of admin.names
     if normalised:
         cf.write_private(path, cf.apply_changes(cf.read_file(path), normalised))
     return account_payload(account_id)
@@ -202,6 +221,9 @@ def create_account(name, copy_from=None):
     if copy_from:
         source = cf.read_values(cf.read_file(account_path(copy_from)))
         values = {k: v for k, v in source.items() if k in schema.FIELDS and not k.startswith("account.")}
+        admins = merged_admins(source)
+        if admins:
+            values["admin.names"] = admins
     values["data.path"] = f"./data/{account_id}/"
     cf.write_private(ACCOUNTS_DIR / f"{account_id}.cfg", cf.render_new(values), keep_backup=False)
     return account_id
