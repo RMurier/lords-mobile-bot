@@ -10,3 +10,4 @@ config.cfg
 data/
 logs/
 __pycache__/
+build/

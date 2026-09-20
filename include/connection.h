@@ -158,6 +158,7 @@ typedef struct {
     uint8_t  version_minor;
     uint16_t version_patch;
     uint8_t  language_code;
+    uint8_t  platform; /* byte sent after the version in the gateway login (1 = mobile, 9 = official PC client) */
 } AppInfo;
 
 typedef struct {

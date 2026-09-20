@@ -2,35 +2,42 @@
 """
 Extract account credentials from a network capture of YOUR OWN device.
 
-The bootstrap login packet (_MSG_NEWLOGIN_LOGINTOL, type 1001) is sent to the
-gateway in clear text. It carries everything the bot needs:
+The login packets sent by the game are in clear text. They carry everything the
+bot needs:
 
-    igg_id, client version, language, device uuid, access key (session)
+    _MSG_NEWLOGIN_LOGINTOL (1043), sent to the gateway:
+        igg_id, client version, language, device uuid (empty on the PC client),
+        access key (session)
+    _MSG_NEWLOGIN_LOGINTOP (1044), sent to the game server:
+        igg_id and the same access key
 
-Capture the game while it logs in (PCAPdroid on Android, or Wireshark on the
-emulator's network interface), then run:
+Capture the game while it starts (Wireshark, or `pktmon` on Windows), then run:
 
-    python3 tools/extract_credentials.py capture.pcap --template config.cfg --out-dir accounts/
+    python3 tools/extract_credentials.py capture.pcapng --template config.cfg --out-dir accounts/
 
 One config file is written per IGG ID found in the capture, ready to use with
-`client accounts/<igg_id>.cfg` or `client --accounts accounts/`.
+`client accounts/<igg_id>.cfg`. The gateway address seen in the capture is
+written as server.addr / server.port.
 
 Only the Python standard library is used. Supports pcap and pcapng, Ethernet /
-raw IP / Linux cooked captures, IPv4 and IPv6.
+raw IP / Linux cooked captures, IPv4 and IPv6. Captures taken through a VPN
+adapter (raw IP frames labelled as Ethernet) are handled.
 
 The output contains live session credentials. Keep it private and never commit
-it (accounts/ and *.pcap are in .gitignore).
+it (accounts/ and *.pcap* are in .gitignore).
 """
 
 import argparse
 import os
 import re
+import socket
 import struct
 import sys
 
 LOGIN_SIZE = 2 + 2 + 8 + 1 + 1 + 2 + 1 + 1 + 50 + 2 + 512  # 582
-LOGIN_TYPE = 1001  # _MSG_NEWLOGIN_LOGINTOL
-LOGIN_HEADER = struct.pack("<HH", LOGIN_SIZE, LOGIN_TYPE)
+LOGIN_GATEWAY = 1043  # _MSG_NEWLOGIN_LOGINTOL
+LOGIN_GAME = 1044     # _MSG_NEWLOGIN_LOGINTOP
+LOGIN_TYPES = (LOGIN_GATEWAY, LOGIN_GAME)
 
 LINKTYPE_NULL = 0
 LINKTYPE_ETHERNET = 1
@@ -105,17 +112,26 @@ def read_capture(path):
 # Frame -> TCP segment
 # --------------------------------------------------------------------------
 
+def looks_like_ip(frame):
+    """True if the bytes start like an IPv4 or IPv6 header (no link layer)."""
+    if len(frame) >= 20 and frame[0] >> 4 == 4 and (frame[0] & 0x0F) >= 5:
+        return True
+    return len(frame) >= 40 and frame[0] >> 4 == 6
+
+
 def strip_link_layer(linktype, frame):
     """Return the IP packet inside a link-layer frame, or None."""
     if linktype == LINKTYPE_ETHERNET:
-        if len(frame) < 14:
-            return None
-        ethertype = struct.unpack(">H", frame[12:14])[0]
-        offset = 14
-        while ethertype in (0x8100, 0x88A8) and len(frame) >= offset + 4:  # VLAN
-            ethertype = struct.unpack(">H", frame[offset + 2:offset + 4])[0]
-            offset += 4
-        return frame[offset:] if ethertype in (0x0800, 0x86DD) else None
+        if len(frame) >= 14:
+            ethertype = struct.unpack(">H", frame[12:14])[0]
+            offset = 14
+            while ethertype in (0x8100, 0x88A8) and len(frame) >= offset + 4:  # VLAN
+                ethertype = struct.unpack(">H", frame[offset + 2:offset + 4])[0]
+                offset += 4
+            if ethertype in (0x0800, 0x86DD):
+                return frame[offset:]
+        # VPN adapters (Wintun/WireGuard...) show up as raw IP labelled Ethernet
+        return frame if looks_like_ip(frame) else None
     if linktype == LINKTYPE_LINUX_SLL:
         return frame[16:] if len(frame) > 16 else None
     if linktype == LINKTYPE_LINUX_SLL2:
@@ -192,50 +208,48 @@ def reassemble(segments):
     return bytes(stream)
 
 
-# --------------------------------------------------------------------------
-# Login packet
-# --------------------------------------------------------------------------
+def ip_to_str(raw):
+    return socket.inet_ntop(socket.AF_INET if len(raw) == 4 else socket.AF_INET6, raw)
 
-def printable(raw):
-    return bytes(raw).split(b"\x00", 1)[0].decode("ascii", errors="strict")
 
+# --------------------------------------------------------------------------
+# Login packets
+# --------------------------------------------------------------------------
 
 def parse_login(stream):
-    """Yield dicts for every login packet found in a TCP byte stream."""
-    pos = 0
-    while True:
-        pos = stream.find(LOGIN_HEADER, pos)
-        if pos < 0:
-            return
-        packet = stream[pos:pos + LOGIN_SIZE]
-        pos += 1
-        if len(packet) < LOGIN_SIZE:
-            continue
+    """Yield (packet_type, dict) for every login packet found in a TCP byte stream."""
+    for ptype in LOGIN_TYPES:
+        header = struct.pack("<HH", LOGIN_SIZE, ptype)
+        pos = 0
+        while True:
+            pos = stream.find(header, pos)
+            if pos < 0:
+                break
+            packet = stream[pos:pos + LOGIN_SIZE]
+            pos += 1
+            if len(packet) < LOGIN_SIZE:
+                continue
 
-        igg_id = struct.unpack("<Q", packet[4:12])[0]
-        minor, major = packet[12], packet[13]
-        patch = struct.unpack("<H", packet[14:16])[0]
-        language = packet[17]
-        session_len = struct.unpack("<H", packet[68:70])[0]
-        if igg_id == 0 or session_len == 0 or session_len > 512:
-            continue
-        try:
-            uuid = printable(packet[18:68])
-            session = packet[70:70 + session_len].decode("ascii", errors="strict")
-        except UnicodeDecodeError:
-            continue
-        if not uuid or not session.isprintable():
-            continue
+            igg_id = struct.unpack("<Q", packet[4:12])[0]
+            session_len = struct.unpack("<H", packet[68:70])[0]
+            if igg_id == 0 or session_len == 0 or session_len > 512:
+                continue
+            try:
+                uuid = packet[18:68].split(b"\x00", 1)[0].decode("ascii", errors="strict")
+                session = packet[70:70 + session_len].decode("ascii", errors="strict")
+            except UnicodeDecodeError:
+                continue
+            if not session.isprintable() or not uuid.isprintable():
+                continue
 
-        yield {
-            "igg_id": igg_id,
-            "device_uuid": uuid,
-            "access_key": session,
-            "version_major": major,
-            "version_minor": minor,
-            "version_patch": patch,
-            "language_code": language,
-        }
+            info = {"igg_id": igg_id, "access_key": session, "device_uuid": uuid}
+            if ptype == LOGIN_GATEWAY:
+                info["version_minor"] = packet[12]
+                info["version_major"] = packet[13]
+                info["version_patch"] = struct.unpack("<H", packet[14:16])[0]
+                info["language_code"] = packet[17]
+                info["platform"] = packet[16]
+            yield ptype, info
 
 
 def extract(path):
@@ -247,9 +261,20 @@ def extract(path):
             flows.setdefault(key, []).append((seq, payload))
 
     accounts = {}
-    for segments in flows.values():
-        for login in parse_login(reassemble(segments)):
-            accounts[login["igg_id"]] = login  # last login per account wins
+    for (src, sport, dst, dport), segments in flows.items():
+        for ptype, login in parse_login(reassemble(segments)):
+            account = accounts.setdefault(login["igg_id"], {"igg_id": login["igg_id"]})
+            account["access_key"] = login["access_key"]
+            if ptype == LOGIN_GATEWAY:
+                # Gateway login carries the version, language, device uuid and
+                # tells us which gateway this client talks to.
+                account["device_uuid"] = login["device_uuid"]
+                for field in ("version_major", "version_minor", "version_patch", "language_code", "platform"):
+                    account[field] = login[field]
+                account["server_addr"] = ip_to_str(dst)
+                account["server_port"] = dport
+            else:
+                account.setdefault("device_uuid", login["device_uuid"])
     return list(accounts.values())
 
 
@@ -260,28 +285,43 @@ def extract(path):
 def render_config(template_text, account, data_dir):
     replacements = {
         "account.igg_id": str(account["igg_id"]),
-        "account.device_uuid": account["device_uuid"],
         "account.access_key": account["access_key"],
-        "client.version_major": str(account["version_major"]),
-        "client.version_minor": str(account["version_minor"]),
-        "client.version_patch": str(account["version_patch"]),
-        "client.language_code": str(account["language_code"]),
     }
+    for key, field in (("client.version_major", "version_major"),
+                       ("client.version_minor", "version_minor"),
+                       ("client.version_patch", "version_patch"),
+                       ("client.language_code", "language_code"),
+                       ("client.platform", "platform"),
+                       ("server.addr", "server_addr"),
+                       ("server.port", "server_port")):
+        if field in account:
+            replacements[key] = str(account[field])
     if data_dir:
         replacements["data.path"] = data_dir
+
+    # The PC client sends an empty device uuid. The config parser needs a value,
+    # so leave the key out (the bot then sends zeros, like the PC client does).
+    uuid = account.get("device_uuid", "")
+    uuid_line = f"account.device_uuid = {uuid}" if uuid else "# account.device_uuid is empty on this client"
 
     seen = set()
     lines = []
     for line in template_text.splitlines():
         match = re.match(r"^\s*([A-Za-z0-9_.]+)\s*=", line)
-        if match and match.group(1) in replacements:
-            key = match.group(1)
+        key = match.group(1) if match else None
+        if key == "account.device_uuid":
+            lines.append(uuid_line)
+            seen.add(key)
+        elif key in replacements:
             lines.append(f"{key} = {replacements[key]}")
             seen.add(key)
         else:
             lines.append(line)
 
     missing = [k for k in replacements if k not in seen]
+    if uuid and "account.device_uuid" not in seen:
+        missing.append("account.device_uuid")
+        replacements["account.device_uuid"] = uuid
     if missing:
         lines.append("")
         lines.append("# Added by extract_credentials.py")
@@ -322,21 +362,26 @@ def main():
         sys.exit(f"Could not read capture: {e}")
 
     if not accounts:
-        sys.exit("No login packet found. Capture the game from before it connects until it "
-                 "reaches the login, and make sure the capture includes TCP traffic on the "
-                 "gateway port (5999 by default).")
+        sys.exit("No login packet found (_MSG_NEWLOGIN_LOGINTOL / LOGINTOP). Start the capture "
+                 "BEFORE launching the game and only stop it once you are in game, so that the "
+                 "connection to the gateway is included.")
 
     os.makedirs(args.out_dir, exist_ok=True)
     for account in accounts:
         name = str(account["igg_id"])
         out_path = os.path.join(args.out_dir, name + ".cfg")
-        data_dir = f"./data/{name}/"
-        write_private(out_path, render_config(template, account, data_dir))
+        write_private(out_path, render_config(template, account, f"./data/{name}/"))
 
         key = account["access_key"] if args.show_secrets else mask(account["access_key"])
-        uuid = account["device_uuid"] if args.show_secrets else mask(account["device_uuid"])
-        print(f"IGG ID {name}: client v{account['version_major']}.{account['version_minor']}."
-              f"{account['version_patch']}, lang {account['language_code']}")
+        uuid = account.get("device_uuid", "")
+        uuid = (uuid if args.show_secrets else mask(uuid)) if uuid else "(empty)"
+        if "version_major" in account:
+            print(f"IGG ID {name}: client v{account['version_major']}.{account['version_minor']}."
+                  f"{account['version_patch']}, lang {account['language_code']}, platform {account['platform']}")
+        else:
+            print(f"IGG ID {name}: gateway login not in capture, version/server left from template")
+        if "server_addr" in account:
+            print(f"  gateway     = {account['server_addr']}:{account['server_port']}")
         print(f"  device_uuid = {uuid}")
         print(f"  access_key  = {key}")
         print(f"  -> {out_path}")

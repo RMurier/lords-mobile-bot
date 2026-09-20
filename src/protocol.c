@@ -37,7 +37,7 @@ void RequestGuestLogIn(Connection *c)
     write_u16(c->data + c->size, c->app.version_patch);
     c->size += 2;
 
-    write_u8(c->data + c->size, 1);
+    write_u8(c->data + c->size, c->app.platform); // 1 = mobile, 9 = official PC client (client.platform)
     c->size += 1;
     
     // write language code

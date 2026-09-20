@@ -169,6 +169,11 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 	
+	if (strcmp(key, "client.platform") == 0) {
+		c->app.platform = (uint8_t)strtoul(value, NULL, 10);
+		return true;
+	}
+
 	if (strcmp(key, "client.language_code") == 0) {
 		c->app.language_code = (uint8_t)strtoul(value, NULL, 10);
 		return true;
@@ -340,7 +345,8 @@ bool LoadConfig(Connection *c, const char *filename)
 	char key[64], value[512];
 	uint32_t line_num = 0;
 	
-	/* Defaults, overridden by reconnect.* keys */
+	/* Defaults, overridden by the matching config keys */
+	c->app.platform = 1;
 	c->reconnect.enabled      = true;
 	c->reconnect.delay        = 60;
 	c->reconnect.max_attempts = 0;

@@ -671,7 +671,10 @@ bool CreateDefaultConfig(const char *filename)
 		"client.version_major = 2\n"
 		"client.version_minor = 197\n"
 		"client.version_patch = 308\n"
-		"client.language_code = 1\n\n"
+		"client.language_code = 1\n"
+		"# Platform byte of the gateway login: 1 = mobile, 9 = official PC client.\n"
+		"# Use the same platform as the device your access key comes from.\n"
+		"client.platform = 1\n\n"
 		
 		"# Directory used to store bot data (logs, databases, cache, etc.).\n"
 		"data.path = /sdcard/lmbot/\n\n"

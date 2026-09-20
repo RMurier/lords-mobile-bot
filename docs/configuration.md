@@ -82,6 +82,7 @@ client.language_code = 1
 | `client.version_minor` | Minor client version |
 | `client.version_patch` | Patch version |
 | `client.language_code` | Client language code |
+| `client.platform` | Platform byte of the gateway login: `1` = mobile (default), `9` = official PC client. Use the same platform as the device your access key was captured from |
 
 ---
 
@@ -133,7 +134,17 @@ python3 tools/extract_credentials.py capture.pcap --template config.cfg --out-di
 ```
 
 One config file is written per IGG ID found in the capture (`accounts/<igg_id>.cfg`),
-with the client version and language taken from the capture as well.
+with the gateway address, client version, language and platform taken from the capture as well.
+The official PC client has an empty device uuid, in which case `account.device_uuid` is left out.
+
+On Windows, `pktmon` captures without installing anything (administrator PowerShell):
+
+```powershell
+pktmon start --capture --pkt-size 0 -f capture.etl
+# start the game and wait until you are in game, then:
+pktmon stop
+pktmon etl2pcap capture.etl -o capture.pcapng
+```
 These files contain live session credentials: never share or commit them
 (`accounts/` and `*.pcap` are in `.gitignore`).
 
