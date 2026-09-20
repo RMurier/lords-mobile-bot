@@ -4786,34 +4786,94 @@ void RecvKingdomServer(Connection *c, const uint8_t *data, uint16_t size)
 	c->migration.deadline = time(NULL) + 15;
 }
 
+/*
+ * Result codes of _MSG_RESP_OLDPLAYERBACK_FREECROSSTELEPORT, read from the client's own enumeration
+ * (ERESP_OLDPLAYERFREETELEPORT_*). The byte is signed: 0xFB is -5.
+ */
+static const char *FreeTeleportReason(int8_t status, const char **name)
+{
+	switch (status) {
+		case -9: *name = "PBF_NO_CROSSKINGDOM";         return "impossible pendant l'événement PBF";
+		case -8: *name = "FLAG_LIMIT";                   return "limite liée aux drapeaux atteinte";
+		case -7: *name = "KINGDOM_ALLIANCE_LIMIT";      return "le royaume de destination a atteint sa limite d'alliances";
+		case -6: *name = "KINGDOM_PROTECT";             return "le royaume de destination est protégé";
+		case -5: *name = "TROOP_OUTSIDE";               return "des troupes sont hors du château : rappelez-les d'abord";
+		case -4: *name = "DWZ_NO_CROSSKINGDOM";         return "impossible depuis la zone du dragon";
+		case -3: *name = "UNABLE_CHANGEHOME";           return "le changement de royaume n'est pas possible pour ce compte";
+		case -2: *name = "CROSSTELEPORT_IN_PROGRESS";   return "une migration est déjà en cours";
+		case  2: *name = "NEWBIE_ERROR";                return "compte débutant : migration impossible";
+		case  3: *name = "INDEMNIFY";                   return "une indemnisation est en attente sur le compte";
+		case  4: *name = "WAR_BUFF_CD";                 return "un effet de guerre est en cours";
+		case  5: *name = "NOT_FIELD";                   return "la case de destination n'est pas utilisable";
+		case  6: *name = "KINGDOM_FULL";                return "le royaume de destination est plein";
+		case  7: *name = "UNKNOWN";                     return "erreur inconnue du serveur";
+		case  8: *name = "ABF_NO_CROSSKINGDOM";         return "impossible pendant l'événement ABF";
+		default: *name = "?";                            return NULL;
+	}
+}
+
+/* What the migration scrolls in the bag mean for a migration: none, not enough, or enough. */
+void MigrationScrollStatus(const Connection *c, char *out, size_t size)
+{
+	uint16_t have   = c->items[MIGRATION_SCROLL].quantity;
+	uint16_t needed = c->migration_scrolls_needed ? c->migration_scrolls_needed : 1;
+	
+	if (have == 0)
+		snprintf(out, size, "Il n'y a aucun vélin de migration dans le sac : seule la migration gratuite peut aboutir.");
+	else if (have < needed)
+		snprintf(out, size, "Il faut %u vélin(s) de migration et le sac n'en contient que %u (il en manque %u) : seule la migration gratuite peut aboutir.",
+			needed, have, needed - have);
+	else
+		snprintf(out, size, "Vélins de migration dans le sac : %u (%u nécessaire(s)).", have, needed);
+}
+
 void RecvFreeCrossTeleport(Connection *c, const uint8_t *data)
 {
 	if (c->migration.state != MIGRATION_WAIT_RESULT)
 		return;
 	
-	uint8_t status = read_u8(data);
+	int8_t status = (int8_t)read_u8(data);
 	
 	c->migration.state = MIGRATION_IDLE;
 	
-	if (status == 0) {
-		LOGI("[MIGRATION] Migration acceptée vers le royaume %u\n", c->migration.kingdom_id);
+	// 0 = SUCCESS, -1 = SUCCESS_IN_FOREST, 1 = SUCCESS_EXPIRE
+	if (status == 0 || status == -1 || status == 1) {
+		LOGI("[MIGRATION] Migration acceptée vers le royaume %u (code %d)\n", c->migration.kingdom_id, status);
 		BotReply(c, c->migration.requester, "Migration",
-			"Migration acceptée : le château part vers le royaume %u en X:%u Y:%u. Le serveur ferme la connexion et le bot se reconnecte tout seul.",
-			c->migration.kingdom_id, c->migration.x, c->migration.y);
+			"Migration acceptée : le château part vers le royaume %u en X:%u Y:%u.%s Le serveur ferme la connexion et le bot se reconnecte tout seul.",
+			c->migration.kingdom_id, c->migration.x, c->migration.y,
+			status == -1 ? " (réussite en forêt)" : (status == 1 ? " (l'offre gratuite arrive à expiration)" : ""));
 		return;
 	}
 	
-	LOGW("[MIGRATION] Migration refusée par le serveur (code %u)\n", status);
+	const char *name;
+	const char *reason = FreeTeleportReason(status, &name);
 	
-	if (c->items_loaded && c->items[MIGRATION_SCROLL].quantity == 0) {
+	LOGW("[MIGRATION] Migration refusée par le serveur (code %d, %s)\n", status, name);
+	
+	// a precise reason (kingdom full, troops outside...) is a problem scrolls would not fix
+	if (reason != NULL && status != 7) {
+		BotReply(c, c->migration.requester, "Migration", "Migration refusée : %s (%s).", reason, name);
+		return;
+	}
+	
+	// unknown reason: the free migration is probably not available, say what the scrolls allow
+	uint16_t have   = c->items[MIGRATION_SCROLL].quantity;
+	uint16_t needed = c->migration_scrolls_needed ? c->migration_scrolls_needed : 1;
+	
+	if (!c->items_loaded) {
+		BotReply(c, c->migration.requester, "Migration", "Migration refusée par le serveur (code %d, %s).", status, name);
+	} else if (have == 0) {
 		BotReply(c, c->migration.requester, "Migration",
-			"Migration refusée (code %u). Aucune migration gratuite n'est disponible et vous n'avez plus de vélin de migration.", status);
-	} else if (c->items_loaded) {
+			"Migration refusée (code %d). Aucune migration gratuite n'est disponible et vous n'avez plus de vélin de migration.", status);
+	} else if (have < needed) {
 		BotReply(c, c->migration.requester, "Migration",
-			"Migration gratuite refusée (code %u). Vous avez %u vélin(s) de migration, mais le bot ne sait pas encore les utiliser : faites la migration dans le jeu.",
-			status, c->items[MIGRATION_SCROLL].quantity);
+			"Migration refusée (code %d). Il faut %u vélin(s) de migration et vous n'en avez que %u : il vous en manque %u.",
+			status, needed, have, needed - have);
 	} else {
-		BotReply(c, c->migration.requester, "Migration", "Migration refusée par le serveur (code %u).", status);
+		BotReply(c, c->migration.requester, "Migration",
+			"Migration gratuite refusée (code %d). Vous avez %u vélin(s) de migration (il en faut %u), mais le bot ne sait pas encore les utiliser : faites la migration dans le jeu.",
+			status, have, needed);
 	}
 }
 

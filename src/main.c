@@ -714,6 +714,10 @@ bool CreateDefaultConfig(const char *filename)
 		"reconnect.kicked_delay = 60\n"
 		"reconnect.max_attempts = 0\n\n"
 		
+		"# Migration scrolls the game asks for this account (see the migration screen: it grows with the power).\n"
+		"# The bot compares it with the bag and says when scrolls are missing. Default 1.\n"
+		"migration.scrolls_needed = 1\n\n"
+		
 		"# Prefix used to identify bot commands.\n"
 		"command.prefix = $\n\n"
 		

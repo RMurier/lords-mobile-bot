@@ -135,6 +135,10 @@ CATEGORIES = [
             {"key": "command.input", "label": "Canaux de réception", "type": "channels", "default": "GUILD, MAIL",
              "options": CHANNELS, "help": "Où le bot lit les commandes. Un canal non coché est ignoré. Le chat du monde "
                                            "est public : ne le cochez que si vous le voulez."},
+            {"key": "migration.scrolls_needed", "label": "Vélins de migration nécessaires", "type": "int", "min": 1,
+             "max": 9999, "default": "1", "unit": "vélins",
+             "help": "Nombre de vélins de migration que le jeu demande pour ce compte (il augmente avec la puissance : "
+                     "il est affiché dans l'écran de migration). Le bot le compare au contenu du sac et dit s'il en manque."},
             {"key": "command.output", "label": "Canal de réponse", "type": "select", "default": "MAIL",
              "options": CHANNELS, "help": "Où le bot répond. Le courrier est privé ; en chat, la réponse est adressée "
                                            "au joueur (@pseudo) sur une seule ligne."},
@@ -225,7 +229,7 @@ CATEGORIES = [
 # Sub-headings inside a category. The first matching key prefix wins.
 _GROUPS = {
     "network": [("server.", "Serveur"), ("client.", "Client à imiter")],
-    "commands": [("admin.", "Administrateur"), ("command.", "Canaux et préfixe")],
+    "commands": [("admin.", "Administrateur"), ("command.", "Canaux et préfixe"), ("migration.", "Migration")],
     "bank": [("bank.send_", "Ressources à envoyer"), ("bank.reserve_", "Réserves (jamais envoyées)"),
              ("bank.max_", "Livraison"), ("bank.use_bag_rss", "Objets du sac"),
              ("bank.use_bag_", "Objets du sac, par ressource")],
@@ -291,10 +295,11 @@ COMMANDS = [
     {"group": "Administration", "name": "migrate", "usage": "migrate <royaume> <x> <y>", "who": "Administrateurs",
      "summary": "Fait migrer le château vers un autre royaume, aux coordonnées choisies. Aucune confirmation : la commande agit tout de suite.",
      "details": ["Le bot vérifie d'abord que le royaume existe (sinon il le dit), puis envoie la migration.",
-                 "Il utilise la migration gratuite (offerte aux joueurs de retour) si elle est disponible. Sinon il le dit, et indique s'il reste "
-                 "des vélins de migration dans le sac : sans vélin il répond que vous n'en avez plus. Avec un vélin, la migration doit encore "
-                 "se faire dans le jeu, le bot ne sait pas encore l'utiliser.",
-                 "S'il n'y a aucun vélin dans le sac, le message qui suit la commande le signale déjà.",
+                 "Il utilise la migration gratuite (offerte aux joueurs de retour) si elle est disponible. Le message qui suit la commande compare "
+                 "le sac au nombre de vélins nécessaires (réglage « Vélins de migration nécessaires ») : aucun vélin, ou pas assez (« il en manque 2 »).",
+                 "Si le serveur refuse, le bot donne la raison (royaume plein, troupes hors du château, royaume protégé, limite d'alliances…). "
+                 "Quand la migration gratuite n'est pas disponible, il dit s'il vous reste assez de vélins ; avec assez de vélins, la migration doit "
+                 "encore se faire dans le jeu, le bot ne sait pas encore l'utiliser.",
                  "Après la migration, le jeu ferme la connexion et le bot se reconnecte tout seul, dans le nouveau royaume."],
      "example": "migrate 796 301 491"},
     {"group": "Administration", "name": "su", "usage": "su <pseudo>", "who": "Administrateurs",

@@ -365,6 +365,20 @@ Future options:
 
 ---
 
+## Migration
+
+Number of migration scrolls the game asks for this account. It is shown on the migration screen and grows with
+the power, so a big account needs several.
+
+```cfg
+migration.scrolls_needed = 1
+```
+
+The bot compares it with the scrolls in the bag when you use `$migrate` and says when some are missing
+(see [commands.md](commands.md)). Between 1 and 9999.
+
+---
+
 ## Cargo Ship
 
 Automatically completes Cargo Ship trades.

@@ -84,16 +84,41 @@ Migration to another kingdom, `$migrate <kingdom> <x> <y>`:
 3. The server accepts (or refuses) and closes the connection; the bot reconnects by itself, into the new kingdom.
 
 The bot only knows the **free migration** offered to returning players, because that is the one that was captured
-from the official client. Errors it reports:
+from the official client. Migrating with scrolls uses another request that is not known yet.
 
-- no migration scroll in the bag: the message that follows the command already says so, since only the free migration
-  can succeed;
-- the free migration is refused and there is no scroll: *"Aucune migration gratuite n'est disponible et vous n'avez plus
-  de vélin de migration."*;
-- the free migration is refused and scrolls are left: it says how many, and that the migration has to be done in the
-  game, because using a scroll goes through another request that is not known yet;
-- unknown kingdom, invalid coordinates, already in that kingdom, a migration already running, or a server that does
-  not answer.
+**Scrolls.** A big account needs several scrolls, so `migration.scrolls_needed` (default 1) tells the bot how many the
+game asks for this account: it is shown on the migration screen and grows with the power. The message that follows
+`$migrate` compares it with the bag:
+
+- no scroll: *"Il n'y a aucun vélin de migration dans le sac : seule la migration gratuite peut aboutir."*;
+- some but not enough: *"Il faut 3 vélin(s) de migration et le sac n'en contient que 1 (il en manque 2)…"*;
+- enough: the count is shown.
+
+**Refusals.** The server's reason is given in French with the game's own code name, for example
+*"le royaume de destination est plein (KINGDOM_FULL)"*. The codes were read from the client's enumeration:
+
+| Code | Name | Meaning |
+|---|---|---|
+| 6 | `KINGDOM_FULL` | the target kingdom is full |
+| -6 | `KINGDOM_PROTECT` | the target kingdom is protected |
+| -7 | `KINGDOM_ALLIANCE_LIMIT` | the target kingdom reached its alliance limit |
+| -5 | `TROOP_OUTSIDE` | troops are outside the castle |
+| 5 | `NOT_FIELD` | the destination tile cannot be used |
+| 2 | `NEWBIE_ERROR` | newbie account |
+| 3 | `INDEMNIFY` | a compensation is pending |
+| 4 | `WAR_BUFF_CD` | a war effect is active |
+| -2 | `CROSSTELEPORT_IN_PROGRESS` | a migration is already running |
+| -3 | `UNABLE_CHANGEHOME` | the kingdom cannot be changed for this account |
+| -4, -9, 8 | `DWZ_`, `PBF_`, `ABF_NO_CROSSKINGDOM` | not possible during that event or zone |
+| -8 | `FLAG_LIMIT` | flag limit |
+| 7 | `UNKNOWN` | unknown: the free migration is probably not available, see the scrolls |
+
+`0` (`SUCCESS`), `-1` (`SUCCESS_IN_FOREST`) and `1` (`SUCCESS_EXPIRE`) are all successes. The English names are the
+game's; the French wording of the less obvious ones (`PBF`, `ABF`, `DWZ`, `FLAG_LIMIT`, `INDEMNIFY`) is an interpretation,
+which is why the name always follows.
+
+Other errors: unknown kingdom, invalid coordinates, already in that kingdom, a migration already running, or a server
+that does not answer.
 
 ## The bank
 

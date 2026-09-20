@@ -456,13 +456,11 @@ static void MigrateCommand(Connection *c, const char *player_name, bool is_admin
 		return;
 	}
 	
-	// the free migration (offered to returning players) is tried; without it a migration scroll is needed
-	if (c->items[MIGRATION_SCROLL].quantity == 0)
-		BotReply(c, player_name, "Migration",
-			"Migration vers le royaume %u en X:%u Y:%u demandée. Il n'y a aucun vélin de migration dans le sac : seule la migration gratuite peut aboutir.",
-			kingdom, x, y);
-	else
-		BotReply(c, player_name, "Migration", "Migration vers le royaume %u en X:%u Y:%u demandée, le résultat arrive dans un instant.", kingdom, x, y);
+	// the free migration (offered to returning players) is tried; without it migration scrolls are needed
+	char note[240];
+	
+	MigrationScrollStatus(c, note, sizeof(note));
+	BotReply(c, player_name, "Migration", "Migration vers le royaume %u en X:%u Y:%u demandée. %s", kingdom, x, y, note);
 }
 
 /* Called when the server answers the use of a relocator: tells whoever asked. */

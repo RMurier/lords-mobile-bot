@@ -881,6 +881,8 @@ typedef struct {
 	bool lobby_login;
 	// set once the game server accepted the login
 	bool game_logged_in;
+	// number of migration scrolls the game asks for this account (migration.scrolls_needed)
+	uint16_t migration_scrolls_needed;
 	// cargo ship: wait until bag items used for a trade are credited
 	time_t market_bag_wait;
 	// game server 

@@ -219,6 +219,16 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 	
+	if (strcmp(key, "migration.scrolls_needed") == 0) {
+		uint32_t needed = (uint32_t)strtoul(value, NULL, 10);
+		
+		if (needed < 1 || needed > 9999)
+			return false;
+		
+		c->migration_scrolls_needed = (uint16_t)needed;
+		return true;
+	}
+	
 	if (strcmp(key, "reconnect.max_attempts") == 0) {
 		c->reconnect.max_attempts = (uint32_t)strtoul(value, NULL, 10);
 		return true;
@@ -534,6 +544,7 @@ bool LoadConfig(Connection *c, const char *filename)
 	c->reconnect.delay        = 60;
 	c->reconnect.kicked_delay = 60;
 	c->reconnect.max_attempts = 0;
+	c->migration_scrolls_needed = 1;
 	c->bot.command_input_mask = (1u << COMMAND_CHANNEL_GUILD) | (1u << COMMAND_CHANNEL_MAIL);
 	c->bot.command_output     = COMMAND_CHANNEL_MAIL;
 	snprintf(c->bot.data_path, sizeof(c->bot.data_path), "./data/");
