@@ -603,6 +603,22 @@ def api_account_logs(h, query, account_id):
     return {**bots.read_log(account_id, offset), "status": bots.status(account_id)}
 
 
+@route("GET", "/api/accounts/([^/]+)/game")
+def api_account_game(h, query, account_id):
+    """What the bot knows about the account in game: the status.json it writes every few seconds."""
+    account_path(account_id)
+    path = ROOT / "data" / account_id / "status.json"
+    running = bots.status(account_id)["state"] == "running"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"available": False, "running": running}
+    age = time.time() - data.get("written_at", 0)
+    # the file outlives the bot: it only counts as live while the process runs and keeps writing
+    return {"available": True, "running": running, "live": running and age < 30 and bool(data.get("connected")),
+            "age": max(0, int(age)), "data": data}
+
+
 @route("POST", "/api/import")
 def api_import(h, query):
     length = int(h.headers.get("Content-Length") or 0)

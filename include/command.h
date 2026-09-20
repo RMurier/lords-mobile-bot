@@ -12,6 +12,7 @@ bool IsAdmin(const Connection *c, const char *name);
 bool AdminAdd(Connection *c, const char *name);
 bool AdminRemove(Connection *c, const char *name);
 bool AdminSaveRuntime(const Connection *c);
+void MakeDirectories(const char *path);
 void AdminLoadRuntime(Connection *c);
 
 #endif

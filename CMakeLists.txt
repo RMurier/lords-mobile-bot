@@ -14,6 +14,7 @@ add_executable(client
     src/map_point.c
     src/command.c
     src/config.c
+    src/status.c
 )
 
 target_compile_definitions(client PRIVATE

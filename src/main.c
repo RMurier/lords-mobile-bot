@@ -23,6 +23,7 @@
 #include "items.h"
 
 #include "config.h"
+#include "status.h"
 
 #include "version.h"
 
@@ -71,6 +72,8 @@ void BotTick(Connection *c)
 	AllianceGiftTick(c);
 	
 	MigrationTick(c);
+	
+	StatusTick(c);
 	
 	// 
 	// DarknestRallyTick(c);

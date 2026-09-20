@@ -272,3 +272,16 @@ code { font-family: var(--mono); background: var(--surface-2); padding: 1px 6px;
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+.statgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px 22px; }
+.stat { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.stat .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.stat .v { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.pill { display: inline-block; padding: 2px 10px; border-radius: 999px; background: var(--surface-2); font-size: 13px; font-weight: 600; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.bad { background: var(--danger-soft); color: var(--danger); }
+table.rss { width: 100%; border-collapse: collapse; }
+table.rss th, table.rss td { padding: 7px 8px; text-align: right; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+table.rss th:first-child, table.rss thead th { text-align: left; font-weight: 600; }
+table.rss td.neg { color: var(--danger); }

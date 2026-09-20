@@ -83,6 +83,14 @@ The **Commands** button (top bar) lists every in-game command with its usage, wh
 examples with copy buttons and the rules that apply (reserve, distance, bag items, channels). The
 prefix shown is the one of the account you opened last. See [commands.md](commands.md).
 
+## Status tab
+
+The first tab of an account shows what the bot knows about it in game: online or not, **shield** (type and time left,
+counting down live), player name, power, kills, gems, VIP, kingdom, position, marches, alliance rank, resources
+(stock, bag, production per hour) and troops. The bot writes these to `data/<account>/status.json` every 5 seconds and
+the page reads it every 4 seconds. The values are the last ones the server sent; the page says how old they are.
+If the bot is stopped, the page shows the last known values marked as offline.
+
 ## Logs
 
 The **Log** tab follows the bot's output live. When a bot has stopped, the console shows

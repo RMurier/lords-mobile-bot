@@ -201,6 +201,7 @@
       main.innerHTML = accountView();
       applyDerived();
       if (S.tab === "logs") startLogs();
+      if (S.tab === "status") startGame();
     } else if (S.view === "add") {
       main.innerHTML = addView();
       S.capTimer = setInterval(() => {
@@ -244,6 +245,7 @@
       const badge = bad ? `<span class="count bad">${bad}</span>` : (dirty ? `<span class="count">${dirty}</span>` : "");
       return `<button class="tab" role="tab" data-act="tab" data-tab="${c.id}" aria-selected="${S.tab === c.id}">${esc(c.label)}${badge}</button>`;
     }).join("");
+    const statusTab = `<button class="tab" role="tab" data-act="tab" data-tab="status" aria-selected="${S.tab === "status"}">Statut</button>`;
     const logsTab = `<button class="tab" role="tab" data-act="tab" data-tab="logs" aria-selected="${S.tab === "logs"}">Journal</button>`;
     const category = S.schema.categories.find((c) => c.id === S.tab);
     return `
@@ -255,8 +257,8 @@
         <div class="actions" id="ctrl"><span id="ctrl-chip">${slot("ctrl-chip", chipHtml())}</span><span id="ctrl-btns">${slot("ctrl-btns", btnsHtml())}</span></div>
       </div>
       <div id="notes">${slot("notes", notesHtml())}</div>
-      <div class="tabs" role="tablist">${tabs}${logsTab}</div>
-      ${S.tab === "logs" ? logsView() : categoryView(category)}`;
+      <div class="tabs" role="tablist">${statusTab}${tabs}${logsTab}</div>
+      ${S.tab === "logs" ? logsView() : S.tab === "status" ? `<div id="game">${gameHtml(S.game)}</div>` : categoryView(category)}`;
   }
 
   function chipHtml() {
@@ -626,7 +628,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
 
   // ------------------------------------------------------------------ logs
 
-  function stopLogs() { clearTimeout(S.logTimer); S.logTimer = null; }
+  function stopLogs() { clearTimeout(S.logTimer); S.logTimer = null; clearTimeout(S.gameTimer); clearInterval(S.gameTick); S.gameTimer = S.gameTick = null; }
 
   function startLogs() {
     S.logOffset = -1;
@@ -670,6 +672,91 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       if (error.status === 401) return authProblem();
     }
     S.logTimer = setTimeout(pollLogs, 1500);
+  }
+
+  // ------------------------------------------------------------ game status
+
+  const SHIELDS = { 1146: "4 h", 1051: "8 h", 1462: "12 h", 1052: "1 jour", 1053: "3 jours", 1287: "7 jours", 1288: "14 jours" };
+  const RSS = [["food", "Nourriture"], ["rock", "Pierre"], ["wood", "Bois"], ["ore", "Minerai"], ["gold", "Or"]];
+  const RANKS = ["Membre", "R1", "R2", "R3", "R4", "R5"];
+  const num = (n) => Number(n).toLocaleString("fr-FR");
+  const short = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + " B" : n >= 1e6 ? (n / 1e6).toFixed(2) + " M" : n >= 1e4 ? (n / 1e3).toFixed(1) + " K" : String(n);
+
+  function gameHtml(game) {
+    if (!game) return `<div class="card"><p class="help">Chargement…</p></div>`;
+    if (!game.available) {
+      return `<div class="card"><p><strong>Aucune donnée pour l'instant.</strong></p>
+        <p class="help">${game.running ? "Le bot démarre : les informations arrivent dès qu'il est en jeu."
+          : "Démarrez le bot pour voir l'état du compte."}</p></div>`;
+    }
+    const d = game.data;
+    const elapsed = game.fetched ? (Date.now() - game.fetched) / 1000 : 0;   // counts down between two polls
+    const sh = d.shield;
+    let shield;
+    if (!sh.loaded) shield = `<span class="pill">inconnu</span>`;
+    else if (!sh.active) shield = `<span class="pill bad">aucun bouclier</span>`;
+    else {
+      const left = Math.max(0, sh.remaining - (game.age + elapsed));
+      shield = `<span class="pill ${left < 3600 ? "warn" : "ok"}" data-shield-left="${sh.remaining - game.age}">${fmtDuration(left)} restantes</span>
+        <span class="help"> · bouclier ${SHIELDS[sh.item_id] || "#" + sh.item_id}</span>`;
+    }
+    const state = game.live ? `<span class="pill ok">En ligne</span>`
+      : game.running ? `<span class="pill warn">Bot démarré, hors ligne (reconnexion…)</span>` : `<span class="pill">Bot arrêté</span>`;
+    const stat = (label, value) => `<div class="stat"><span class="k">${label}</span><span class="v">${value}</span></div>`;
+    const rows = RSS.map(([k, label]) => `<tr><th>${label}</th><td>${num(d.resources[k])}</td><td>${num(d.bag[k])}</td>
+      <td class="${d.production[k] < 0 ? "neg" : ""}">${d.production[k] > 0 ? "+" : ""}${num(d.production[k])}/h</td></tr>`).join("");
+    const t = d.troops;
+    return `
+      <div class="card"><div class="statgrid">
+        ${stat("État", state)}
+        ${stat("Bouclier", shield)}
+        ${stat("Joueur", esc(d.name || "—"))}
+        ${stat("Puissance", num(d.power))}
+        ${stat("Kills", num(d.kills))}
+        ${stat("Gemmes", num(d.gems))}
+        ${stat("VIP", `${d.vip_level} <span class="help">(${num(d.vip_points)} pts)</span>`)}
+        ${stat("Royaume", d.kingdom + (d.home_kingdom && d.home_kingdom !== d.kingdom ? ` <span class="help">(origine ${d.home_kingdom})</span>` : ""))}
+        ${stat("Position", `${d.x}, ${d.y}`)}
+        ${stat("Marches", `${d.current_marches ?? d.marches} / ${d.max_marches}`)}
+        ${stat("Alliance", `${RANKS[d.alliance.rank] || d.alliance.rank}${d.alliance.members ? ` · ${d.alliance.members} membres` : ""}`)}
+      </div>
+      <p class="help">Mis à jour il y a ${fmtDuration(game.age)}.</p></div>
+      <div class="card"><h2>Ressources</h2>
+        <table class="rss"><thead><tr><th></th><th>En stock</th><th>Dans le sac</th><th>Production</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="card"><h2>Troupes</h2>
+        ${t.loaded ? `<div class="statgrid">
+          ${stat("Total", num(t.total))}${stat("Infanterie", short(t.infantry))}${stat("Cavalerie", short(t.cavalry))}
+          ${stat("Tireurs", short(t.ranged))}${stat("Siège", short(t.siege))}
+          ${d.wounded.loaded ? stat("Blessés", num(d.wounded.total)) : ""}</div>`
+          : `<p class="help">Pas encore reçues du serveur.</p>`}</div>`;
+  }
+
+  function startGame() {
+    S.game = null;
+    pollGame();
+    // the shield countdown moves every second without asking the server again
+    S.gameTick = setInterval(() => {
+      const box = $("#game");
+      if (box && S.game && S.game.available && S.game.data.shield.active) box.innerHTML = gameHtml(S.game);
+    }, 1000);
+  }
+
+  async function pollGame() {
+    clearTimeout(S.gameTimer);
+    if (S.view !== "account" || S.tab !== "status" || !S.acc) return;
+    const id = S.id;
+    try {
+      const game = await api("GET", `/api/accounts/${enc(id)}/game`);
+      if (id === S.id && S.tab === "status" && S.view === "account") {
+        game.fetched = Date.now();
+        S.game = game;
+        const box = $("#game");
+        if (box) box.innerHTML = gameHtml(game);
+      }
+    } catch (error) {
+      if (error.status === 401) return authProblem();
+    }
+    S.gameTimer = setTimeout(pollGame, 4000);
   }
 
   // --------------------------------------------------------------- actions

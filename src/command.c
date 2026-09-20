@@ -144,7 +144,7 @@ static bool AdminFilePath(const Connection *c, char *out, size_t size)
 	return written > 0 && (size_t)written < size;
 }
 
-static void MakeDirectories(const char *path)
+void MakeDirectories(const char *path)
 {
 	char buffer[300];
 
