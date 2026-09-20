@@ -5,6 +5,9 @@ bot reads (`command.input`, by default alliance chat and mail); the bot answers 
 chosen by `command.output` (mail by default). The web console has a page listing all of this with
 copy buttons, and in game `$help` gives the list that matches the rights of whoever asks.
 
+The command words are English (`$help`, `$gold`, `$relocate`...); the texts the bot writes back, `$help`
+included, are in French.
+
 Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 
 ## All commands
@@ -22,6 +25,10 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$admin list` | administrators | Lists the administrators, marking those from the configuration file |
 | `$admin add <player>` | administrators | Adds an administrator |
 | `$admin remove <player>` | administrators | Removes an administrator added in game |
+| `$relocate random` | administrators | Moves the castle to a place chosen by the game (uses a random relocator), after a confirmation |
+| `$relocate <x> <y>` | administrators | Moves the castle to these coordinates in the current kingdom (uses an advanced relocator), after a confirmation |
+| `$confirm` | the administrator who asked | Confirms the pending action; it expires after 60 seconds |
+| `$cancel` | administrators | Cancels the pending action |
 | `$su <player>` | administrators | Old command, same as `$admin add` |
 
 ### Examples
@@ -34,6 +41,8 @@ $stop              cancel the delivery that is on its way
 $admin add Bob     Bob can now use every command
 $admin remove Bob
 $bank bal
+$relocate random   then  $confirm   (or $cancel)
+$relocate 100 100  then  $confirm
 ```
 
 ## Who can do what
@@ -54,6 +63,18 @@ may not use is ignored without an answer.
   reconnection or a restart. `$admin remove` deletes them from that file.
 - At most 16 administrators, names of at most 12 characters.
 
+## Relocation
+
+`$relocate` is for administrators only and never acts at once: the bot describes what it is about to do
+and waits for `$confirm` from the same administrator, within 60 seconds (or `$cancel`). One action
+can be pending at a time.
+
+- `$relocate random` needs a random relocator in the bag; the game picks the destination.
+- `$relocate <x> <y>` needs an advanced relocator in the bag. The coordinates must be on the map and
+  different from the current position. The destination is in the kingdom the castle is in.
+- After the confirmation the bot reports where the castle landed, or that the server refused.
+  Rallies and marches are affected by a relocation like in the game: think before confirming.
+
 ## The bank
 
 A resource command sends resources to the player who wrote it, subject to:
@@ -65,7 +86,7 @@ A resource command sends resources to the player who wrote it, subject to:
   short the bot first uses resource items from the bag, wasting as little as possible, waits for them
   to be credited, then delivers. If even the bag cannot cover the amount, nothing is used and the
   answer says how much is available.
-- **One transfer at a time**: while one is in progress, another player receives a "Transfer Busy"
+- **One transfer at a time**: while one is in progress, another player receives an "Occupé"
   answer. The requester can write a new command to replace theirs, or `$stop` to cancel.
 
 `$stop` cancels the transfer, but marches that have already left still arrive.
@@ -90,6 +111,10 @@ been run against the live game yet:
 - using bag items (`RequestSimpleUseItem` is what the bot already uses for shields);
 - answering in chat rather than mail, and the world / alliance channel numbers (taken from the
   bot's own chat code: 0 = world, 1 = alliance);
-- the delivery distance against real player positions.
+- the delivery distance against real player positions;
+- accented characters (é, è, à...) in the bot's French mails and chat lines: they are sent as UTF-8
+  like any text, but if the game shows them wrongly, tell me and I will remove the accents;
+- relocation: the packets are the ones the bot already had for the two relocators, and the answer is
+  decoded by the existing code, but no relocation was run on a live account. Try it on a spare account.
 
 Start with `command.output = MAIL` and a small test before relying on them.

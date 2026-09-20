@@ -2339,8 +2339,8 @@ void RecvAllyPoint(Connection *c, const uint8_t *data)
 					uint64_t limit = c->bank.max_delivery_distance;
 					
 					if (MapDistanceSq(self, pos) > limit * limit) {
-						BotReply(c, c->transfer.target_name, "Too Far",
-							"Your castle is %u tiles away, the delivery limit is %u tiles.",
+						BotReply(c, c->transfer.target_name, "Trop loin",
+							"Votre château est à %u cases, la limite de livraison est de %u cases.",
 							MapDistance(self, pos), c->bank.max_delivery_distance);
 						
 						c->transfer.state = TRANSFER_FAILED;
@@ -2598,6 +2598,10 @@ void RecvUseItem(Connection *c, const uint8_t *data, uint16_t size) {
 	
 	uint8_t status = read_u8(data + offset); offset += 1;
 	
+	// a relocation was asked from the chat: tell the administrator if the server refused
+	if (status != 0)
+		ReportRelocation(c, false, status);
+	
 	if (status == 0) {
 		uint16_t item_id       = read_u16(data + offset); offset += 2;
 		uint16_t item_quantity = read_u16(data + offset); offset += 2;
@@ -2610,6 +2614,7 @@ void RecvUseItem(Connection *c, const uint8_t *data, uint16_t size) {
 			c->player.zone_id            = read_u16(data + offset); offset += 2;
 			c->player.point_id           = read_u8(data + offset);  offset += 1;
 			c->player.current_kingdom_id = read_u16(data + offset); offset += 2;
+			ReportRelocation(c, true, 0);
 			return;
 		} else if (item_id == SHIELD_4H || 
 				item_id == SHIELD_8H || 

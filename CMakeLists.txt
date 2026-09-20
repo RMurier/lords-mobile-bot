@@ -22,6 +22,11 @@ target_compile_definitions(client PRIVATE
 
 target_include_directories(client PRIVATE include)
 
+# Sources contain UTF-8 text (the bot's messages are in French): tell MSVC, which assumes the ANSI code page.
+if(MSVC)
+    target_compile_options(client PRIVATE /utf-8)
+endif()
+
 if(WIN32)
     target_link_libraries(client PRIVATE ws2_32)
 endif()

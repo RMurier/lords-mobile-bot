@@ -129,7 +129,7 @@ int main(void)
 	CHECK(!IsAdmin(c, "mallory"), "administrator can remove an added administrator");
 	reset_sent();
 	say(c, "eve", "$admin remove boss", COMMAND_CHANNEL_MAIL);
-	CHECK(IsAdmin(c, "boss") && replied("configuration file"), "config administrators cannot be removed by commands");
+	CHECK(IsAdmin(c, "boss") && replied("fichier de configuration"), "config administrators cannot be removed by commands");
 	reset_sent();
 	say(c, "boss", "$admin list", COMMAND_CHANNEL_MAIL);
 	CHECK(replied("boss (config), eve"), "list shows every administrator and where it comes from");
@@ -191,11 +191,11 @@ int main(void)
 	/* ---- command.output: mail vs chat --------------------------------- */
 	c = fresh("boss");
 	say(c, "boss", "$stop", COMMAND_CHANNEL_MAIL);
-	CHECK(sent_count == 1 && replied("No transfer in progress"), "output MAIL: one reply");
+	CHECK(sent_count == 1 && replied("Aucune livraison en cours"), "output MAIL: one reply");
 	reset_sent();
 	c->bot.command_output = COMMAND_CHANNEL_GUILD;
 	say(c, "boss", "$stop", COMMAND_CHANNEL_MAIL);
-	CHECK(sent_count == 1 && replied("@boss No transfer in progress"), "output GUILD: replies in chat addressed to the player");
+	CHECK(sent_count == 1 && replied("@boss Aucune livraison en cours"), "output GUILD: replies in chat addressed to the player");
 	free(c);
 
 	/* ---- $stop ------------------------------------------------------- */
@@ -260,7 +260,7 @@ int main(void)
 	c->resources.gold = 1000000;
 	c->items[GOLD_2M].quantity = 2;
 	say(c, "boss", "$gold 3M", COMMAND_CHANNEL_MAIL);
-	CHECK(c->transfer.state == TRANSFER_IDLE && replied("Only 1.00M gold"), "bag not allowed: refused with what is available");
+	CHECK(c->transfer.state == TRANSFER_IDLE && replied("(or) : 1.00M disponible"), "bag not allowed: refused with what is available");
 	free(c);
 	c = fresh("boss");
 	c->resources.gold = 1000000;
@@ -283,7 +283,7 @@ int main(void)
 	c->items[GOLD_2M].quantity = 1;
 	c->bank.use_bag_rss = true; c->bank.use_bag_gold = true;
 	say(c, "boss", "$gold 9M", COMMAND_CHANNEL_MAIL);
-	CHECK(c->transfer.state == TRANSFER_IDLE && useitem_count == 0 && replied("Only 3.00M gold"), "bag too small: nothing is used, message counts the bag");
+	CHECK(c->transfer.state == TRANSFER_IDLE && useitem_count == 0 && replied("(or) : 3.00M disponible"), "bag too small: nothing is used, message counts the bag");
 	free(c);
 
 	/* ---- delivery distance ------------------------------------------- */
@@ -304,7 +304,7 @@ int main(void)
 		packet[0] = 0; packet[1] = tz & 0xff; packet[2] = tz >> 8; packet[3] = tp;
 		c->transfer.state = TRANSFER_WAIT_TARGET;
 		RecvAllyPoint(c, packet);
-		CHECK(c->transfer.state == TRANSFER_FAILED && replied("300 tiles"), "target beyond max_delivery_distance: refused with the distance");
+		CHECK(c->transfer.state == TRANSFER_FAILED && replied("300 cases"), "target beyond max_delivery_distance: refused with the distance");
 
 		MapPosToPointCode(near_pos, &tz, &tp);
 		packet[1] = tz & 0xff; packet[2] = tz >> 8; packet[3] = tp;
@@ -389,6 +389,136 @@ int main(void)
 		c = calloc(1, sizeof(*c));
 		LoadConfig(c, cfg);
 		CHECK(c->reconnect.kicked_delay == 0, "kicked_delay = 0 is accepted (do not reconnect)");
+		free(c);
+	}
+
+
+	/* ---- texts are French, command words stay English ------------------- */
+	c = fresh("boss");
+	c->bank.enabled = true; c->bank.send_gold = true;
+	say(c, "eve", "$help", COMMAND_CHANNEL_MAIL);
+	CHECK(replied("Commandes (préfixe $)") && replied("recevoir des ressources, ex. $gold 5M") && replied("annuler votre livraison en cours") && replied("cette liste"),
+		"help for a player is entirely in French, with the English command words");
+	reset_sent();
+	say(c, "boss", "$help", COMMAND_CHANNEL_MAIL);
+	CHECK(replied("$relocate random|<x> <y> - déplacer le château") && replied("$confirm / $cancel - valider ou annuler") && replied("gérer les administrateurs")
+		&& replied("solde de la banque, du sac et total"), "help for an administrator lists the new commands in French");
+	reset_sent();
+	say(c, "boss", "$aide", COMMAND_CHANNEL_MAIL);
+	CHECK(sent_count == 0, "French command names do not exist: only the texts are French");
+	say(c, "eve", "$stop", COMMAND_CHANNEL_MAIL);
+	CHECK(replied("Aucune livraison en cours."), "replies are in French");
+	free(c);
+
+	/* ---- relocation: administrators only, always confirmed ---------------- */
+	{
+		map_pos_t home = { 200, 200 };
+		uint16_t hz; uint8_t hp;
+		MapPosToPointCode(home, &hz, &hp);
+
+		c = fresh("boss,alice");
+		c->items_loaded = true;
+		c->player.zone_id = hz; c->player.point_id = hp; c->player.current_kingdom_id = 42;
+
+		say(c, "eve", "$relocate random", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_NONE && replied("Seuls les administrateurs"), "relocation refused for a stranger");
+		reset_sent();
+		say(c, "boss", "$relocate random", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_NONE && replied("aucun relocalisateur aléatoire"), "no random relocator in the bag: refused");
+		reset_sent();
+
+		c->items[RANDOM_RELOCATOR].quantity = 1;
+		say(c, "boss", "$relocate random", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_RELOCATE_RANDOM && replied("Confirmez avec $confirm dans les 60 secondes, ou $cancel") && useitem_count == 0,
+			"random relocation asks for a confirmation and sends nothing yet");
+		reset_sent();
+		say(c, "eve", "$confirm", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_RELOCATE_RANDOM && useitem_count == 0, "a stranger cannot confirm");
+		say(c, "alice", "$confirm", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_RELOCATE_RANDOM && useitem_count == 0 && replied("demandée par boss"), "another administrator cannot confirm someone else's action");
+		reset_sent();
+		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
+		CHECK(useitem_count == 1 && c->pending.kind == PENDING_NONE, "the requester confirms: the relocator is used");
+		CHECK((uint16_t)(sent[0][8] | (sent[0][9] << 8)) == RANDOM_RELOCATOR, "the packet uses the random relocator item");
+		reset_sent();
+		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
+		CHECK(useitem_count == 0 && replied("Aucune action en attente"), "a confirmation cannot be replayed");
+
+		/* the server answers: item 1004/1003, quantity, unknown, zone, point, kingdom */
+		reset_sent();
+		{
+			map_pos_t landed = { 304, 410 };   /* the map works on even tiles */
+			uint16_t lz; uint8_t lp;
+			MapPosToPointCode(landed, &lz, &lp);
+			uint8_t answer[16] = { 0, RANDOM_RELOCATOR & 0xff, RANDOM_RELOCATOR >> 8, 0, 0, 0, 0, (uint8_t)(lz & 0xff), (uint8_t)(lz >> 8), lp, 42, 0 };
+			RecvUseItem(c, answer, sizeof(answer));
+			CHECK(replied("Château déplacé : royaume 42, X:304 Y:410"), "the administrator is told where the castle landed");
+			CHECK(c->player.zone_id == lz && c->player.point_id == lp, "the bot's own position is updated");
+			reset_sent();
+			RecvUseItem(c, answer, sizeof(answer));
+			CHECK(sent_count == 0, "the result is reported once");
+		}
+
+		/* expiry and cancel (the server's answer above set the quantity of relocators to 0) */
+		c->items[RANDOM_RELOCATOR].quantity = 1;
+		say(c, "boss", "$relocate random", COMMAND_CHANNEL_MAIL);
+		reset_sent();
+		c->pending.expires = time(NULL) - 1;
+		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
+		CHECK(useitem_count == 0 && c->pending.kind == PENDING_NONE && replied("60 secondes est dépassé"), "an expired confirmation is refused");
+		c->items[RANDOM_RELOCATOR].quantity = 1;
+		say(c, "boss", "$relocate random", COMMAND_CHANNEL_MAIL);
+		reset_sent();
+		say(c, "eve", "$cancel", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_RELOCATE_RANDOM, "a stranger cannot cancel");
+		say(c, "alice", "$cancel", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_NONE && replied("Action annulée"), "an administrator can cancel");
+
+		/* relocation to coordinates with the advanced relocator */
+		reset_sent();
+		say(c, "boss", "$relocate 100 100", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_NONE && replied("aucun relocalisateur avancé"), "no advanced relocator: refused");
+		c->items[ADVANCE_RELOCATOR].quantity = 2;
+		reset_sent();
+		say(c, "boss", "$relocate 99999 5", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_NONE && replied("Coordonnées invalides"), "coordinates outside the map are refused");
+		reset_sent();
+		say(c, "boss", "$relocate abc", COMMAND_CHANNEL_MAIL);
+		CHECK(replied("Usage : $relocate random | $relocate <x> <y>"), "wrong arguments show the usage");
+		reset_sent();
+		c->player.zone_id = hz; c->player.point_id = hp;
+		say(c, "boss", "$relocate 200 200", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_NONE && replied("déjà en X:200 Y:200"), "already there: refused");
+		reset_sent();
+		say(c, "boss", "$relocate 100 100", COMMAND_CHANNEL_MAIL);
+		CHECK(c->pending.kind == PENDING_RELOCATE_TO && replied("X:100 Y:100 (royaume 42)") && useitem_count == 0, "coordinates relocation asks for a confirmation");
+		reset_sent();
+		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
+		{
+			map_pos_t target = { 100, 100 };
+			uint16_t tz; uint8_t tp;
+			MapPosToPointCode(target, &tz, &tp);
+			const uint8_t *pk = sent[0];
+			CHECK(useitem_count == 1 && (uint16_t)(pk[8] | (pk[9] << 8)) == ADVANCE_RELOCATOR, "the advanced relocator is used");
+			CHECK((uint16_t)(pk[12] | (pk[13] << 8)) == 42 && (uint16_t)(pk[14] | (pk[15] << 8)) == tz && pk[16] == tp,
+				"the packet carries the current kingdom and the target zone and point");
+		}
+		/* the server refuses */
+		reset_sent();
+		{
+			uint8_t refused[2] = { 5, 0 };
+			RecvUseItem(c, refused, sizeof(refused));
+			CHECK(replied("échoué (code 5)"), "a refusal by the server is reported");
+			c->pending.report_to[0] = '\0';
+		}
+		reset_sent();
+		{
+			uint8_t refused[2] = { 5, 0 };
+			c->pending.report_until = time(NULL) - 1;
+			snprintf(c->pending.report_to, sizeof(c->pending.report_to), "boss");
+			RecvUseItem(c, refused, sizeof(refused));
+			CHECK(sent_count == 0, "a late answer is not reported");
+		}
 		free(c);
 	}
 

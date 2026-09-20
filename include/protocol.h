@@ -52,6 +52,7 @@ void RequestBuyGiftItem(Connection *c, uint8_t Type, uint16_t Key, uint16_t Item
 
 
 void RequestSimpleUseItem(Connection *c, uint32_t item_id, uint16_t quantity);
+void RequestUseAdvancedRelocator(Connection *c, uint16_t kingdom_id, uint16_t zone_id, uint8_t point_id);
 void RecvUseItem(Connection *c, const uint8_t *data, uint16_t);
 
 void ServerMagicGateDoEvent(Connection *c, uint16_t n, uint8_t x);
@@ -163,6 +164,9 @@ void BagApply(Connection *c, const BagUse *plan, int count);
 
 /* Answers a player through the configured command.output channel. Defined in command.c. */
 void BotReply(Connection *c, const char *player_name, const char *subject, const char *fmt, ...);
+
+/* Tells whoever asked for a relocation how it went. Defined in command.c. */
+void ReportRelocation(Connection *c, bool ok, uint8_t status);
 
 void RecvAllianceMemberInfo(Connection *c, const uint8_t *data);
 void RequestAllianceMemberInfo(Connection *c);

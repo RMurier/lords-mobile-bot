@@ -782,6 +782,24 @@ typedef enum {
 } TransferState;
 
 
+typedef enum {
+    PENDING_NONE,
+    PENDING_RELOCATE_RANDOM,
+    PENDING_RELOCATE_TO
+} PendingKind;
+
+/* An action that only happens after the administrator who asked for it confirms. */
+typedef struct {
+    PendingKind kind;
+    char     requester[13];
+    time_t   expires;
+    uint16_t x, y;            /* target of a relocation */
+    uint16_t zone_id;
+    uint8_t  point_id;
+    char     report_to[13];   /* who receives the server's answer once the action was sent */
+    time_t   report_until;
+} PendingAction;
+
 typedef struct {
 	char issued_name[13]; // Who initiated resource command?
     char target_name[13]; // Who will receive resource?
@@ -939,6 +957,7 @@ typedef struct {
 	RallyMember rally_members[30];
 	
 	ResourceTransfer transfer;
+	PendingAction pending;
 	
 	AllianceMemberList alliance_member;
 } Connection;

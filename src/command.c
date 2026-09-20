@@ -9,6 +9,7 @@
 #endif
 #include "items.h"
 #include "protocol.h"
+#include "map_point.h"
 
 /*
  * NOTE:
@@ -207,13 +208,34 @@ void AdminLoadRuntime(Connection *c)
 	fclose(fp);
 }
 
+/* True when `text` starts with `word` followed by the end of the string or a space. args = the rest. */
+static bool StartsWithWord(const char *text, const char *word, const char **args)
+{
+	size_t length = strlen(word);
+
+	if (strncmp(text, word, length) != 0)
+		return false;
+
+	if (text[length] != '\0' && text[length] != ' ')
+		return false;
+
+	const char *rest = text + length;
+
+	while (*rest == ' ')
+		rest++;
+
+	*args = rest;
+	return true;
+}
+
 static void AdminCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
 {
 	char list[512] = {0};
+	const char *rest;
 
-	if (strncmp(args, "list", 4) == 0 && (args[4] == '\0' || args[4] == ' ')) {
+	if (StartsWithWord(args, "list", &rest)) {
 		if (!is_admin) {
-			BotReply(c, player_name, "Unauthorized", "You don't have permission to see the administrators.");
+			BotReply(c, player_name, "Non autorisé", "Vous n'avez pas la permission de voir les administrateurs.");
 			return;
 		}
 
@@ -227,49 +249,46 @@ static void AdminCommand(Connection *c, const char *player_name, bool is_admin, 
 				break;
 		}
 
-		BotReply(c, player_name, "Administrators", "%s", c->bot.admin_count ? list : "No administrator configured.");
+		BotReply(c, player_name, "Administrateurs", "%s", c->bot.admin_count ? list : "Aucun administrateur configuré.");
 		return;
 	}
 
-	bool add    = strncmp(args, "add ", 4) == 0;
-	bool remove = strncmp(args, "remove ", 7) == 0;
+	bool add    = StartsWithWord(args, "add", &rest);
+	bool remove = !add && StartsWithWord(args, "remove", &rest);
 
 	if (!add && !remove) {
-		BotReply(c, player_name, "Administrators", "Usage: %cadmin list | %cadmin add <player> | %cadmin remove <player>",
+		BotReply(c, player_name, "Administrateurs", "Usage : %cadmin list | %cadmin add <joueur> | %cadmin remove <joueur>",
 			c->bot.command_prefix, c->bot.command_prefix, c->bot.command_prefix);
 		return;
 	}
 
 	if (!is_admin) {
-		BotReply(c, player_name, "Unauthorized", "You don't have permission to manage administrators.");
+		BotReply(c, player_name, "Non autorisé", "Vous n'avez pas la permission de gérer les administrateurs.");
 		return;
 	}
 
-	const char *target = args + (add ? 4 : 7);
-
-	while (*target == ' ')
-		target++;
+	const char *target = rest;
 
 	if (add) {
 		if (!AdminAdd(c, target)) {
-			BotReply(c, player_name, "Administrators", "Cannot add \"%s\" (invalid name, or at most %d administrators).", target, MAX_ADMINS);
+			BotReply(c, player_name, "Administrateurs", "Impossible d'ajouter « %s » (nom invalide, ou %d administrateurs au maximum).", target, MAX_ADMINS);
 			return;
 		}
 
-		BotReply(c, player_name, "Administrators", "%s is now an administrator.%s", target,
-			AdminSaveRuntime(c) ? "" : " (not saved: data.path is not writable)");
+		BotReply(c, player_name, "Administrateurs", "%s est maintenant administrateur.%s", target,
+			AdminSaveRuntime(c) ? "" : " (non enregistré : data.path n'est pas accessible en écriture)");
 		return;
 	}
 
 	if (!AdminRemove(c, target)) {
-		BotReply(c, player_name, "Administrators", IsAdmin(c, target)
-			? "%s is defined in the configuration file: remove it there."
-			: "%s is not an administrator.", target);
+		BotReply(c, player_name, "Administrateurs", IsAdmin(c, target)
+			? "%s est défini dans le fichier de configuration : retirez-le là."
+			: "%s n'est pas administrateur.", target);
 		return;
 	}
 
-	BotReply(c, player_name, "Administrators", "%s is no longer an administrator.%s", target,
-		AdminSaveRuntime(c) ? "" : " (not saved: data.path is not writable)");
+	BotReply(c, player_name, "Administrateurs", "%s n'est plus administrateur.%s", target,
+		AdminSaveRuntime(c) ? "" : " (non enregistré : data.path n'est pas accessible en écriture)");
 }
 
 /* ------------------------------------------------------------------------
@@ -318,51 +337,197 @@ static bool BankMayUseBag(const Connection *c, ResourceType type)
 }
 
 /* ------------------------------------------------------------------------
+ * Relocation. Actions that move the castle are only for administrators and
+ * always need a confirmation ($confirmer) within CONFIRM_SECONDS.
+ * ------------------------------------------------------------------------ */
+
+#define CONFIRM_SECONDS 60
+
+static void PendingClear(Connection *c)
+{
+	c->pending.kind = PENDING_NONE;
+	c->pending.requester[0] = '\0';
+}
+
+static void RelocateCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
+{
+	char p = c->bot.command_prefix;
+	const char *rest;
+	unsigned x, y;
+
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent déplacer le château.");
+		return;
+	}
+
+	if (!c->items_loaded) {
+		BotReply(c, player_name, "Relocalisation", "Le sac n'est pas encore chargé, réessayez dans un instant.");
+		return;
+	}
+
+	if (StartsWithWord(args, "random", &rest)) {
+		if (c->items[RANDOM_RELOCATOR].quantity == 0) {
+			BotReply(c, player_name, "Relocalisation", "Il n'y a aucun relocalisateur aléatoire dans le sac.");
+			return;
+		}
+
+		PendingClear(c);
+		c->pending.kind = PENDING_RELOCATE_RANDOM;
+		snprintf(c->pending.requester, sizeof(c->pending.requester), "%s", player_name);
+		c->pending.expires = time(NULL) + CONFIRM_SECONDS;
+
+		BotReply(c, player_name, "Relocalisation",
+			"Le château sera déplacé à un endroit choisi par le jeu (un relocalisateur aléatoire est consommé). "
+			"Confirmez avec %cconfirm dans les %d secondes, ou %ccancel.", p, CONFIRM_SECONDS, p);
+		return;
+	}
+
+	if (sscanf(args, "%u %u", &x, &y) != 2) {
+		BotReply(c, player_name, "Relocalisation", "Usage : %crelocate random | %crelocate <x> <y>", p, p);
+		return;
+	}
+
+	if (!CheckTileMapPos((int)x, (int)y)) {
+		BotReply(c, player_name, "Relocalisation", "Coordonnées invalides : X:%u Y:%u n'est pas une case du royaume.", x, y);
+		return;
+	}
+
+	map_pos_t here = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
+
+	if (here.x == x && here.y == y) {
+		BotReply(c, player_name, "Relocalisation", "Le château est déjà en X:%u Y:%u.", x, y);
+		return;
+	}
+
+	if (c->items[ADVANCE_RELOCATOR].quantity == 0) {
+		BotReply(c, player_name, "Relocalisation", "Il n'y a aucun relocalisateur avancé dans le sac.");
+		return;
+	}
+
+	map_pos_t target = { (uint16_t)x, (uint16_t)y };
+
+	PendingClear(c);
+	c->pending.kind = PENDING_RELOCATE_TO;
+	snprintf(c->pending.requester, sizeof(c->pending.requester), "%s", player_name);
+	c->pending.expires = time(NULL) + CONFIRM_SECONDS;
+	c->pending.x = (uint16_t)x;
+	c->pending.y = (uint16_t)y;
+	MapPosToPointCode(target, &c->pending.zone_id, &c->pending.point_id);
+
+	BotReply(c, player_name, "Relocalisation",
+		"Le château sera déplacé en X:%u Y:%u (royaume %u), un relocalisateur avancé est consommé. "
+		"Confirmez avec %cconfirm dans les %d secondes, ou %ccancel.", x, y, c->player.current_kingdom_id, p, CONFIRM_SECONDS, p);
+}
+
+static void ConfirmCommand(Connection *c, const char *player_name, bool is_admin)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Vous n'avez pas la permission de confirmer une action.");
+		return;
+	}
+
+	if (c->pending.kind == PENDING_NONE) {
+		BotReply(c, player_name, "Confirmation", "Aucune action en attente.");
+		return;
+	}
+
+	if (strcmp(c->pending.requester, player_name) != 0) {
+		BotReply(c, player_name, "Confirmation", "Cette action a été demandée par %s : seul lui peut la confirmer.", c->pending.requester);
+		return;
+	}
+
+	if (time(NULL) > c->pending.expires) {
+		PendingClear(c);
+		BotReply(c, player_name, "Confirmation", "Le délai de %d secondes est dépassé, recommencez la commande.", CONFIRM_SECONDS);
+		return;
+	}
+
+	if (c->pending.kind == PENDING_RELOCATE_RANDOM)
+		RequestSimpleUseItem(c, RANDOM_RELOCATOR, 1);
+	else
+		RequestUseAdvancedRelocator(c, c->player.current_kingdom_id, c->pending.zone_id, c->pending.point_id);
+
+	// the answer of the server is reported to the requester by ReportRelocation()
+	snprintf(c->pending.report_to, sizeof(c->pending.report_to), "%s", player_name);
+	c->pending.report_until = time(NULL) + 30;
+	PendingClear(c);
+
+	BotReply(c, player_name, "Relocalisation", "Relocalisation demandée, le résultat arrive dans un instant.");
+}
+
+static void CancelCommand(Connection *c, const char *player_name, bool is_admin)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Vous n'avez pas la permission d'annuler une action.");
+		return;
+	}
+
+	if (c->pending.kind == PENDING_NONE) {
+		BotReply(c, player_name, "Confirmation", "Aucune action en attente.");
+		return;
+	}
+
+	PendingClear(c);
+	BotReply(c, player_name, "Confirmation", "Action annulée.");
+}
+
+/* Called when the server answers the use of a relocator: tells whoever asked. */
+void ReportRelocation(Connection *c, bool ok, uint8_t status)
+{
+	if (c->pending.report_to[0] == '\0' || time(NULL) > c->pending.report_until)
+		return;
+
+	char who[13];
+
+	snprintf(who, sizeof(who), "%s", c->pending.report_to);
+	c->pending.report_to[0] = '\0';
+
+	if (ok) {
+		map_pos_t pos = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
+
+		BotReply(c, who, "Relocalisation", "Château déplacé : royaume %u, X:%u Y:%u.", c->player.current_kingdom_id, pos.x, pos.y);
+	} else {
+		BotReply(c, who, "Relocalisation", "L'utilisation de l'objet a échoué (code %u) : le château n'a peut-être pas été déplacé.", status);
+	}
+}
+
+/* ------------------------------------------------------------------------
  * Commands
  * ------------------------------------------------------------------------ */
 
+/* The command words stay English; `label` is the French name used in the answers. */
 static const struct {
 	const char   *name;
 	ResourceType  type;
+	const char   *label;
 } RESOURCE_COMMANDS[] = {
-	{ "food",  RESOURCE_FOOD },
-	{ "stone", RESOURCE_ROCK },
-	{ "wood",  RESOURCE_WOOD },
-	{ "ore",   RESOURCE_ORE  },
-	{ "gold",  RESOURCE_GOLD }
+	{ "food",  RESOURCE_FOOD, "nourriture" },
+	{ "stone", RESOURCE_ROCK, "pierre"     },
+	{ "wood",  RESOURCE_WOOD, "bois"       },
+	{ "ore",   RESOURCE_ORE,  "minerai"    },
+	{ "gold",  RESOURCE_GOLD, "or"         }
 };
+
+#define RESOURCE_COMMAND_COUNT (sizeof(RESOURCE_COMMANDS) / sizeof(RESOURCE_COMMANDS[0]))
 
 /* True when `message` is exactly the command `name` or starts with it followed by a space. args = the rest, without leading spaces. */
 static bool IsCommand(const char *message, const char *name, const char **args)
 {
-	size_t length = strlen(name);
-
-	if (strncmp(message, name, length) != 0)
-		return false;
-
-	if (message[length] != '\0' && message[length] != ' ')
-		return false;
-
-	const char *rest = message + length;
-
-	while (*rest == ' ')
-		rest++;
-
-	*args = rest;
-	return true;
+	return StartsWithWord(message, name, args);
 }
 
 static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 {
-	char text[900];
+	char text[1100];
 	char names[64] = {0};
 	char p = c->bot.command_prefix;
 	const char *first = "";
 	size_t used = 0, count = 0;
 
-	for (size_t i = 0; i < sizeof(RESOURCE_COMMANDS) / sizeof(RESOURCE_COMMANDS[0]); i++) {
+	for (size_t i = 0; i < RESOURCE_COMMAND_COUNT; i++) {
 		if (BankAllows(c, player_name, RESOURCE_COMMANDS[i].type)) {
 			used += (size_t)snprintf(names + used, sizeof(names) - used, "%s%s", count ? "|" : "", RESOURCE_COMMANDS[i].name);
+
 			if (count == 0)
 				first = RESOURCE_COMMANDS[i].name;
 
@@ -370,41 +535,43 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 		}
 	}
 
-	size_t n = (size_t)snprintf(text, sizeof(text), "Commands (prefix %c):\n", p);
+	size_t n = (size_t)snprintf(text, sizeof(text), "Commandes (préfixe %c) :\n", p);
 
 	if (count)
-		n += (size_t)snprintf(text + n, sizeof(text) - n, "%c<%s> <amount> - receive resources, e.g. %c%s 5M\n",
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "%c<%s> <montant> - recevoir des ressources, ex. %c%s 5M\n",
 			p, names, p, first);
 
-	n += (size_t)snprintf(text + n, sizeof(text) - n, "%cstop - cancel your pending transfer\n", p);
-	n += (size_t)snprintf(text + n, sizeof(text) - n, "%chelp - this list", p);
+	n += (size_t)snprintf(text + n, sizeof(text) - n, "%cstop - annuler votre livraison en cours\n", p);
+	n += (size_t)snprintf(text + n, sizeof(text) - n, "%chelp - cette liste", p);
 
 	if (is_admin) {
-		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cbank bal - bank, bag and total balance", p);
-		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <player>|remove <player> - manage administrators", p);
-		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%csu <player> - same as admin add", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cbank bal - solde de la banque, du sac et total", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <joueur>|remove <joueur> - gérer les administrateurs", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château (confirmation demandée)", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cconfirm / %ccancel - valider ou annuler l'action en attente", p, p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%csu <joueur> - équivaut à %cadmin add", p, p);
 	}
 
 	(void)n;
-	BotReply(c, player_name, "Commands", "%s", text);
+	BotReply(c, player_name, "Commandes", "%s", text);
 }
 
 static void StopTransfer(Connection *c, const char *player_name, bool is_admin)
 {
 	if (c->transfer.state == TRANSFER_IDLE) {
-		BotReply(c, player_name, "Transfer", "No transfer in progress.");
+		BotReply(c, player_name, "Livraison", "Aucune livraison en cours.");
 		return;
 	}
 
 	if (!is_admin && strcmp(c->transfer.target_name, player_name) != 0) {
-		BotReply(c, player_name, "Transfer", "This transfer is not yours.");
+		BotReply(c, player_name, "Livraison", "Cette livraison n'est pas la vôtre.");
 		return;
 	}
 
 	memset(&c->transfer, 0, sizeof(c->transfer));
 	c->transfer.state = TRANSFER_IDLE;
 
-	BotReply(c, player_name, "Transfer Cancelled", "Transfer cancelled. Marches already sent will still arrive.");
+	BotReply(c, player_name, "Livraison annulée", "Livraison annulée. Les marches déjà parties arriveront quand même.");
 }
 
 void command_handler(Connection *c, const char *player_name, const char *message, CommandChannel source)
@@ -431,9 +598,9 @@ void command_handler(Connection *c, const char *player_name, const char *message
 		return;
 	}
 
-	for (size_t i = 0; i < sizeof(RESOURCE_COMMANDS) / sizeof(RESOURCE_COMMANDS[0]); i++) {
+	for (size_t i = 0; i < RESOURCE_COMMAND_COUNT; i++) {
 		if (IsCommand(message, RESOURCE_COMMANDS[i].name, &args)) {
-			ResourceCommandHandler(c, player_name, args, RESOURCE_COMMANDS[i].type, RESOURCE_COMMANDS[i].name);
+			ResourceCommandHandler(c, player_name, args, RESOURCE_COMMANDS[i].type, RESOURCE_COMMANDS[i].label);
 			return;
 		}
 	}
@@ -448,9 +615,24 @@ void command_handler(Connection *c, const char *player_name, const char *message
 		return;
 	}
 
+	if (IsCommand(message, "relocate", &args)) {
+		RelocateCommand(c, player_name, is_admin, args);
+		return;
+	}
+
+	if (IsCommand(message, "confirm", &args)) {
+		ConfirmCommand(c, player_name, is_admin);
+		return;
+	}
+
+	if (IsCommand(message, "cancel", &args)) {
+		CancelCommand(c, player_name, is_admin);
+		return;
+	}
+
 	if (IsCommand(message, "su", &args)) {
 		if (*args == '\0') {
-			BotReply(c, player_name, "Administrators", "Usage: %csu <player>", c->bot.command_prefix);
+			BotReply(c, player_name, "Administrateurs", "Usage : %csu <joueur>", c->bot.command_prefix);
 			return;
 		}
 
@@ -508,8 +690,8 @@ static void ResourceCommandHandler(
 			BotReply(
 				c,
 				player_name,
-				"Transfer Busy",
-				"Currently sending resources to %s. Use %cstop to cancel.",
+				"Occupé",
+				"Envoi de ressources en cours à %s. Utilisez %cstop pour annuler.",
 				c->transfer.target_name,
 				c->bot.command_prefix
 			);
@@ -577,10 +759,10 @@ static void ResourceCommandHandler(
 			BotReply(
 				c,
 				player_name,
-				"Not Enough Resources",
-				"Only %s %s available.",
-				available_str,
-				name
+				"Ressources insuffisantes",
+				"Ressources insuffisantes (%s) : %s disponible.",
+				name,
+				available_str
 			);
 			return;
 		}
@@ -663,12 +845,12 @@ uint64_t GetBagGold(Connection *c) {
 void ShowBankBalance(Connection *c, const char *player_name) {
 	if (!IsAdmin(c, player_name)) {
 		// Return message if necessary 
-		BotReply(c, player_name, "Unauthorize", "You don't have permission to see bank balance!.");
+		BotReply(c, player_name, "Non autorisé", "Vous n'avez pas la permission de voir le solde de la banque.");
 		return;
 	}
 	
 	if (!c->items_loaded) {
-		BotReply(c, player_name, "Problem encounter", "Something went wrong please try again later.");
+		BotReply(c, player_name, "Problème", "Un problème est survenu, réessayez dans un instant.");
 		return;
 	}
 	
@@ -719,10 +901,10 @@ void ShowBankBalance(Connection *c, const char *player_name) {
 	format_number2(c->resources.ore  + BagOre,   sum_ore,  sizeof(sum_ore));
 	format_number2(c->resources.gold + BagGold,  sum_gold, sizeof(sum_gold));
 	
-	BotReply(c, player_name, "Bank Balance", 
-		"[BNK] Food: %s | Stone: %s | Wood: %s | Ore: %s | Gold: %s\n"
-		"[BAG] Food: %s | Stone: %s | Wood: %s | Ore: %s | Gold: %s\n"
-		"[SUM] Food: %s | Stone: %s | Wood: %s | Ore: %s | Gold: %s",
+	BotReply(c, player_name, "Solde de la banque", 
+		"[BANQUE] Nourriture : %s | Pierre : %s | Bois : %s | Minerai : %s | Or : %s\n"
+		"[SAC] Nourriture : %s | Pierre : %s | Bois : %s | Minerai : %s | Or : %s\n"
+		"[TOTAL] Nourriture : %s | Pierre : %s | Bois : %s | Minerai : %s | Or : %s",
 		bank_food, bank_rock, bank_wood, bank_ore, bank_gold,
 		bag_food, bag_rock, bag_wood, bag_ore, bag_gold,
 		sum_food, sum_rock, sum_wood, sum_ore, sum_gold
