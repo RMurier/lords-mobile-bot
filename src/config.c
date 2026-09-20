@@ -117,6 +117,11 @@ uint64_t parse_number_u64(const char *str) {
 }
 */
 
+static bool ParseBool(const char *value)
+{
+    return strcmp(value, "true") == 0 || strcmp(value, "1") == 0;
+}
+
 uint64_t parse_number_u64(const char *str);
 
 static bool ParserConfig(Connection *c, const char *key, const char *value) {
@@ -231,12 +236,7 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 	}
 	
 	if (strcmp(key, "protection.shield_always_on") == 0) {
-		c->protection.enabled = (strcmp(value, "true") == 0);
-		return true;
-	}
-	
-	if (strcmp(key, "protection.shield_always_on") == 0) {
-		c->protection.enabled = (strcmp(value, "true") == 0);
+		c->protection.shield_always_on = (strcmp(value, "true") == 0);
 		return true;
 	}
 	
@@ -254,6 +254,120 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return ParseShieldPriority(c, value);
 	}
 	
+	// data directory
+	if (strcmp(key, "data.path") == 0) {
+		strncpy(c->bot.data_path, value, sizeof(c->bot.data_path) - 1);
+		c->bot.data_path[sizeof(c->bot.data_path) - 1] = '\0';
+		return true;
+	}
+
+	// bank
+	if (strcmp(key, "bank.enabled") == 0) {
+		c->bank.enabled = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.send_food") == 0) {
+		c->bank.send_food = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.send_rock") == 0) {
+		c->bank.send_rock = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.send_wood") == 0) {
+		c->bank.send_wood = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.send_ore") == 0) {
+		c->bank.send_ore = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.send_gold") == 0) {
+		c->bank.send_gold = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.reserve_food") == 0) {
+		c->bank.reserve.food = (uint32_t)parse_number_u64(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.reserve_rock") == 0) {
+		c->bank.reserve.rock = (uint32_t)parse_number_u64(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.reserve_wood") == 0) {
+		c->bank.reserve.wood = (uint32_t)parse_number_u64(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.reserve_ore") == 0) {
+		c->bank.reserve.ore = (uint32_t)parse_number_u64(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.reserve_gold") == 0) {
+		c->bank.reserve.gold = (uint32_t)parse_number_u64(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.max_delivery_distance") == 0) {
+		c->bank.max_delivery_distance = (uint32_t)strtoul(value, NULL, 10);
+		return true;
+	}
+
+	if (strcmp(key, "bank.use_bag_rss") == 0) {
+		c->bank.use_bag_rss = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.use_bag_food") == 0) {
+		c->bank.use_bag_food = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.use_bag_rock") == 0) {
+		c->bank.use_bag_rock = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.use_bag_wood") == 0) {
+		c->bank.use_bag_wood = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.use_bag_ore") == 0) {
+		c->bank.use_bag_ore = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "bank.use_bag_gold") == 0) {
+		c->bank.use_bag_gold = ParseBool(value);
+		return true;
+	}
+
+	// troop recall
+	if (strcmp(key, "protection.recall_on_incoming_attack") == 0) {
+		c->protection.recall_on_incoming_attack = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "protection.recall_on_incoming_scout") == 0) {
+		c->protection.recall_on_incoming_scout = ParseBool(value);
+		return true;
+	}
+
+	if (strcmp(key, "protection.recall_on_incoming_conflict") == 0) {
+		c->protection.recall_on_incoming_conflict = ParseBool(value);
+		return true;
+	}
+
 	if (strcmp(key, "admin.name") == 0) {
 		strncpy(c->bot.admin_name, value, sizeof(c->bot.admin_name) - 1);
 		c->bot.admin_name[sizeof(c->bot.admin_name) - 1] = '\0';
