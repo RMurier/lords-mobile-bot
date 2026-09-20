@@ -409,7 +409,7 @@ int main(void)
 		"help for a player is entirely in French, with the English command words");
 	reset_sent();
 	say(c, "boss", "$help", COMMAND_CHANNEL_MAIL);
-	CHECK(replied("$relocate random|<x> <y> - déplacer le château") && replied("$confirm / $cancel - valider ou annuler") && replied("gérer les administrateurs")
+	CHECK(replied("$relocate random|<x> <y> - déplacer le château") && replied("$migrate <royaume> <x> <y> - migrer vers un autre royaume") && !replied("$confirm") && replied("gérer les administrateurs")
 		&& replied("solde de la banque, du sac et total"), "help for an administrator lists the new commands in French");
 	reset_sent();
 	say(c, "boss", "$aide", COMMAND_CHANNEL_MAIL);
@@ -418,7 +418,7 @@ int main(void)
 	CHECK(replied("Aucune livraison en cours."), "replies are in French");
 	free(c);
 
-	/* ---- relocation: administrators only, always confirmed ---------------- */
+	/* ---- relocation: administrators only, acts at once, writes back only on a problem ---- */
 	{
 		map_pos_t home = { 200, 200 };
 		uint16_t hz; uint8_t hp;
@@ -429,30 +429,18 @@ int main(void)
 		c->player.zone_id = hz; c->player.point_id = hp; c->player.current_kingdom_id = 42;
 
 		say(c, "eve", "$relocate random", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_NONE && replied("Seuls les administrateurs"), "relocation refused for a stranger");
+		CHECK(useitem_count == 0 && replied("Seuls les administrateurs"), "relocation refused for a stranger");
 		reset_sent();
 		say(c, "boss", "$relocate random", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_NONE && replied("aucun relocalisateur aléatoire"), "no random relocator in the bag: refused");
-		reset_sent();
+		CHECK(useitem_count == 0 && replied("aucun relocalisateur aléatoire"), "no random relocator in the bag: error message, nothing sent");
 
+		reset_sent();
 		c->items[RANDOM_RELOCATOR].quantity = 1;
 		say(c, "boss", "$relocate random", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_RELOCATE_RANDOM && replied("Confirmez avec $confirm dans les 60 secondes, ou $cancel") && useitem_count == 0,
-			"random relocation asks for a confirmation and sends nothing yet");
-		reset_sent();
-		say(c, "eve", "$confirm", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_RELOCATE_RANDOM && useitem_count == 0, "a stranger cannot confirm");
-		say(c, "alice", "$confirm", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_RELOCATE_RANDOM && useitem_count == 0 && replied("demandée par boss"), "another administrator cannot confirm someone else's action");
-		reset_sent();
-		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
-		CHECK(useitem_count == 1 && c->pending.kind == PENDING_NONE, "the requester confirms: the relocator is used");
+		CHECK(useitem_count == 1 && replied("Relocalisation aléatoire demandée"), "random relocation is sent at once, without confirmation");
 		CHECK((uint16_t)(sent[0][8] | (sent[0][9] << 8)) == RANDOM_RELOCATOR, "the packet uses the random relocator item");
-		reset_sent();
-		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
-		CHECK(useitem_count == 0 && replied("Aucune action en attente"), "a confirmation cannot be replayed");
 
-		/* the server answers: item 1004/1003, quantity, unknown, zone, point, kingdom */
+		/* the server answers: item, quantity, unknown, zone, point, kingdom */
 		reset_sent();
 		{
 			map_pos_t landed = { 304, 410 };   /* the map works on even tiles */
@@ -467,49 +455,35 @@ int main(void)
 			CHECK(sent_count == 0, "the result is reported once");
 		}
 
-		/* expiry and cancel (the server's answer above set the quantity of relocators to 0) */
-		c->items[RANDOM_RELOCATOR].quantity = 1;
-		say(c, "boss", "$relocate random", COMMAND_CHANNEL_MAIL);
-		reset_sent();
-		c->pending.expires = time(NULL) - 1;
-		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
-		CHECK(useitem_count == 0 && c->pending.kind == PENDING_NONE && replied("60 secondes est dépassé"), "an expired confirmation is refused");
-		c->items[RANDOM_RELOCATOR].quantity = 1;
-		say(c, "boss", "$relocate random", COMMAND_CHANNEL_MAIL);
-		reset_sent();
-		say(c, "eve", "$cancel", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_RELOCATE_RANDOM, "a stranger cannot cancel");
-		say(c, "alice", "$cancel", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_NONE && replied("Action annulée"), "an administrator can cancel");
-
-		/* relocation to coordinates with the advanced relocator */
+		/* coordinates with the advanced relocator */
 		reset_sent();
 		say(c, "boss", "$relocate 100 100", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_NONE && replied("aucun relocalisateur avancé"), "no advanced relocator: refused");
+		CHECK(useitem_count == 0 && replied("aucun relocalisateur avancé"), "no advanced relocator: error message, nothing sent");
 		c->items[ADVANCE_RELOCATOR].quantity = 2;
 		reset_sent();
 		say(c, "boss", "$relocate 99999 5", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_NONE && replied("Coordonnées invalides"), "coordinates outside the map are refused");
+		CHECK(useitem_count == 0 && replied("Coordonnées invalides"), "coordinates outside the map are refused");
 		reset_sent();
 		say(c, "boss", "$relocate abc", COMMAND_CHANNEL_MAIL);
-		CHECK(replied("Usage : $relocate random | $relocate <x> <y>"), "wrong arguments show the usage");
+		CHECK(useitem_count == 0 && replied("Usage : $relocate random | $relocate <x> <y>"), "wrong arguments show the usage");
 		reset_sent();
 		c->player.zone_id = hz; c->player.point_id = hp;
 		say(c, "boss", "$relocate 200 200", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_NONE && replied("déjà en X:200 Y:200"), "already there: refused");
+		CHECK(useitem_count == 0 && replied("déjà en X:200 Y:200"), "already there: refused");
 		reset_sent();
 		say(c, "boss", "$relocate 100 100", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_RELOCATE_TO && replied("X:100 Y:100 (royaume 42)") && useitem_count == 0, "coordinates relocation asks for a confirmation");
-		reset_sent();
-		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
 		{
 			map_pos_t target = { 100, 100 };
 			uint16_t tz; uint8_t tp;
 			MapPosToPointCode(target, &tz, &tp);
-			const uint8_t *pk = sent[0];
-			CHECK(useitem_count == 1 && (uint16_t)(pk[8] | (pk[9] << 8)) == ADVANCE_RELOCATOR, "the advanced relocator is used");
-			CHECK((uint16_t)(pk[12] | (pk[13] << 8)) == 42 && (uint16_t)(pk[14] | (pk[15] << 8)) == tz && pk[16] == tp,
-				"the packet carries the current kingdom and the target zone and point");
+			int k = find_packet(_MSG_REQUEST_USEITEM);
+			CHECK(k >= 0 && useitem_count == 1 && replied("X:100 Y:100 demandée (royaume 42)"), "coordinates relocation is sent at once");
+			if (k >= 0) {
+				const uint8_t *pk = sent[k];
+				CHECK((uint16_t)(pk[8] | (pk[9] << 8)) == ADVANCE_RELOCATOR, "the advanced relocator is used");
+				CHECK((uint16_t)(pk[12] | (pk[13] << 8)) == 42 && (uint16_t)(pk[14] | (pk[15] << 8)) == tz && pk[16] == tp,
+					"the packet carries the current kingdom and the target zone and point");
+			}
 		}
 		/* the server refuses */
 		reset_sent();
@@ -517,21 +491,20 @@ int main(void)
 			uint8_t refused[2] = { 5, 0 };
 			RecvUseItem(c, refused, sizeof(refused));
 			CHECK(replied("échoué (code 5)"), "a refusal by the server is reported");
-			c->pending.report_to[0] = '\0';
-		}
-		reset_sent();
-		{
-			uint8_t refused[2] = { 5, 0 };
-			c->pending.report_until = time(NULL) - 1;
-			snprintf(c->pending.report_to, sizeof(c->pending.report_to), "boss");
+			reset_sent();
+			c->relocation.report_until = time(NULL) - 1;
+			snprintf(c->relocation.report_to, sizeof(c->relocation.report_to), "boss");
 			RecvUseItem(c, refused, sizeof(refused));
 			CHECK(sent_count == 0, "a late answer is not reported");
 		}
+		reset_sent();
+		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
+		say(c, "boss", "$cancel", COMMAND_CHANNEL_MAIL);
+		CHECK(sent_count == 0, "$confirm and $cancel do not exist any more");
 		free(c);
 	}
 
-
-	/* ---- kingdom migration: the packets must match the ones of the official client ---- */
+	/* ---- kingdom migration: acts at once, the packets match the ones of the official client ---- */
 	{
 		/* as sent by the real client for 796 / X:301 Y:491: kingdom 0x031c, zone 0x01e9, point 0xb6 */
 		map_pos_t landing = { 301, 491 };
@@ -545,36 +518,27 @@ int main(void)
 		snprintf(c->auth.session, sizeof(c->auth.session), "SESSIONKEY-FOR-TEST");
 
 		say(c, "eve", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_NONE && replied("Seuls les administrateurs"), "migration refused for a stranger");
+		CHECK(find_packet(1011) < 0 && replied("Seuls les administrateurs"), "migration refused for a stranger");
 		reset_sent();
 		say(c, "boss", "$migrate 796", COMMAND_CHANNEL_MAIL);
-		CHECK(replied("Usage : $migrate <royaume> <x> <y>"), "missing coordinates show the usage");
+		CHECK(find_packet(1011) < 0 && replied("Usage : $migrate <royaume> <x> <y>"), "missing coordinates show the usage");
 		reset_sent();
 		say(c, "boss", "$migrate 232 301 491", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_NONE && replied("déjà dans le royaume 232") && replied("$relocate"), "migrating to the current kingdom points to $relocate");
+		CHECK(find_packet(1011) < 0 && replied("déjà dans le royaume 232") && replied("$relocate"), "migrating to the current kingdom points to $relocate");
 		reset_sent();
 		say(c, "boss", "$migrate 796 99999 5", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_NONE && replied("Coordonnées invalides"), "coordinates outside the map are refused");
+		CHECK(find_packet(1011) < 0 && replied("Coordonnées invalides"), "coordinates outside the map are refused");
 		reset_sent();
 		say(c, "boss", "$migrate 0 301 491", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_NONE && replied("Numéro de royaume invalide"), "kingdom 0 is refused");
+		CHECK(find_packet(1011) < 0 && replied("Numéro de royaume invalide"), "kingdom 0 is refused");
 
-		/* no scroll in the bag: the administrator is told, and the request still waits for a confirmation */
+		/* no scroll: it goes out at once, with the warning the administrator asked for */
 		reset_sent();
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
-		CHECK(c->pending.kind == PENDING_MIGRATE && replied("aucun vélin de migration dans le sac") && replied("royaume 796 en X:301 Y:491")
-			&& replied("Confirmez avec $confirm") && find_packet(1011) < 0 && find_packet(3156) < 0, "no scroll: warned, asks for a confirmation, sends nothing yet");
-		reset_sent();
-		c->items[MIGRATION_SCROLL].quantity = 2;
-		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
-		CHECK(replied("Vélins de migration dans le sac : 2"), "scrolls in the bag are counted");
-
-		/* confirm: the game first looks the kingdom up (kingdom u16 + session[512]) */
-		reset_sent();
-		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
 		{
 			int k = find_packet(1011);
-			CHECK(k >= 0 && c->migration.state == MIGRATION_WAIT_SERVER, "confirm asks for the server of the target kingdom");
+			CHECK(k >= 0 && c->migration.state == MIGRATION_WAIT_SERVER, "the migration starts at once, without confirmation: the kingdom is looked up");
+			CHECK(replied("aucun vélin de migration dans le sac") && replied("royaume 796 en X:301 Y:491"), "no scroll in the bag: the administrator is told");
 			if (k >= 0) {
 				const uint8_t *pk = sent[k];
 				CHECK((uint16_t)(pk[0] | (pk[1] << 8)) == 4 + 4 + 2 + 512, "kingdom lookup: same size as the real client (522 bytes)");
@@ -606,37 +570,38 @@ int main(void)
 		{ uint8_t ok = 0; RecvFreeCrossTeleport(c, &ok); }
 		CHECK(c->migration.state == MIGRATION_IDLE && replied("Migration acceptée : le château part vers le royaume 796 en X:301 Y:491"), "an accepted migration is reported");
 
-		/* refused, no scroll: the message the administrator asked for */
+		/* with scrolls in the bag the acknowledgement has no warning */
+		c->items[MIGRATION_SCROLL].quantity = 2;
+		reset_sent();
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		CHECK(!replied("aucun vélin") && replied("demandée, le résultat arrive dans un instant"), "scrolls in the bag: no warning");
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+
+		/* refused, scrolls available: honest about what the bot cannot do */
+		reset_sent();
+		c->items[MIGRATION_SCROLL].quantity = 3;
+		{ uint8_t refused = 5; RecvFreeCrossTeleport(c, &refused); }
+		CHECK(replied("Vous avez 3 vélin(s) de migration") && replied("ne sait pas encore les utiliser"), "refused with scrolls: the bot says it cannot use them yet");
+
+		/* refused, no scroll left: the message the administrator asked for */
 		c->items[MIGRATION_SCROLL].quantity = 0;
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
-		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
 		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
 		reset_sent();
 		{ uint8_t refused = 5; RecvFreeCrossTeleport(c, &refused); }
 		CHECK(replied("vous n'avez plus de vélin de migration") && replied("code 5"), "refused with no scroll left: the bot says there is none");
 
-		/* refused, scrolls available: honest about what the bot cannot do */
-		c->items[MIGRATION_SCROLL].quantity = 3;
-		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
-		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
-		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
-		reset_sent();
-		{ uint8_t refused = 5; RecvFreeCrossTeleport(c, &refused); }
-		CHECK(replied("Vous avez 3 vélin(s) de migration") && replied("ne sait pas encore les utiliser"), "refused with scrolls: the bot says it cannot use them yet");
-
 		/* unknown or closed kingdom */
 		say(c, "boss", "$migrate 9999 301 491", COMMAND_CHANNEL_MAIL);
-		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
 		reset_sent();
 		{ uint8_t missing[1] = { 1 }; RecvKingdomServer(c, missing, sizeof(missing)); }
 		CHECK(c->migration.state == MIGRATION_IDLE && replied("royaume 9999 est introuvable ou fermé") && find_packet(3156) < 0, "an unknown kingdom is reported and nothing is teleported");
 
 		/* only one at a time, and a silent server is given up on */
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
-		say(c, "boss", "$confirm", COMMAND_CHANNEL_MAIL);
 		reset_sent();
 		say(c, "boss", "$migrate 800 301 491", COMMAND_CHANNEL_MAIL);
-		CHECK(replied("Une migration est déjà en cours"), "a second migration is refused while one runs");
+		CHECK(find_packet(1011) < 0 && replied("Une migration est déjà en cours"), "a second migration is refused while one runs");
 		reset_sent();
 		MigrationTick(c);
 		CHECK(c->migration.state == MIGRATION_WAIT_SERVER && sent_count == 0, "no answer yet: keep waiting");

@@ -170,8 +170,8 @@ Commands start with the prefix `$` by default and are answered by mail.
 | `$food` / `$stone` / `$wood` / `$ore` / `$gold <amount>` | administrators; others only if the bank allows it | Sends the resource to the player who asked (`$gold 5M`) |
 | `$bank bal` | administrators | Mails the bank, bag and total balance |
 | `$admin list` / `add <player>` / `remove <player>` | administrators | Manages administrators (added ones are saved) |
-| `$relocate random` / `$relocate <x> <y>` | administrators | Moves the castle; always asks for `$confirm` first |
-| `$migrate <kingdom> <x> <y>` | administrators | Migrates to another kingdom (free migration); always asks for `$confirm` first |
+| `$relocate random` / `$relocate <x> <y>` | administrators | Moves the castle at once (no confirmation) |
+| `$migrate <kingdom> <x> <y>` | administrators | Migrates to another kingdom (free migration) at once (no confirmation) |
 | `$su <player>` | administrators | Same as `$admin add` |
 
 Command words are English; the bot's answers and `$help` are in French. Commands are read from the channels in `command.input` (alliance chat and mail by default) and

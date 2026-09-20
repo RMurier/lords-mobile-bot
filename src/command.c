@@ -337,16 +337,16 @@ static bool BankMayUseBag(const Connection *c, ResourceType type)
 }
 
 /* ------------------------------------------------------------------------
- * Relocation. Actions that move the castle are only for administrators and
- * always need a confirmation ($confirmer) within CONFIRM_SECONDS.
+ * Relocation and migration. Administrators only. They act at once and only
+ * write back when something is wrong (no item, invalid coordinates, refusal),
+ * or when the server has answered.
  * ------------------------------------------------------------------------ */
 
-#define CONFIRM_SECONDS 60
-
-static void PendingClear(Connection *c)
+/* The answer of the server to a relocator is reported to `player_name` for the next 30 seconds. */
+static void WatchRelocation(Connection *c, const char *player_name)
 {
-	c->pending.kind = PENDING_NONE;
-	c->pending.requester[0] = '\0';
+	snprintf(c->relocation.report_to, sizeof(c->relocation.report_to), "%s", player_name);
+	c->relocation.report_until = time(NULL) + 30;
 }
 
 static void RelocateCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
@@ -354,69 +354,60 @@ static void RelocateCommand(Connection *c, const char *player_name, bool is_admi
 	char p = c->bot.command_prefix;
 	const char *rest;
 	unsigned x, y;
-
+	
 	if (!is_admin) {
 		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent déplacer le château.");
 		return;
 	}
-
+	
 	if (!c->items_loaded) {
 		BotReply(c, player_name, "Relocalisation", "Le sac n'est pas encore chargé, réessayez dans un instant.");
 		return;
 	}
-
+	
 	if (StartsWithWord(args, "random", &rest)) {
 		if (c->items[RANDOM_RELOCATOR].quantity == 0) {
 			BotReply(c, player_name, "Relocalisation", "Il n'y a aucun relocalisateur aléatoire dans le sac.");
 			return;
 		}
-
-		PendingClear(c);
-		c->pending.kind = PENDING_RELOCATE_RANDOM;
-		snprintf(c->pending.requester, sizeof(c->pending.requester), "%s", player_name);
-		c->pending.expires = time(NULL) + CONFIRM_SECONDS;
-
-		BotReply(c, player_name, "Relocalisation",
-			"Le château sera déplacé à un endroit choisi par le jeu (un relocalisateur aléatoire est consommé). "
-			"Confirmez avec %cconfirm dans les %d secondes, ou %ccancel.", p, CONFIRM_SECONDS, p);
+		
+		WatchRelocation(c, player_name);
+		RequestSimpleUseItem(c, RANDOM_RELOCATOR, 1);
+		BotReply(c, player_name, "Relocalisation", "Relocalisation aléatoire demandée, le résultat arrive dans un instant.");
 		return;
 	}
-
+	
 	if (sscanf(args, "%u %u", &x, &y) != 2) {
 		BotReply(c, player_name, "Relocalisation", "Usage : %crelocate random | %crelocate <x> <y>", p, p);
 		return;
 	}
-
+	
 	if (!CheckTileMapPos((int)x, (int)y)) {
 		BotReply(c, player_name, "Relocalisation", "Coordonnées invalides : X:%u Y:%u n'est pas une case du royaume.", x, y);
 		return;
 	}
-
+	
 	map_pos_t here = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
-
+	
 	if (here.x == x && here.y == y) {
 		BotReply(c, player_name, "Relocalisation", "Le château est déjà en X:%u Y:%u.", x, y);
 		return;
 	}
-
+	
 	if (c->items[ADVANCE_RELOCATOR].quantity == 0) {
 		BotReply(c, player_name, "Relocalisation", "Il n'y a aucun relocalisateur avancé dans le sac.");
 		return;
 	}
-
+	
 	map_pos_t target = { (uint16_t)x, (uint16_t)y };
-
-	PendingClear(c);
-	c->pending.kind = PENDING_RELOCATE_TO;
-	snprintf(c->pending.requester, sizeof(c->pending.requester), "%s", player_name);
-	c->pending.expires = time(NULL) + CONFIRM_SECONDS;
-	c->pending.x = (uint16_t)x;
-	c->pending.y = (uint16_t)y;
-	MapPosToPointCode(target, &c->pending.zone_id, &c->pending.point_id);
-
-	BotReply(c, player_name, "Relocalisation",
-		"Le château sera déplacé en X:%u Y:%u (royaume %u), un relocalisateur avancé est consommé. "
-		"Confirmez avec %cconfirm dans les %d secondes, ou %ccancel.", x, y, c->player.current_kingdom_id, p, CONFIRM_SECONDS, p);
+	uint16_t zone;
+	uint8_t point;
+	
+	MapPosToPointCode(target, &zone, &point);
+	WatchRelocation(c, player_name);
+	RequestUseAdvancedRelocator(c, c->player.current_kingdom_id, zone, point);
+	BotReply(c, player_name, "Relocalisation", "Relocalisation vers X:%u Y:%u demandée (royaume %u), le résultat arrive dans un instant.",
+		x, y, c->player.current_kingdom_id);
 }
 
 static void MigrateCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
@@ -454,113 +445,36 @@ static void MigrateCommand(Connection *c, const char *player_name, bool is_admin
 		return;
 	}
 	
-	if (c->migration.state != MIGRATION_IDLE) {
+	map_pos_t target = { (uint16_t)x, (uint16_t)y };
+	uint16_t zone;
+	uint8_t point;
+	
+	MapPosToPointCode(target, &zone, &point);
+	
+	if (!MigrationStart(c, player_name, (uint16_t)kingdom, (uint16_t)x, (uint16_t)y, zone, point)) {
 		BotReply(c, player_name, "Migration", "Une migration est déjà en cours.");
 		return;
 	}
 	
-	// the free migration (offered to returning players) is tried first; otherwise a migration scroll is needed
-	char note[200];
-	uint16_t scrolls = c->items[MIGRATION_SCROLL].quantity;
-	
-	if (scrolls == 0)
-		snprintf(note, sizeof(note), "Attention : il n'y a aucun vélin de migration dans le sac, la migration ne marchera que si une migration gratuite est disponible.");
+	// the free migration (offered to returning players) is tried; without it a migration scroll is needed
+	if (c->items[MIGRATION_SCROLL].quantity == 0)
+		BotReply(c, player_name, "Migration",
+			"Migration vers le royaume %u en X:%u Y:%u demandée. Il n'y a aucun vélin de migration dans le sac : seule la migration gratuite peut aboutir.",
+			kingdom, x, y);
 	else
-		snprintf(note, sizeof(note), "Vélins de migration dans le sac : %u.", scrolls);
-	
-	map_pos_t target = { (uint16_t)x, (uint16_t)y };
-	
-	PendingClear(c);
-	c->pending.kind = PENDING_MIGRATE;
-	snprintf(c->pending.requester, sizeof(c->pending.requester), "%s", player_name);
-	c->pending.expires = time(NULL) + CONFIRM_SECONDS;
-	c->pending.kingdom_id = (uint16_t)kingdom;
-	c->pending.x = (uint16_t)x;
-	c->pending.y = (uint16_t)y;
-	MapPosToPointCode(target, &c->pending.zone_id, &c->pending.point_id);
-	
-	BotReply(c, player_name, "Migration",
-		"Le château migrera vers le royaume %u en X:%u Y:%u (migration gratuite si elle est disponible). %s "
-		"Le jeu ferme ensuite la connexion et le bot se reconnecte. Confirmez avec %cconfirm dans les %d secondes, ou %ccancel.",
-		kingdom, x, y, note, p, CONFIRM_SECONDS, p);
-}
-
-static void ConfirmCommand(Connection *c, const char *player_name, bool is_admin)
-{
-	if (!is_admin) {
-		BotReply(c, player_name, "Non autorisé", "Vous n'avez pas la permission de confirmer une action.");
-		return;
-	}
-
-	if (c->pending.kind == PENDING_NONE) {
-		BotReply(c, player_name, "Confirmation", "Aucune action en attente.");
-		return;
-	}
-
-	if (strcmp(c->pending.requester, player_name) != 0) {
-		BotReply(c, player_name, "Confirmation", "Cette action a été demandée par %s : seul lui peut la confirmer.", c->pending.requester);
-		return;
-	}
-
-	if (time(NULL) > c->pending.expires) {
-		PendingClear(c);
-		BotReply(c, player_name, "Confirmation", "Le délai de %d secondes est dépassé, recommencez la commande.", CONFIRM_SECONDS);
-		return;
-	}
-
-	if (c->pending.kind == PENDING_MIGRATE) {
-		uint16_t kingdom = c->pending.kingdom_id, x = c->pending.x, y = c->pending.y, zone = c->pending.zone_id;
-		uint8_t point = c->pending.point_id;
-		
-		PendingClear(c);
-		
-		if (!MigrationStart(c, player_name, kingdom, x, y, zone, point))
-			BotReply(c, player_name, "Migration", "Une migration est déjà en cours.");
-		else
-			BotReply(c, player_name, "Migration", "Migration demandée : vérification du royaume %u, puis envoi. Le résultat arrive dans un instant.", kingdom);
-		
-		return;
-	}
-	
-	if (c->pending.kind == PENDING_RELOCATE_RANDOM)
-		RequestSimpleUseItem(c, RANDOM_RELOCATOR, 1);
-	else
-		RequestUseAdvancedRelocator(c, c->player.current_kingdom_id, c->pending.zone_id, c->pending.point_id);
-
-	// the answer of the server is reported to the requester by ReportRelocation()
-	snprintf(c->pending.report_to, sizeof(c->pending.report_to), "%s", player_name);
-	c->pending.report_until = time(NULL) + 30;
-	PendingClear(c);
-
-	BotReply(c, player_name, "Relocalisation", "Relocalisation demandée, le résultat arrive dans un instant.");
-}
-
-static void CancelCommand(Connection *c, const char *player_name, bool is_admin)
-{
-	if (!is_admin) {
-		BotReply(c, player_name, "Non autorisé", "Vous n'avez pas la permission d'annuler une action.");
-		return;
-	}
-
-	if (c->pending.kind == PENDING_NONE) {
-		BotReply(c, player_name, "Confirmation", "Aucune action en attente.");
-		return;
-	}
-
-	PendingClear(c);
-	BotReply(c, player_name, "Confirmation", "Action annulée.");
+		BotReply(c, player_name, "Migration", "Migration vers le royaume %u en X:%u Y:%u demandée, le résultat arrive dans un instant.", kingdom, x, y);
 }
 
 /* Called when the server answers the use of a relocator: tells whoever asked. */
 void ReportRelocation(Connection *c, bool ok, uint8_t status)
 {
-	if (c->pending.report_to[0] == '\0' || time(NULL) > c->pending.report_until)
+	if (c->relocation.report_to[0] == '\0' || time(NULL) > c->relocation.report_until)
 		return;
 
 	char who[13];
 
-	snprintf(who, sizeof(who), "%s", c->pending.report_to);
-	c->pending.report_to[0] = '\0';
+	snprintf(who, sizeof(who), "%s", c->relocation.report_to);
+	c->relocation.report_to[0] = '\0';
 
 	if (ok) {
 		map_pos_t pos = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
@@ -627,9 +541,8 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 	if (is_admin) {
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cbank bal - solde de la banque, du sac et total", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <joueur>|remove <joueur> - gérer les administrateurs", p);
-		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château (confirmation demandée)", p);
-		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate <royaume> <x> <y> - migrer vers un autre royaume (confirmation demandée)", p);
-		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cconfirm / %ccancel - valider ou annuler l'action en attente", p, p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate <royaume> <x> <y> - migrer vers un autre royaume", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%csu <joueur> - équivaut à %cadmin add", p, p);
 	}
 
@@ -706,16 +619,6 @@ void command_handler(Connection *c, const char *player_name, const char *message
 		return;
 	}
 	
-	if (IsCommand(message, "confirm", &args)) {
-		ConfirmCommand(c, player_name, is_admin);
-		return;
-	}
-
-	if (IsCommand(message, "cancel", &args)) {
-		CancelCommand(c, player_name, is_admin);
-		return;
-	}
-
 	if (IsCommand(message, "su", &args)) {
 		if (*args == '\0') {
 			BotReply(c, player_name, "Administrateurs", "Usage : %csu <joueur>", c->bot.command_prefix);

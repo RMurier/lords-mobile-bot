@@ -782,25 +782,11 @@ typedef enum {
 } TransferState;
 
 
-typedef enum {
-    PENDING_NONE,
-    PENDING_RELOCATE_RANDOM,
-    PENDING_RELOCATE_TO,
-    PENDING_MIGRATE
-} PendingKind;
-
-/* An action that only happens after the administrator who asked for it confirms. */
+/* Who asked for a relocation, so the server's answer can be reported back to them. */
 typedef struct {
-    PendingKind kind;
-    char     requester[13];
-    time_t   expires;
-    uint16_t x, y;            /* target of a relocation or a migration */
-    uint16_t kingdom_id;      /* target kingdom of a migration */
-    uint16_t zone_id;
-    uint8_t  point_id;
-    char     report_to[13];   /* who receives the server's answer once the action was sent */
-    time_t   report_until;
-} PendingAction;
+    char   report_to[13];
+    time_t report_until;
+} RelocationReport;
 
 /* Kingdom migration in progress: ask the target kingdom's server, then send the teleport request. */
 typedef enum {
@@ -976,7 +962,7 @@ typedef struct {
 	RallyMember rally_members[30];
 	
 	ResourceTransfer transfer;
-	PendingAction pending;
+	RelocationReport relocation;
 	Migration migration;
 	
 	AllianceMemberList alliance_member;

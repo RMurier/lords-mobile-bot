@@ -25,11 +25,9 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$admin list` | administrators | Lists the administrators, marking those from the configuration file |
 | `$admin add <player>` | administrators | Adds an administrator |
 | `$admin remove <player>` | administrators | Removes an administrator added in game |
-| `$relocate random` | administrators | Moves the castle to a place chosen by the game (uses a random relocator), after a confirmation |
-| `$relocate <x> <y>` | administrators | Moves the castle to these coordinates in the current kingdom (uses an advanced relocator), after a confirmation |
-| `$migrate <kingdom> <x> <y>` | administrators | Migrates the castle to another kingdom at these coordinates, after a confirmation |
-| `$confirm` | the administrator who asked | Confirms the pending action; it expires after 60 seconds |
-| `$cancel` | administrators | Cancels the pending action |
+| `$relocate random` | administrators | Moves the castle to a place chosen by the game (uses a random relocator) |
+| `$relocate <x> <y>` | administrators | Moves the castle to these coordinates in the current kingdom (uses an advanced relocator) |
+| `$migrate <kingdom> <x> <y>` | administrators | Migrates the castle to another kingdom at these coordinates |
 | `$su <player>` | administrators | Old command, same as `$admin add` |
 
 ### Examples
@@ -42,9 +40,9 @@ $stop              cancel the delivery that is on its way
 $admin add Bob     Bob can now use every command
 $admin remove Bob
 $bank bal
-$relocate random   then  $confirm   (or $cancel)
-$relocate 100 100  then  $confirm
-$migrate 796 301 491  then  $confirm
+$relocate random
+$relocate 100 100
+$migrate 796 301 491
 ```
 
 ## Who can do what
@@ -65,37 +63,37 @@ may not use is ignored without an answer.
   reconnection or a restart. `$admin remove` deletes them from that file.
 - At most 16 administrators, names of at most 12 characters.
 
-## Relocation
+## Relocation and migration
 
-`$relocate` is for administrators only and never acts at once: the bot describes what it is about to do
-and waits for `$confirm` from the same administrator, within 60 seconds (or `$cancel`). One action
-can be pending at a time.
+`$relocate` and `$migrate` are for administrators only. **They act at once, without confirmation**, and write back
+only when there is a problem or when the server has answered. Mind the typos: a wrong coordinate moves the castle.
+
+Relocation, within the kingdom:
 
 - `$relocate random` needs a random relocator in the bag; the game picks the destination.
-- `$relocate <x> <y>` needs an advanced relocator in the bag. The coordinates must be on the map and
-  different from the current position. The destination is in the kingdom the castle is in.
-- After the confirmation the bot reports where the castle landed, or that the server refused.
-  Rallies and marches are affected by a relocation like in the game: think before confirming.
+- `$relocate <x> <y>` needs an advanced relocator in the bag. The coordinates must be on the map and different
+  from the current position.
+- The bot then reports where the castle landed, or the code the server refused with. Rallies and marches are
+  affected like in the game.
 
-## Migration
+Migration to another kingdom, `$migrate <kingdom> <x> <y>`:
 
-`$migrate <kingdom> <x> <y>` moves the castle to another kingdom, at the coordinates you choose. Like
-`$relocate` it is for administrators only, describes what it is about to do and waits for `$confirm` (60 seconds).
-
-What the bot does after the confirmation, in the same order as the official client:
-
-1. It asks the game for the server of the target kingdom. An unknown or closed kingdom is reported and nothing is sent.
+1. The bot asks the game for the server of the target kingdom, as the official client does. An unknown or closed
+   kingdom is reported and nothing is sent.
 2. It sends the migration request with the kingdom and the destination tile.
 3. The server accepts (or refuses) and closes the connection; the bot reconnects by itself, into the new kingdom.
 
 The bot only knows the **free migration** offered to returning players, because that is the one that was captured
-from the official client. When it is not available the bot says so, and tells you whether migration scrolls are left in the bag:
+from the official client. Errors it reports:
 
-- no scroll: *"Aucune migration gratuite n'est disponible et vous n'avez plus de vélin de migration."*
-- scrolls left: it says how many, and that the migration has to be done in the game, because using a scroll goes
-  through another request that is not known yet.
-
-The confirmation message already warns when the bag has no migration scroll.
+- no migration scroll in the bag: the message that follows the command already says so, since only the free migration
+  can succeed;
+- the free migration is refused and there is no scroll: *"Aucune migration gratuite n'est disponible et vous n'avez plus
+  de vélin de migration."*;
+- the free migration is refused and scrolls are left: it says how many, and that the migration has to be done in the
+  game, because using a scroll goes through another request that is not known yet;
+- unknown kingdom, invalid coordinates, already in that kingdom, a migration already running, or a server that does
+  not answer.
 
 ## The bank
 
