@@ -11,3 +11,4 @@ data/
 logs/
 __pycache__/
 build/
+webui_settings.json

@@ -1,0 +1,344 @@
+"""
+Description of every setting of the bot, grouped by category.
+
+This is the single source of truth for the web interface: categories, field
+types, validation rules and default values. It mirrors what src/config.c
+actually parses. Keys that the bot does not read must not be listed here.
+
+Field types:
+    bool     true / false
+    int      integer with optional min / max
+    text     free text with a maximum length
+    secret   text that is never sent back to the browser
+    ip       IPv4 address (the bot uses inet_pton with AF_INET)
+    select   one value out of `options`
+    size     number with an optional K / M / B suffix (20M = 20 000 000)
+    shields  ordered subset of SHIELDS
+"""
+
+import re
+
+SHIELDS = [
+    ("SHIELD_4H", "Bouclier 4 heures"),
+    ("SHIELD_8H", "Bouclier 8 heures"),
+    ("SHIELD_12H", "Bouclier 12 heures"),
+    ("SHIELD_1D", "Bouclier 1 jour"),
+    ("SHIELD_3D", "Bouclier 3 jours"),
+    ("SHIELD_7D", "Bouclier 7 jours"),
+    ("SHIELD_14D", "Bouclier 14 jours"),
+]
+
+CHANNELS = [
+    ("WORLD", "Chat du monde"),
+    ("GUILD", "Chat d'alliance"),
+    ("MAIL", "Courrier"),
+]
+
+RESOURCES = [("food", "Nourriture"), ("rock", "Pierre"), ("wood", "Bois"), ("ore", "Minerai"), ("gold", "Or")]
+
+
+def _bool(key, label, help="", default=False, depends=None):
+    return {"key": key, "label": label, "type": "bool", "default": "true" if default else "false",
+            "help": help, "depends": depends}
+
+
+def _resource_flags(prefix, verb, depends):
+    return [_bool(f"{prefix}{name}", f"{verb} : {label.lower()}", depends=depends) for name, label in RESOURCES]
+
+
+def _resource_sizes(prefix, default, depends):
+    return [{"key": f"{prefix}{name}", "label": f"Réserve : {label.lower()}", "type": "size",
+             "default": default.get(name, "0"), "depends": depends,
+             "help": "Quantité conservée, jamais dépensée. Exemples : 500K, 20M, 1B." if i == 0 else ""}
+            for i, (name, label) in enumerate(RESOURCES)]
+
+
+CATEGORIES = [
+    {
+        "id": "account",
+        "label": "Compte",
+        "description": "Identifiants du compte. Le plus simple est de les importer depuis une capture "
+                      "réseau (Ajouter un compte → Importer une capture), plutôt que de les saisir à la main.",
+        "fields": [
+            {"key": "account.igg_id", "label": "IGG ID", "type": "int", "min": 1, "max": 2**63 - 1,
+             "default": "", "help": "Identifiant IGG du compte."},
+            {"key": "account.device_uuid", "label": "Device UUID", "type": "text", "maxlen": 49,
+             "default": "", "optional": True,
+             "help": "Identifiant de l'appareil. À laisser vide avec le client PC officiel."},
+            {"key": "account.access_key", "label": "Clé d'accès", "type": "secret", "maxlen": 511,
+             "default": "", "optional": True,
+             "help": "Clé de session du compte. Elle donne accès au compte sans mot de passe : ne la partagez "
+                     "jamais. Elle expire : réimportez une capture pour la renouveler."},
+        ],
+    },
+    {
+        "id": "network",
+        "label": "Connexion",
+        "description": "Serveur et version du client à imiter. Ces valeurs viennent de la capture : ne les "
+                      "changez que si vous savez pourquoi.",
+        "fields": [
+            {"key": "server.addr", "label": "Adresse de la passerelle", "type": "ip",
+             "default": "192.243.44.63", "help": "Adresse IPv4 de la passerelle du jeu."},
+            {"key": "server.port", "label": "Port de la passerelle", "type": "int", "min": 1, "max": 65535,
+             "default": "5999"},
+            {"key": "client.platform", "label": "Plateforme", "type": "select", "default": "1",
+             "options": [("1", "Mobile (Android / iOS)"), ("9", "Client PC officiel")], "allow_other": True,
+             "help": "Doit correspondre à l'appareil d'où vient la clé d'accès."},
+            {"key": "client.version_major", "label": "Version du client : majeure", "type": "int",
+             "min": 0, "max": 255, "default": "2"},
+            {"key": "client.version_minor", "label": "Version du client : mineure", "type": "int",
+             "min": 0, "max": 255, "default": "197"},
+            {"key": "client.version_patch", "label": "Version du client : correctif", "type": "int",
+             "min": 0, "max": 65535, "default": "308"},
+            {"key": "client.language_code", "label": "Code langue", "type": "int", "min": 0, "max": 255,
+             "default": "1", "help": "Valeurs observées : 1 = anglais, 3 = français, 6 = russe."},
+        ],
+    },
+    {
+        "id": "reconnect",
+        "label": "Reconnexion",
+        "description": "Que faire quand la connexion tombe ou que vous vous connectez sur un autre appareil. "
+                      "Attention : chaque reconnexion du bot vous déconnecte de l'autre appareil.",
+        "fields": [
+            _bool("reconnect.enabled", "Reconnexion automatique",
+                  "Le bot se reconnecte tout seul après une coupure.", default=True),
+            {"key": "reconnect.delay", "label": "Délai avant reconnexion", "type": "int", "min": 10,
+             "max": 86400, "default": "60", "unit": "secondes", "depends": "reconnect.enabled",
+             "help": "Minimum 10 s. Le délai double après des échecs répétés, jusqu'à 8 fois sa valeur."},
+            {"key": "reconnect.max_attempts", "label": "Échecs consécutifs avant abandon", "type": "int",
+             "min": 0, "max": 1000, "default": "0", "depends": "reconnect.enabled",
+             "help": "0 = ne jamais abandonner. Un login refusé (clé invalide ou expirée) arrête toujours le bot."},
+        ],
+    },
+    {
+        "id": "commands",
+        "label": "Commandes",
+        "description": "Le bot obéit à des commandes écrites en jeu. Le pseudo administrateur peut tout faire ; sans pseudo configuré, personne ne peut prendre ce rôle. Les commandes sont acceptées depuis le chat et le courrier.",
+        "fields": [
+            {"key": "admin.name", "label": "Pseudo administrateur", "type": "text", "minlen": 1, "maxlen": 12,
+             "default": "", "warn_if": "halloweeks",
+             "warn": "C'est le pseudo de l'auteur du projet : il aurait les droits administrateur sur votre bot.",
+             "help": "Pseudo en jeu autorisé à commander le bot (12 caractères maximum)."},
+            {"key": "command.prefix", "label": "Préfixe des commandes", "type": "text", "minlen": 1,
+             "maxlen": 1, "default": "$", "help": "Un seul caractère, par exemple $."},
+            {"key": "command.input", "label": "Canal de réception", "type": "select", "default": "GUILD",
+             "options": CHANNELS, "help": "Où le bot lit vos commandes."},
+            {"key": "command.output", "label": "Canal de réponse", "type": "select", "default": "MAIL",
+             "options": CHANNELS, "help": "Où le bot envoie ses réponses."},
+        ],
+    },
+    {
+        "id": "bank",
+        "label": "Banque",
+        "description": "Envoi de ressources sur commande ($food, $stone, $wood, $ore, $gold). Désactivé par défaut : une fois activé, tout joueur qui peut écrire au bot peut demander les ressources cochées, jusqu'à la réserve. Le pseudo administrateur peut toujours les demander.",
+        "fields": (
+            [_bool("bank.enabled", "Activer la banque", "Interrupteur général : désactivé, toutes les commandes "
+                                                      "de banque sont ignorées.")]
+            + _resource_flags("bank.send_", "Envoyer", "bank.enabled")
+            + _resource_sizes("bank.reserve_", {"food": "20M", "rock": "50M", "wood": "50M", "ore": "30M"},
+                              "bank.enabled")
+            + [{"key": "bank.max_delivery_distance", "label": "Distance maximale de livraison", "type": "int",
+                "min": 0, "max": 100000, "default": "100", "unit": "cases", "depends": "bank.enabled"},
+               _bool("bank.use_bag_rss", "Utiliser les objets de ressources du sac",
+                     "Si les ressources manquent, utiliser les objets du sac.", depends="bank.enabled")]
+            + _resource_flags("bank.use_bag_", "Sac", "bank.enabled")
+        ),
+    },
+    {
+        "id": "protection",
+        "label": "Protection",
+        "description": "Boucliers et rappel de troupes quand vous êtes attaqué ou espionné.",
+        "fields": [
+            _bool("protection.enabled", "Activer la protection",
+                  "Interrupteur général de toutes les protections automatiques."),
+            _bool("protection.shield_always_on", "Toujours garder un bouclier actif",
+                  depends="protection.enabled"),
+            _bool("protection.shield_on_incoming_attack", "Bouclier si attaque entrante",
+                  depends="protection.enabled"),
+            _bool("protection.shield_on_incoming_scout", "Bouclier si espionnage entrant",
+                  depends="protection.enabled"),
+            {"key": "protection.shield_priority", "label": "Ordre de priorité des boucliers", "type": "shields",
+             "default": "SHIELD_4H, SHIELD_8H, SHIELD_12H, SHIELD_1D", "depends": "protection.enabled",
+             "help": "Le bot utilise le premier bouclier disponible de cette liste."},
+            _bool("protection.recall_on_incoming_attack", "Rappeler les troupes si attaque entrante",
+                  depends="protection.enabled"),
+            _bool("protection.recall_on_incoming_scout", "Rappeler les troupes si espionnage entrant",
+                  depends="protection.enabled"),
+            _bool("protection.recall_on_incoming_conflict", "Rappeler les troupes en cas de conflit",
+                  "Rappelle un rassemblement ou un camp avant son arrivée. Nécessite des objets de "
+                  "retrait de troupes.", depends="protection.enabled"),
+        ],
+    },
+    {
+        "id": "cargo",
+        "label": "Cargo",
+        "description": "Échanges automatiques du navire cargo.",
+        "fields": (
+            [_bool("cargo_ship.auto_trade", "Échanges automatiques", "Interrupteur général.")]
+            + _resource_flags("cargo_ship.spend_", "Dépenser", "cargo_ship.auto_trade")
+            + [_bool("cargo_ship.use_bag_rss", "Utiliser les objets de ressources du sac",
+                     "Sinon, le bot ne consomme jamais d'objets du sac.", depends="cargo_ship.auto_trade")]
+            + _resource_sizes("cargo_ship.reserve_", {n: "10M" for n, _ in RESOURCES}, "cargo_ship.auto_trade")
+        ),
+    },
+    {
+        "id": "alliance",
+        "label": "Alliance",
+        "description": "Actions automatiques au sein de l'alliance.",
+        "fields": [
+            _bool("alliance.auto_help", "Aider automatiquement les membres"),
+            _bool("alliance.auto_open_gifts", "Ouvrir automatiquement les cadeaux d'alliance"),
+        ],
+    },
+    {
+        "id": "advanced",
+        "label": "Avancé",
+        "description": "Dossier de données et diagnostic.",
+        "fields": [
+            {"key": "data.path", "label": "Dossier de données", "type": "text", "maxlen": 255, "default": "./data/",
+             "help": "Base de données et cache du bot. Un dossier par compte."},
+            _bool("log.debug", "Mode debug",
+                  "Affiche chaque paquet reçu. Les journaux peuvent alors contenir des données de session : "
+                  "ne les partagez pas."),
+        ],
+    },
+]
+
+# Sub-headings inside a category. The first matching key prefix wins.
+_GROUPS = {
+    "network": [("server.", "Serveur"), ("client.", "Client à imiter")],
+    "commands": [("admin.", "Administrateur"), ("command.", "Canaux et préfixe")],
+    "bank": [("bank.send_", "Ressources à envoyer"), ("bank.reserve_", "Réserves (jamais envoyées)"),
+             ("bank.max_", "Livraison"), ("bank.use_bag_rss", "Objets du sac"),
+             ("bank.use_bag_", "Objets du sac, par ressource")],
+    "protection": [("protection.shield_", "Boucliers"), ("protection.recall_", "Rappel de troupes")],
+    "cargo": [("cargo_ship.spend_", "Ressources à dépenser"), ("cargo_ship.use_bag_", "Objets du sac"),
+              ("cargo_ship.reserve_", "Réserves (jamais dépensées)")],
+}
+for _category in CATEGORIES:
+    for _field in _category["fields"]:
+        for _prefix, _name in _GROUPS.get(_category["id"], []):
+            if _field["key"].startswith(_prefix):
+                _field["group"] = _name
+                break
+
+# Settings the bot parses but does not act on yet. The interface says so instead of promising a behaviour
+# that does not exist. Checked against the bot's source: nothing reads these values.
+_NOT_YET = "Pas encore pris en compte par le bot."
+INACTIVE = {
+    "bank.max_delivery_distance": _NOT_YET,
+    "bank.use_bag_rss": _NOT_YET,
+    "bank.use_bag_food": _NOT_YET,
+    "bank.use_bag_rock": _NOT_YET,
+    "bank.use_bag_wood": _NOT_YET,
+    "bank.use_bag_ore": _NOT_YET,
+    "bank.use_bag_gold": _NOT_YET,
+    "cargo_ship.use_bag_rss": _NOT_YET,
+    "command.input": "Pas encore pris en compte : le bot lit toutes les commandes reçues (chat et courrier).",
+    "command.output": "Pas encore pris en compte : le bot répond toujours par courrier.",
+    "data.path": "Pas encore utilisé par le bot.",
+}
+for _category in CATEGORIES:
+    for _field in _category["fields"]:
+        if _field["key"] in INACTIVE:
+            _field["inactive"] = INACTIVE[_field["key"]]
+
+FIELDS = {f["key"]: f for c in CATEGORIES for f in c["fields"]}
+
+_SIZE = re.compile(r"^(\d+(?:\.\d+)?)([kKmMbB]?)$")
+_IPV4 = re.compile(r"^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$")
+_MULTIPLIER = {"": 1, "k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
+_U32_MAX = 4_294_967_295
+
+
+def parse_size(text):
+    match = _SIZE.match(text.strip())
+    if not match:
+        raise ValueError("Format invalide. Exemples : 500K, 20M, 1B.")
+    value = int(float(match.group(1)) * _MULTIPLIER[match.group(2).lower()])
+    if value > _U32_MAX:
+        raise ValueError("Valeur trop grande (maximum 4 294 967 295).")
+    return value
+
+
+def validate(field, raw):
+    """Return the normalised string to write in the config file, or raise ValueError."""
+    kind = field["type"]
+    text = "" if raw is None else str(raw).strip()
+
+    if "\n" in text or "\r" in text:
+        raise ValueError("Une seule ligne est autorisée.")
+
+    if text == "":
+        if field.get("optional"):
+            return ""
+        if kind == "bool":
+            raise ValueError("Valeur requise.")
+        if kind in ("int", "text", "ip", "select", "size", "shields", "secret") and field.get("default", "") == "":
+            raise ValueError("Valeur requise.")
+
+    if kind == "bool":
+        if text.lower() in ("true", "1"):
+            return "true"
+        if text.lower() in ("false", "0"):
+            return "false"
+        raise ValueError("Doit être vrai ou faux.")
+
+    if kind == "int":
+        if not re.fullmatch(r"\d+", text):
+            raise ValueError("Doit être un nombre entier positif.")
+        number = int(text)
+        if number < field.get("min", 0) or number > field.get("max", _U32_MAX):
+            raise ValueError(f"Doit être entre {field.get('min', 0)} et {field.get('max', _U32_MAX)}.")
+        return str(number)
+
+    if kind in ("text", "secret"):
+        if len(text) < field.get("minlen", 0):
+            raise ValueError(f"Au moins {field['minlen']} caractère(s).")
+        if len(text) > field.get("maxlen", 255):
+            raise ValueError(f"Maximum {field.get('maxlen', 255)} caractères.")
+        if kind == "secret" and re.search(r"\s", text):
+            raise ValueError("Ne doit contenir aucun espace.")
+        if not text.isprintable():
+            raise ValueError("Caractères non imprimables.")
+        return text
+
+    if kind == "ip":
+        if not _IPV4.match(text):
+            raise ValueError("Adresse IPv4 invalide (exemple : 192.243.44.63).")
+        return text
+
+    if kind == "select":
+        allowed = [value for value, _ in field["options"]]
+        if text not in allowed and not (field.get("allow_other") and re.fullmatch(r"\d{1,3}", text)):
+            raise ValueError("Valeur inconnue.")
+        return text
+
+    if kind == "size":
+        parse_size(text)
+        return text.upper()
+
+    if kind == "shields":
+        names = [part.strip() for part in text.split(",") if part.strip()]
+        known = {name for name, _ in SHIELDS}
+        if not names:
+            raise ValueError("Choisissez au moins un bouclier.")
+        if any(name not in known for name in names) or len(set(names)) != len(names):
+            raise ValueError("Liste de boucliers invalide.")
+        if len(names) > 8:
+            raise ValueError("Maximum 8 boucliers.")
+        return ", ".join(names)
+
+    raise ValueError(f"Type inconnu : {kind}")
+
+
+def public_schema():
+    """Schema in the shape sent to the browser (tuples become lists)."""
+    return {
+        "categories": [
+            {**c, "fields": [dict(f, options=[list(o) for o in f["options"]]) if "options" in f else dict(f)
+                             for f in c["fields"]]}
+            for c in CATEGORIES
+        ],
+        "shields": [list(s) for s in SHIELDS],
+    }

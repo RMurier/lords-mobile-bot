@@ -26,6 +26,9 @@ The project is designed with a strong focus on clean architecture, efficient pac
 - Configurable automation system
 - Event-driven networking
 - Cross-platform build system (CMake)
+- Automatic reconnection
+- Credential extraction from a network capture
+- Local web console: configuration, accounts, start/stop, live logs
 - MIT licensed
 
 ## Requirements
@@ -94,68 +97,100 @@ this automatically.
 
 > On Windows, use `client.exe` instead of `./client` in the commands below.
 
-Generate a default configuration file:
+### 1. Get your account credentials
+
+The bot logs in with your IGG ID and a session key. Extract them from a network capture
+of **your own device** while the official game starts, instead of copying them by hand.
+
+Windows, official PC client, nothing to install (PowerShell as administrator):
+
+```powershell
+pktmon start --capture --pkt-size 0 -f capture.etl
+# start the game, wait until you are in game, then:
+pktmon stop
+pktmon etl2pcap capture.etl -o capture.pcapng
+```
+
+Start the capture **before** opening the game. Then extract:
 
 ```bash
 ./client --create-config
+python3 tools/extract_credentials.py capture.pcapng --template config.cfg --out-dir accounts
 ```
 
-This creates a `config.cfg` file in the current directory.
+This writes `accounts/<igg_id>.cfg` with the account, session key, client version,
+platform and gateway already filled in. Delete the capture afterwards: it contains your
+session key. Full guide, several accounts and troubleshooting: [docs/credentials.md](docs/credentials.md).
 
-Open `config.cfg` and replace the example values with your own account information:
+### 2. Run the bot
 
-```ini
-# Replace the example values below with your own account information.
-account.igg_id = 1234567890
-account.device_uuid = 12345678-1234-1234-1234-123456789abc
-account.access_key = YOUR_ACCESS_KEY_HERE
-```
-
-Save the file, then start the bot:
+**Web console (recommended)**: configure everything, import captures, start and stop
+bots and read their logs.
 
 ```bash
-./client config.cfg
+python3 webui/server.py      # Windows: webui.bat
 ```
+
+**Command line**:
+
+```bash
+./client accounts/<igg_id>.cfg
+```
+
+Close the game on that account first: an account cannot be logged in twice.
+If the connection drops, or you log in elsewhere, the bot reconnects by itself
+(see [reconnection](docs/configuration.md#automatic-reconnection)).
+
+Before you rely on it, set `admin.name` to your in-game name in the config: it is the only
+player allowed to use every command.
 
 ## Command Line Options
 
-Display help:
-
-```bash
-./client --help
+```text
+client <config_file> [--debug]   Run the bot with a configuration file.
+client --create-config, -c       Create a default config.cfg.
+client --help, -h                Display help.
+client --version, -v             Display version information.
 ```
 
-Generate a default configuration file:
+`--debug` (or `log.debug = true`) prints every packet received. Debug output can contain
+session data: do not share it.
 
-```bash
-./client --create-config
-```
+## In-game commands
 
-Display version information:
+Commands start with the prefix `$` by default and are answered by mail.
 
-```bash
-./client --version
-```
+| Command | Who | What it does |
+|---|---|---|
+| `$food` / `$stone` / `$wood` / `$ore` / `$gold <amount>` | administrator; others only if the bank allows it | Sends the resource to the player who asked |
+| `$bank bal` | administrator | Mails the bank, bag and total balance |
+| `$su <player>` | administrator | Hands the administrator role over until the next reconnect |
 
-Run the bot:
-
-```bash
-./client config.cfg
-```
+The bank is **off by default**. Details, permissions and security notes: [docs/commands.md](docs/commands.md).
 
 ## Project Structure
 
 ```
 include/        Header files
-src/            Source code
+src/            Bot source code (C)
+tools/          extract_credentials.py: build account configs from a network capture
+webui/          Web console (Python, standard library only)
+accounts/       One config file per account (not committed)
+logs/           One log per account (not committed)
+docs/           Documentation
 CMakeLists.txt  CMake build configuration
 build.sh        Build helper script (Linux / macOS)
 build.bat       Build helper script (Windows / MinGW)
+webui.sh        Start the web console (Linux / macOS)
+webui.bat       Start the web console (Windows)
 ```
 
 ## Documentation
 
-Additional documentation will be added as the project continues to develop.
+- [Getting your account credentials](docs/credentials.md)
+- [Web console](docs/web-interface.md)
+- [Configuration reference](docs/configuration.md)
+- [In-game commands](docs/commands.md)
 
 ## License
 

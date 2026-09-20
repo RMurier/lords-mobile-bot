@@ -88,6 +88,8 @@ client.language_code = 1
 
 ## Data Path
 
+> **Not used by the bot yet.** The option is accepted but nothing reads it.
+
 Directory used to store bot data such as logs, databases, and cache.
 
 ```cfg
@@ -103,7 +105,7 @@ Defines the privileged player.
 This player can execute administrator commands and bypass normal restrictions.
 
 ```cfg
-admin.name = halloweeks
+admin.name = Zyco
 ```
 
 ---
@@ -124,9 +126,9 @@ account.access_key = YOUR_ACCESS_KEY
 
 ## Getting Account Credentials
 
-`account.igg_id`, `account.device_uuid` and `account.access_key` can be extracted
-from a network capture of **your own** device while the official game logs in
-(PCAPdroid on Android, or Wireshark on the emulator's network interface):
+See [credentials.md](credentials.md) for the complete guide. In short, `account.igg_id`,
+`account.device_uuid` and `account.access_key` can be extracted from a network capture of
+**your own** device while the official game starts:
 
 ```bash
 ./client --create-config
@@ -181,6 +183,10 @@ Notes:
 
 ## Command System
 
+> The available commands and who may use them are described in [commands.md](commands.md).
+> `command.input` and `command.output` are accepted but **not applied yet**: the bot reads
+> commands from chat and mail and always answers by mail.
+
 Controls bot command handling.
 
 ```cfg
@@ -213,6 +219,11 @@ command.output = MAIL
 ---
 
 ## Banking System
+
+> The bank is **off by default**. When enabled, any player who can write to the bot can ask
+> for the resources whose `bank.send_*` flag is on, up to the reserve; the administrator can
+> always use it. `bank.max_delivery_distance` and `bank.use_bag_*` are accepted but **not
+> applied yet**. See [commands.md](commands.md).
 
 The banking system handles resource transfer commands.
 
@@ -388,4 +399,4 @@ The following features are planned or under development:
 - Shelter automation
 - More resource management options
 - Additional bot modules
-- More runtime configuration controls
+- More runtime configuration controls
