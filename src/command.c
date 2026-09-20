@@ -36,7 +36,6 @@ void SuperUserAccess(Connection *c,
                      const char *new_admin)
 {
 	
-	/*
     // Only current admin may change admin 
     if (strcmp(player_name, c->bot.admin_name) != 0)
     {
@@ -48,7 +47,6 @@ void SuperUserAccess(Connection *c,
         );
         return;
     }
-    */
 
     snprintf(c->bot.admin_name,
              sizeof(c->bot.admin_name),
@@ -62,6 +60,30 @@ void SuperUserAccess(Connection *c,
         "%s is now the system administrator.",
         c->bot.admin_name
     );
+}
+
+/*
+ * Banking is opt-in. The administrator can always use it; everybody else needs
+ * bank.enabled and the matching bank.send_* flag. Without this check any player
+ * able to write in a channel the bot reads could drain the account.
+ */
+static bool BankAllows(Connection *c, const char *player_name, ResourceType type)
+{
+	if (strcmp(c->bot.admin_name, player_name) == 0)
+		return true;
+	
+	if (!c->bank.enabled)
+		return false;
+	
+	switch (type) {
+		case RESOURCE_FOOD: return c->bank.send_food;
+		case RESOURCE_ROCK: return c->bank.send_rock;
+		case RESOURCE_WOOD: return c->bank.send_wood;
+		case RESOURCE_ORE:  return c->bank.send_ore;
+		case RESOURCE_GOLD: return c->bank.send_gold;
+	}
+	
+	return false;
 }
 
 void command_handler(Connection *c, const char *player_name, const char *message) {
@@ -169,6 +191,9 @@ static void ResourceCommandHandler(
     const char *name
 )
 {
+	
+	if (!BankAllows(c, player_name, type))
+		return;
 	
 	if (c->transfer.state != TRANSFER_IDLE) {
 		// Same player -> replace current pending request 

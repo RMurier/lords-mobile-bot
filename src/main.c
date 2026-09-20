@@ -911,6 +911,9 @@ static RunResult RunSession(Connection *client, const char *config_file)
 }
 
 int main(int argc, const char *argv[]) {
+	// Line-buffered output so logs redirected to a file (web interface) appear immediately.
+	setvbuf(stdout, NULL, _IOLBF, 4096);
+
 	if (argc < 2) {
 		PrintUsage();
 		return 0;
