@@ -349,7 +349,7 @@ static SessionResult ProcessConnection(Connection *c)
 					// dump_data("_MSG_RESP_BUYITEM", "", s->buffer + s->parse_pos, s->packet_size);
 					break;
 				case _MSG_RESP_WORLD_TELEPORT_ITEM:
-					// dump_data("_MSG_RESP_WORLD_TELEPORT_ITEM", "", s->buffer + s->parse_pos + 4, s->packet_size + 4);
+					RecvWorldTeleportItemCount(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_REQUEST_ALLIANCE_INFO:
 					RecvAllianceInfo(c, s->buffer + s->parse_pos + 4);

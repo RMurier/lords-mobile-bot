@@ -4888,6 +4888,11 @@ void RecvCrossKingdomClose(Connection *c, const uint8_t *data, uint16_t size)
 /* Gives up when the server does not answer. */
 void MigrationTick(Connection *c)
 {
+	if (c->cost_probe_to[0] != '\0' && time(NULL) > c->cost_probe_until) {
+		BotReply(c, c->cost_probe_to, "Migration", "Pas de réponse du serveur au calcul du nombre de vélins de migration.");
+		c->cost_probe_to[0] = '\0';
+	}
+	
 	if (c->migration.state == MIGRATION_IDLE || time(NULL) <= c->migration.deadline)
 		return;
 	
@@ -4897,4 +4902,43 @@ void MigrationTick(Connection *c)
 		BotReply(c, c->migration.requester, "Migration", "Pas de réponse à la demande de migration : vérifiez dans le jeu où en est le château.");
 	
 	c->migration.state = MIGRATION_IDLE;
+}
+
+
+/*
+ * How many migration scrolls a migration needs depends on the account (its power). The game asks the server with
+ * _MSG_REQUEST_WORLD_TELEPORT_ITEM (the power, u64) and the answer sets WorldTeleportItemCount in the client.
+ * The layout of the answer is not known yet: $migrate cost sends the request and shows the raw reply, which is what
+ * is needed to decode it (compare it with the number the game displays).
+ */
+void MigrationCostProbe(Connection *c, const char *requester)
+{
+	snprintf(c->cost_probe_to, sizeof(c->cost_probe_to), "%s", requester);
+	c->cost_probe_until = time(NULL) + 10;
+	RequsetWorldTeleportItemCount(c, c->player.power);
+}
+
+void RecvWorldTeleportItemCount(Connection *c, const uint8_t *data, uint16_t size)
+{
+	char hex[3 * 64 + 1];
+	size_t shown = size < 64 ? size : 64;
+	
+	for (size_t i = 0; i < shown; i++)
+		snprintf(hex + i * 3, 4, "%02x ", data[i]);
+	
+	hex[shown * 3] = '\0';
+	
+	LOGI("[MIGRATION] Réponse du serveur au nombre de vélins (%u octets, puissance envoyée %llu) : %s\n",
+		size, (unsigned long long)c->player.power, hex);
+	
+	if (c->cost_probe_to[0] == '\0' || time(NULL) > c->cost_probe_until)
+		return;
+	
+	char who[13];
+	
+	snprintf(who, sizeof(who), "%s", c->cost_probe_to);
+	c->cost_probe_to[0] = '\0';
+	
+	BotReply(c, who, "Migration", "Réponse du serveur au nombre de vélins de migration (puissance envoyée : %llu, %u octets) : %s",
+		(unsigned long long)c->player.power, size, hex);
 }

@@ -28,6 +28,7 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$relocate random` | administrators | Moves the castle to a place chosen by the game (uses a random relocator) |
 | `$relocate <x> <y>` | administrators | Moves the castle to these coordinates in the current kingdom (uses an advanced relocator) |
 | `$migrate <kingdom> <x> <y>` | administrators | Migrates the castle to another kingdom at these coordinates |
+| `$migrate cost` | administrators | Diagnostic: asks the server how many migration scrolls it wants and shows its raw answer |
 | `$su <player>` | administrators | Old command, same as `$admin add` |
 
 ### Examples
@@ -86,9 +87,17 @@ Migration to another kingdom, `$migrate <kingdom> <x> <y>`:
 The bot only knows the **free migration** offered to returning players, because that is the one that was captured
 from the official client. Migrating with scrolls uses another request that is not known yet.
 
-**Scrolls.** A big account needs several scrolls, so `migration.scrolls_needed` (default 1) tells the bot how many the
-game asks for this account: it is shown on the migration screen and grows with the power. The message that follows
-`$migrate` compares it with the bag:
+**Scrolls.** How many scrolls a migration needs depends on the account's power and on the kingdom, so it has to come
+from the game. The game asks the server with `_MSG_REQUEST_WORLD_TELEPORT_ITEM` (the account's power, u64) and the
+answer sets the number in the client; the bot already had that request, but the **layout of the answer is not
+decoded yet**, so the bot cannot read the number by itself. Two things exist meanwhile:
+
+- `$migrate cost` sends that request and mails you the raw answer. Run it, and compare with the number the game shows
+  for the same kingdom: that is what is needed to decode it (the number will then be read automatically).
+- `migration.scrolls_needed` (default 1) is a **provisional manual value**: type the number shown by the migration
+  screen. It is only a stop-gap and will be replaced by the automatic reading.
+
+The message that follows `$migrate` compares the bag with that number:
 
 - no scroll: *"Il n'y a aucun vélin de migration dans le sac : seule la migration gratuite peut aboutir."*;
 - some but not enough: *"Il faut 3 vélin(s) de migration et le sac n'en contient que 1 (il en manque 2)…"*;

@@ -413,10 +413,17 @@ static void RelocateCommand(Connection *c, const char *player_name, bool is_admi
 static void MigrateCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
 {
 	char p = c->bot.command_prefix;
+	const char *kingdom_arg;
 	unsigned kingdom, x, y;
 	
 	if (!is_admin) {
 		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent faire migrer le château.");
+		return;
+	}
+	
+	// diagnostic: ask the server how many migration scrolls it wants, and show its raw answer
+	if (StartsWithWord(args, "cost", &kingdom_arg)) {
+		MigrationCostProbe(c, player_name);
 		return;
 	}
 	
@@ -541,6 +548,7 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <joueur>|remove <joueur> - gérer les administrateurs", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate <royaume> <x> <y> - migrer vers un autre royaume", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate cost - demander au serveur le nombre de vélins de migration (diagnostic)", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%csu <joueur> - équivaut à %cadmin add", p, p);
 	}
 

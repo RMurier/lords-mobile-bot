@@ -137,8 +137,9 @@ CATEGORIES = [
                                            "est public : ne le cochez que si vous le voulez."},
             {"key": "migration.scrolls_needed", "label": "Vélins de migration nécessaires", "type": "int", "min": 1,
              "max": 9999, "default": "1", "unit": "vélins",
-             "help": "Nombre de vélins de migration que le jeu demande pour ce compte (il augmente avec la puissance : "
-                     "il est affiché dans l'écran de migration). Le bot le compare au contenu du sac et dit s'il en manque."},
+             "help": "PROVISOIRE. Le nombre de vélins dépend de la puissance du compte et du royaume : le jeu le demande au "
+                     "serveur, mais le format de sa réponse n'est pas encore décodé. En attendant, indiquez ici le nombre affiché "
+                     "par l'écran de migration ; le bot le compare au sac. Voir la commande migrate cost."},
             {"key": "command.output", "label": "Canal de réponse", "type": "select", "default": "MAIL",
              "options": CHANNELS, "help": "Où le bot répond. Le courrier est privé ; en chat, la réponse est adressée "
                                            "au joueur (@pseudo) sur une seule ligne."},
@@ -302,6 +303,13 @@ COMMANDS = [
                  "encore se faire dans le jeu, le bot ne sait pas encore l'utiliser.",
                  "Après la migration, le jeu ferme la connexion et le bot se reconnecte tout seul, dans le nouveau royaume."],
      "example": "migrate 796 301 491"},
+    {"group": "Administration", "name": "migrate cost", "usage": "migrate cost", "who": "Administrateurs",
+     "summary": "Diagnostic : demande au serveur combien de vélins de migration il faut (il le calcule avec la puissance du compte) "
+                "et renvoie sa réponse brute.",
+     "details": ["Le nombre dépend de la puissance et du royaume, donc le bot doit le lire dans la réponse du serveur. Le format de cette réponse "
+                 "n'est pas encore décodé : cette commande la montre telle quelle pour pouvoir la décoder.",
+                 "Comparez avec le nombre affiché par le jeu pour le même royaume."],
+     "example": "migrate cost"},
     {"group": "Administration", "name": "su", "usage": "su <pseudo>", "who": "Administrateurs",
      "summary": "Ancienne commande, équivalente à admin add.", "example": "su Bob"},
 ]

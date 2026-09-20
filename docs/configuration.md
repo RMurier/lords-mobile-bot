@@ -367,8 +367,9 @@ Future options:
 
 ## Migration
 
-Number of migration scrolls the game asks for this account. It is shown on the migration screen and grows with
-the power, so a big account needs several.
+**Provisional.** Number of migration scrolls the game asks for this account. It depends on the power and on the
+kingdom, and the game gets it from the server; the bot cannot read the answer yet (see `$migrate cost` in
+[commands.md](commands.md)). Until it can, type here the number shown by the migration screen.
 
 ```cfg
 migration.scrolls_needed = 1

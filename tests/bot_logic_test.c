@@ -664,6 +664,51 @@ int main(void)
 		free(c);
 	}
 
+
+	/* ---- $migrate cost: ask the server how many scrolls it wants, show the raw answer ---- */
+	{
+		c = fresh("boss");
+		c->player.power = 46577521;
+
+		say(c, "eve", "$migrate cost", COMMAND_CHANNEL_MAIL);
+		CHECK(find_packet(_MSG_REQUEST_WORLD_TELEPORT_ITEM) < 0 && replied("Seuls les administrateurs"), "the cost query is refused for a stranger");
+		reset_sent();
+		say(c, "boss", "$migrate cost", COMMAND_CHANNEL_MAIL);
+		{
+			int k = find_packet(_MSG_REQUEST_WORLD_TELEPORT_ITEM);
+			CHECK(k >= 0, "the cost request goes out, even before the bag is loaded");
+			if (k >= 0) {
+				const uint8_t *pk = sent[k];
+				uint64_t power = 0;
+				memcpy(&power, pk + 8, 8);
+				CHECK((uint16_t)(pk[0] | (pk[1] << 8)) == 4 + 4 + 8 && power == 46577521, "the request carries the power of the account (u64)");
+			}
+		}
+		reset_sent();
+		{
+			uint8_t answer[6] = { 0x00, 0x03, 0x00, 0xfb, 0x04, 0x00 };
+			RecvWorldTeleportItemCount(c, answer, sizeof(answer));
+		}
+		CHECK(replied("puissance envoyée : 46577521, 6 octets") && replied("00 03 00 fb 04 00"), "the raw answer is sent back to the administrator");
+		reset_sent();
+		{
+			uint8_t answer[2] = { 1, 2 };
+			RecvWorldTeleportItemCount(c, answer, sizeof(answer));
+		}
+		CHECK(sent_count == 0, "an answer nobody asked for is not reported");
+		say(c, "boss", "$migrate cost", COMMAND_CHANNEL_MAIL);
+		reset_sent();
+		MigrationTick(c);
+		CHECK(sent_count == 0, "no answer yet: keep waiting");
+		c->cost_probe_until = time(NULL) - 1;
+		MigrationTick(c);
+		CHECK(replied("Pas de réponse du serveur au calcul du nombre de vélins"), "a silent server is reported");
+		reset_sent();
+		say(c, "boss", "$help", COMMAND_CHANNEL_MAIL);
+		CHECK(replied("$migrate cost - demander au serveur le nombre de vélins"), "the help lists the diagnostic");
+		free(c);
+	}
+
 	printf("%s\n", failures ? "SOME TESTS FAILED" : "ALL BOT LOGIC TESTS PASSED");
 	return failures ? 1 : 0;
 }
