@@ -570,7 +570,13 @@ class Handler(BaseHTTPRequestHandler):
     def _host_ok(self):
         host = (self.headers.get("Host") or "").lower()
         port = self.server.server_address[1]
-        return host in (f"127.0.0.1:{port}", f"localhost:{port}")
+        if host in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            return True
+        for origin in os.environ.get("LMBOT_ALLOWED_ORIGINS", "").split(","):
+            origin = origin.strip()
+            if origin and host == urlparse(origin if "//" in origin else f"//{origin}").netloc.lower():
+                return True
+        return False
 
     def _dispatch(self, method):
         parsed = urlparse(self.path)
