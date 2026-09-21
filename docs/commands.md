@@ -28,7 +28,6 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$relocate random` | administrators | Moves the castle to a place chosen by the game (uses a random relocator) |
 | `$relocate <x> <y>` | administrators | Moves the castle to these coordinates in the current kingdom (uses an advanced relocator) |
 | `$migrate <kingdom> <x> <y>` | administrators | Migrates the castle to another kingdom at these coordinates |
-| `$migrate cost` | administrators | Diagnostic: asks the server how many migration scrolls it wants and shows its raw answer |
 | `$su <player>` | administrators | Old command, same as `$admin add` |
 
 ### Examples
@@ -81,29 +80,22 @@ Migration to another kingdom, `$migrate <kingdom> <x> <y>`:
 
 1. The bot asks the game for the server of the target kingdom, as the official client does. An unknown or closed
    kingdom is reported and nothing is sent.
-2. It sends the **free migration** offered to returning players (no scroll spent).
-3. If the server refuses because that free offer does not apply to this account (`NEWBIE_ERROR`, or an
-   unexplained `UNKNOWN`), and there are enough migration scrolls in the bag, the bot uses one by itself
-   (captured from the official client: a migration scroll is used through the same generic "use item" request as
-   the advanced relocator). A refusal with a precise reason tied to the destination or the account (kingdom full,
-   troops outside, an event lock...) is reported as is instead, since a scroll would fail for the same reason.
+2. If there are enough **migration scrolls** in the bag, one is used at once (captured from the official client: a
+   migration scroll is used through the same generic "use item" request as the advanced relocator). The free
+   migration offered to returning players is *not* tried first: it is rarely available, so a scroll (when there is
+   one) is used directly instead of wasting a round trip on an offer that will probably be refused.
+3. Only when there are not enough scrolls does the bot fall back to the **free migration**. A refusal is reported
+   with the server's reason (kingdom full, troops outside, an event lock...), or, when the reason is not a precise
+   one, with how many scrolls would be needed instead.
 4. The server accepts (or refuses) and closes the connection; the bot reconnects by itself, into the new kingdom.
 
-**Scrolls.** How many scrolls a migration needs depends on the account's power and on the kingdom, so it has to come
-from the game. The game asks the server with `_MSG_REQUEST_WORLD_TELEPORT_ITEM` (the account's power, u64) and the
-answer sets the number in the client; the bot already had that request, but the **layout of the answer is not
-decoded yet**, so the bot cannot read the number by itself. Two things exist meanwhile:
-
-- `$migrate cost` sends that request and mails you the raw answer. Run it, and compare with the number the game shows
-  for the same kingdom: that is what is needed to decode it (the number will then be read automatically).
-- `migration.scrolls_needed` (default 1) is a **provisional manual value**: type the number shown by the migration
-  screen. It is only a stop-gap and will be replaced by the automatic reading.
-
-The message that follows `$migrate` compares the bag with that number:
+**Scrolls.** How many scrolls a migration needs depends on the account's power and on the kingdom; the game reads it
+from the server, but the bot cannot yet. `migration.scrolls_needed` (default 1) is a **provisional manual value**:
+type the number shown by the migration screen. The message that follows `$migrate` compares the bag with that number:
 
 - no scroll: *"Il n'y a aucun vélin de migration dans le sac : seule la migration gratuite peut aboutir."*;
 - some but not enough: *"Il faut 3 vélin(s) de migration et le sac n'en contient que 1 (il en manque 2)…"*;
-- enough: the count is shown.
+- enough: *"...un sera utilisé directement."*
 
 **Refusals.** The server's reason is given in French with the game's own code name, for example
 *"le royaume de destination est plein (KINGDOM_FULL)"*. The codes were read from the client's enumeration:

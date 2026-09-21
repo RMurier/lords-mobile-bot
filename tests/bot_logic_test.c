@@ -584,21 +584,18 @@ int main(void)
 		{ uint8_t ok = 0; RecvFreeCrossTeleport(c, &ok); }
 		CHECK(c->migration.state == MIGRATION_IDLE && replied("Migration acceptée : le château part vers le royaume 796 en X:301 Y:491"), "an accepted migration is reported");
 
-		/* with scrolls in the bag the acknowledgement has no warning */
+		/* enough scrolls in the bag: a scroll is used at once, before even trying the free offer
+		   (it is rarely available, not worth trying first when a scroll can just be used) */
 		c->items[MIGRATION_SCROLL].quantity = 2;
 		reset_sent();
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
 		CHECK(!replied("aucun vélin") && replied("Vélins de migration dans le sac : 2 (1 nécessaire(s))"), "enough scrolls: the count is shown, no warning");
-		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
-
-		/* refused, scrolls available: the bot uses one by itself */
 		reset_sent();
-		c->items[MIGRATION_SCROLL].quantity = 3;
-		{ uint8_t refused = 7; RecvFreeCrossTeleport(c, &refused); }
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
 		{
 			int k = find_packet(_MSG_REQUEST_USEITEM);
-			CHECK(k >= 0 && useitem_count == 1 && c->migration.state == MIGRATION_WAIT_SCROLL_RESULT,
-				"free migration unavailable, enough scrolls: a migration scroll is used automatically");
+			CHECK(k >= 0 && useitem_count == 1 && find_packet(3156) < 0 && c->migration.state == MIGRATION_WAIT_SCROLL_RESULT,
+				"enough scrolls: a migration scroll is used at once, the free offer is not even tried");
 			if (k >= 0) {
 				const uint8_t *pk = sent[k];
 				CHECK((uint16_t)(pk[8] | (pk[9] << 8)) == MIGRATION_SCROLL, "the migration scroll is used");
@@ -616,29 +613,32 @@ int main(void)
 
 		/* the server refuses the scroll itself: reported as such, not as a relocation failure */
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
-		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
 		reset_sent();
-		{ uint8_t refused = 2; RecvFreeCrossTeleport(c, &refused); } /* NEWBIE_ERROR also falls through to the scroll */
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
 		reset_sent();
 		{ uint8_t refused[1] = { 5 }; RecvUseItem(c, refused, sizeof(refused)); }
 		CHECK(c->migration.state == MIGRATION_IDLE && replied("Migration par vélin refusée par le serveur (code 5)"),
 			"a scroll refused by the server is reported, not mistaken for a relocation failure");
 
-		/* refused, no scroll left: the message the administrator asked for */
+		/* no scroll left: the free offer is tried, and its refusal is reported as such */
 		c->items[MIGRATION_SCROLL].quantity = 0;
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		reset_sent();
 		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+		CHECK(find_packet(3156) >= 0 && c->migration.state == MIGRATION_WAIT_RESULT, "no scroll: the free offer is tried instead");
 		reset_sent();
 		{ uint8_t refused = 7; RecvFreeCrossTeleport(c, &refused); }
 		CHECK(replied("vous n'avez plus de vélin de migration") && replied("code 7"), "free migration unavailable, no scroll left: the bot says there is none");
 
-		/* a big account needs several scrolls: having some is not enough */
+		/* a big account needs several scrolls: having some is not enough, the free offer is tried */
 		c->migration_scrolls_needed = 3;
 		c->items[MIGRATION_SCROLL].quantity = 1;
 		reset_sent();
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
 		CHECK(replied("Il faut 3 vélin(s) de migration et le sac n'en contient que 1 (il en manque 2)"), "the command warns when the bag holds some scrolls but not enough");
+		reset_sent();
 		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+		CHECK(find_packet(3156) >= 0, "not enough scrolls: the free offer is tried instead");
 		reset_sent();
 		{ uint8_t refused = 7; RecvFreeCrossTeleport(c, &refused); }
 		CHECK(replied("Il faut 3 vélin(s) de migration et vous n'en avez que 1 : il vous en manque 2"), "free migration unavailable, not enough scrolls: it says how many are missing");
@@ -646,14 +646,25 @@ int main(void)
 		reset_sent();
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
 		CHECK(replied("Vélins de migration dans le sac : 3 (3 nécessaire(s))"), "exactly enough scrolls: no warning");
+		reset_sent();
 		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+		CHECK(find_packet(_MSG_REQUEST_USEITEM) >= 0 && c->migration.state == MIGRATION_WAIT_SCROLL_RESULT, "exactly enough scrolls: used at once");
+		{
+			uint8_t ok[12] = { 0, 0xfb, 0x04, 0, 0, 0, 0, 0x0d, 0x00, 0x3a, 0x2c, 0x01 };
+			RecvUseItem(c, ok, sizeof(ok));
+		}
 		c->migration_scrolls_needed = 1;
+		c->items[MIGRATION_SCROLL].quantity = 0; /* back to no scroll, so the following refusals go through the free offer */
 
 		/* precise refusals come with their reason (values read from the client's own enumeration) */
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		reset_sent();
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
 		reset_sent();
 		{ uint8_t refused = 6; RecvFreeCrossTeleport(c, &refused); }
 		CHECK(replied("le royaume de destination est plein (KINGDOM_FULL)") && !replied("vélin"), "a full kingdom is explained, scrolls are not mentioned");
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		reset_sent();
 		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
 		reset_sent();
 		{ uint8_t refused = 0xFB; RecvFreeCrossTeleport(c, &refused); }
@@ -661,11 +672,13 @@ int main(void)
 
 		/* the three success variants are all successes */
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		reset_sent();
 		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
 		reset_sent();
 		{ uint8_t forest = 0xFF; RecvFreeCrossTeleport(c, &forest); }
 		CHECK(replied("Migration acceptée") && replied("réussite en forêt"), "code -1 (SUCCESS_IN_FOREST) is a success");
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		reset_sent();
 		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
 		reset_sent();
 		{ uint8_t expire = 1; RecvFreeCrossTeleport(c, &expire); }
@@ -688,51 +701,6 @@ int main(void)
 		c->migration.deadline = time(NULL) - 1;
 		MigrationTick(c);
 		CHECK(c->migration.state == MIGRATION_IDLE && replied("Pas de réponse du serveur pour le royaume 796"), "a silent server is given up on with a message");
-		free(c);
-	}
-
-
-	/* ---- $migrate cost: ask the server how many scrolls it wants, show the raw answer ---- */
-	{
-		c = fresh("boss");
-		c->player.power = 46577521;
-
-		say(c, "eve", "$migrate cost", COMMAND_CHANNEL_MAIL);
-		CHECK(find_packet(_MSG_REQUEST_WORLD_TELEPORT_ITEM) < 0 && replied("Seuls les administrateurs"), "the cost query is refused for a stranger");
-		reset_sent();
-		say(c, "boss", "$migrate cost", COMMAND_CHANNEL_MAIL);
-		{
-			int k = find_packet(_MSG_REQUEST_WORLD_TELEPORT_ITEM);
-			CHECK(k >= 0, "the cost request goes out, even before the bag is loaded");
-			if (k >= 0) {
-				const uint8_t *pk = sent[k];
-				uint64_t power = 0;
-				memcpy(&power, pk + 8, 8);
-				CHECK((uint16_t)(pk[0] | (pk[1] << 8)) == 4 + 4 + 8 && power == 46577521, "the request carries the power of the account (u64)");
-			}
-		}
-		reset_sent();
-		{
-			uint8_t answer[6] = { 0x00, 0x03, 0x00, 0xfb, 0x04, 0x00 };
-			RecvWorldTeleportItemCount(c, answer, sizeof(answer));
-		}
-		CHECK(replied("puissance envoyée : 46577521, 6 octets") && replied("00 03 00 fb 04 00"), "the raw answer is sent back to the administrator");
-		reset_sent();
-		{
-			uint8_t answer[2] = { 1, 2 };
-			RecvWorldTeleportItemCount(c, answer, sizeof(answer));
-		}
-		CHECK(sent_count == 0, "an answer nobody asked for is not reported");
-		say(c, "boss", "$migrate cost", COMMAND_CHANNEL_MAIL);
-		reset_sent();
-		MigrationTick(c);
-		CHECK(sent_count == 0, "no answer yet: keep waiting");
-		c->cost_probe_until = time(NULL) - 1;
-		MigrationTick(c);
-		CHECK(replied("Pas de réponse du serveur au calcul du nombre de vélins"), "a silent server is reported");
-		reset_sent();
-		say(c, "boss", "$help", COMMAND_CHANNEL_MAIL);
-		CHECK(replied("$migrate cost - demander au serveur le nombre de vélins"), "the help lists the diagnostic");
 		free(c);
 	}
 

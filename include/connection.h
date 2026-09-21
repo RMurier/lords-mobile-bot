@@ -882,9 +882,6 @@ typedef struct {
 	bool lobby_login;
 	// set once the game server accepted the login
 	bool game_logged_in;
-	// $migrate cost: who asked the server for the number of migration scrolls, and until when
-	char cost_probe_to[13];
-	time_t cost_probe_until;
 	// number of migration scrolls the game asks for this account (migration.scrolls_needed)
 	uint16_t migration_scrolls_needed;
 	// cargo ship: wait until bag items used for a trade are credited

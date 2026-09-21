@@ -57,8 +57,6 @@ void RecvUseItem(Connection *c, const uint8_t *data, uint16_t);
 
 void ServerMagicGateDoEvent(Connection *c, uint16_t n, uint8_t x);
 
-void RequsetWorldTeleportItemCount(Connection *c, uint64_t Power);
-
 
 void RecvLoginError(Connection *c, const uint8_t *data);
 void HandleLoginValidate(Connection *c, const uint8_t *data, uint16_t size);
@@ -175,9 +173,6 @@ void RequestMigrationScroll(Connection *c, uint16_t kingdom_id, uint16_t zone_id
 void RecvMigrationScrollResult(Connection *c);
 bool MigrationStart(Connection *c, const char *requester, uint16_t kingdom_id, uint16_t x, uint16_t y, uint16_t zone_id, uint8_t point_id);
 void MigrationScrollStatus(const Connection *c, char *out, size_t size);
-void RequsetWorldTeleportItemCount(Connection *c, uint64_t power);
-void MigrationCostProbe(Connection *c, const char *requester);
-void RecvWorldTeleportItemCount(Connection *c, const uint8_t *data, uint16_t size);
 void RecvKingdomServer(Connection *c, const uint8_t *data, uint16_t size);
 void RecvFreeCrossTeleport(Connection *c, const uint8_t *data);
 void RecvCrossKingdomClose(Connection *c, const uint8_t *data, uint16_t size);

@@ -798,28 +798,6 @@ void RequestBuyGiftItem(Connection *c, uint8_t Type, uint16_t Key, uint16_t Item
     // Debug printf("[INFO] ServerBuyItem(c, %u, %u, %u, %s, %u)\n", Type, Key, ItemID, Name, Qty);
 }
 
-// It's for calculate how many migration scrolls require 
-void RequsetWorldTeleportItemCount(Connection *c, uint64_t Power)
-{
-	c->size = 2;
-	
-	// packet type 
-    write_u16(c->data + c->size, _MSG_REQUEST_WORLD_TELEPORT_ITEM);
-    c->size += 2;
-    
-    // Sequence 
-    write_u32(c->data + c->size, ++c->protocol.seq_id);
-    c->size += 4;
-    
-    // Power
-    write_u64(c->data + c->size, Power);
-    c->size += 8;
-    
-    write_u16(c->data, c->size);
-
-    send_packet(c, true);
-}
-
 void RequestDeleteAllianceGiftBox(Connection *c, uint32_t sn) {
 	c->size = 2; // reserved 2 byte for packet length 
 	
@@ -4831,9 +4809,19 @@ void RecvKingdomServer(Connection *c, const uint8_t *data, uint16_t size)
 	
 	if (size >= 6)
 		LOGI("[MIGRATION] Serveur du royaume %u : port %u\n", c->migration.kingdom_id, read_u32(data + 1));
-	
-	RequestFreeCrossTeleport(c, c->migration.kingdom_id, c->migration.zone_id, c->migration.point_id);
-	c->migration.state    = MIGRATION_WAIT_RESULT;
+
+	// a migration scroll works regardless of the account: try one first if there are enough,
+	// since the free offer (for returning players) is rarely available and not worth trying first
+	uint16_t have   = c->items[MIGRATION_SCROLL].quantity;
+	uint16_t needed = c->migration_scrolls_needed ? c->migration_scrolls_needed : 1;
+
+	if (c->items_loaded && have >= needed) {
+		RequestMigrationScroll(c, c->migration.kingdom_id, c->migration.zone_id, c->migration.point_id);
+		c->migration.state = MIGRATION_WAIT_SCROLL_RESULT;
+	} else {
+		RequestFreeCrossTeleport(c, c->migration.kingdom_id, c->migration.zone_id, c->migration.point_id);
+		c->migration.state = MIGRATION_WAIT_RESULT;
+	}
 	c->migration.deadline = time(NULL) + 15;
 }
 
@@ -4875,7 +4863,7 @@ void MigrationScrollStatus(const Connection *c, char *out, size_t size)
 		snprintf(out, size, "Il faut %u vélin(s) de migration et le sac n'en contient que %u (il en manque %u) : seule la migration gratuite peut aboutir.",
 			needed, have, needed - have);
 	else
-		snprintf(out, size, "Vélins de migration dans le sac : %u (%u nécessaire(s)).", have, needed);
+		snprintf(out, size, "Vélins de migration dans le sac : %u (%u nécessaire(s)) : un sera utilisé directement.", have, needed);
 }
 
 void RecvFreeCrossTeleport(Connection *c, const uint8_t *data)
@@ -4896,38 +4884,22 @@ void RecvFreeCrossTeleport(Connection *c, const uint8_t *data)
 		return;
 	}
 
+	c->migration.state = MIGRATION_IDLE;
+
 	const char *name;
 	const char *reason = FreeTeleportReason(status, &name);
 
 	LOGW("[MIGRATION] Migration gratuite refusée par le serveur (code %d, %s)\n", status, name);
 
-	// a precise reason about the destination or the account's state (kingdom full, troops
-	// outside, an event lock...) would block a scroll-paid migration just the same: only fall
-	// through to the scroll for the two reasons that are specifically about the free offer's
-	// own eligibility (NEWBIE_ERROR, and the unexplained UNKNOWN some accounts get instead of it).
-	bool free_offer_not_available = (status == 2 || status == 7);
-
-	if (reason != NULL && !free_offer_not_available) {
-		c->migration.state = MIGRATION_IDLE;
+	// a precise reason (kingdom full, troops outside...) is a problem a scroll would not fix either;
+	// this is only reached without enough scrolls in the bag to begin with (see RecvKingdomServer)
+	if (reason != NULL && status != 7) {
 		BotReply(c, c->migration.requester, "Migration", "Migration refusée : %s (%s).", reason, name);
 		return;
 	}
 
-	// the free offer does not apply here: try a scroll if there are enough (captured from the
-	// official client: same _MSG_REQUEST_USEITEM used for the advanced relocator, with
-	// MIGRATION_SCROLL as the item).
 	uint16_t have   = c->items[MIGRATION_SCROLL].quantity;
 	uint16_t needed = c->migration_scrolls_needed ? c->migration_scrolls_needed : 1;
-
-	if (c->items_loaded && have >= needed) {
-		LOGI("[MIGRATION] Bascule sur un vélin de migration (%u disponible(s), %u nécessaire(s))\n", have, needed);
-		RequestMigrationScroll(c, c->migration.kingdom_id, c->migration.zone_id, c->migration.point_id);
-		c->migration.state    = MIGRATION_WAIT_SCROLL_RESULT;
-		c->migration.deadline = time(NULL) + 15;
-		return;
-	}
-
-	c->migration.state = MIGRATION_IDLE;
 
 	if (!c->items_loaded) {
 		BotReply(c, c->migration.requester, "Migration", "Migration refusée par le serveur (code %d, %s).", status, name);
@@ -4966,57 +4938,13 @@ void RecvCrossKingdomClose(Connection *c, const uint8_t *data, uint16_t size)
 /* Gives up when the server does not answer. */
 void MigrationTick(Connection *c)
 {
-	if (c->cost_probe_to[0] != '\0' && time(NULL) > c->cost_probe_until) {
-		BotReply(c, c->cost_probe_to, "Migration", "Pas de réponse du serveur au calcul du nombre de vélins de migration.");
-		c->cost_probe_to[0] = '\0';
-	}
-	
 	if (c->migration.state == MIGRATION_IDLE || time(NULL) <= c->migration.deadline)
 		return;
-	
+
 	if (c->migration.state == MIGRATION_WAIT_SERVER)
 		BotReply(c, c->migration.requester, "Migration", "Pas de réponse du serveur pour le royaume %u : migration abandonnée.", c->migration.kingdom_id);
 	else
 		BotReply(c, c->migration.requester, "Migration", "Pas de réponse à la demande de migration : vérifiez dans le jeu où en est le château.");
-	
+
 	c->migration.state = MIGRATION_IDLE;
-}
-
-
-/*
- * How many migration scrolls a migration needs depends on the account (its power). The game asks the server with
- * _MSG_REQUEST_WORLD_TELEPORT_ITEM (the power, u64) and the answer sets WorldTeleportItemCount in the client.
- * The layout of the answer is not known yet: $migrate cost sends the request and shows the raw reply, which is what
- * is needed to decode it (compare it with the number the game displays).
- */
-void MigrationCostProbe(Connection *c, const char *requester)
-{
-	snprintf(c->cost_probe_to, sizeof(c->cost_probe_to), "%s", requester);
-	c->cost_probe_until = time(NULL) + 10;
-	RequsetWorldTeleportItemCount(c, c->player.power);
-}
-
-void RecvWorldTeleportItemCount(Connection *c, const uint8_t *data, uint16_t size)
-{
-	char hex[3 * 64 + 1];
-	size_t shown = size < 64 ? size : 64;
-	
-	for (size_t i = 0; i < shown; i++)
-		snprintf(hex + i * 3, 4, "%02x ", data[i]);
-	
-	hex[shown * 3] = '\0';
-	
-	LOGI("[MIGRATION] Réponse du serveur au nombre de vélins (%u octets, puissance envoyée %llu) : %s\n",
-		size, (unsigned long long)c->player.power, hex);
-	
-	if (c->cost_probe_to[0] == '\0' || time(NULL) > c->cost_probe_until)
-		return;
-	
-	char who[13];
-	
-	snprintf(who, sizeof(who), "%s", c->cost_probe_to);
-	c->cost_probe_to[0] = '\0';
-	
-	BotReply(c, who, "Migration", "Réponse du serveur au nombre de vélins de migration (puissance envoyée : %llu, %u octets) : %s",
-		(unsigned long long)c->player.power, size, hex);
 }
