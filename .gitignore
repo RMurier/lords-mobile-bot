@@ -12,3 +12,7 @@ logs/
 __pycache__/
 build/
 webui_settings.json
+runtime/
+lmbot-sauvegarde*.json
+.env
+lordsbot*.bak

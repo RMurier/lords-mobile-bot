@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmbot
+spec:
+  replicas: 1                  # one console owns the bots: two would log in twice and kick each other
+  strategy:
+    type: Recreate             # never two consoles at once, not even during an update
+  selector:
+    matchLabels: { app: lmbot }
+  template:
+    metadata:
+      labels: { app: lmbot }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: lmbot
+          image: lmbot:latest                 # build and import it, see docs/deployment.md
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8765 }
+          env:
+            - { name: LMBOT_DB_HOST, value: sqlserver-0.sqlserver }
+            - name: LMBOT_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: lmbot-secrets, key: sa-password } }
+            - name: LMBOT_TOKEN
+              valueFrom: { secretKeyRef: { name: lmbot-secrets, key: token } }
+            - { name: LMBOT_ALLOWED_ORIGINS, value: "https://lmbot.example.com,http://lmbot.example.com" }   # the address of the ingress
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }         # about 10 MB per bot plus the console, see docs
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: work, mountPath: /var/lib/lmbot }
+      volumes:
+        - name: work                          # scratch only: configs, logs and status live in SQL Server
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmbot
+spec:
+  selector: { app: lmbot }
+  ports:
+    - { name: http, port: 80, targetPort: http }

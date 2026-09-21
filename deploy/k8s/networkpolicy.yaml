@@ -1,0 +1,32 @@
+# Only inside the lmbot namespace: they change nothing for your other workloads.
+# SQL Server accepts connections from the console only; the console accepts them from the ingress controller
+# (Traefik, in kube-system on k3s). Outgoing traffic is not restricted: the bots must reach the game servers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sqlserver-from-console
+spec:
+  podSelector:
+    matchLabels: { app: sqlserver }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: lmbot }
+      ports:
+        - { port: 1433 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: console-from-ingress
+spec:
+  podSelector:
+    matchLabels: { app: lmbot }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { port: 8765 }

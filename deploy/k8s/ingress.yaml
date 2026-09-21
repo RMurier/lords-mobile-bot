@@ -1,0 +1,15 @@
+# Optional: applied by deploy.sh only when LMBOT_HOST is set.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lmbot
+  # k3s ships Traefik as the default ingress controller
+spec:
+  rules:
+    - host: lmbot.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: lmbot, port: { name: http } }

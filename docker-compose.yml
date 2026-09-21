@@ -1,0 +1,35 @@
+# Local test of the containers: docker compose up --build
+# The console is then on http://localhost:8765/#t=<LMBOT_TOKEN>
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Express
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD (12+ characters, upper, lower, digit, symbol)}
+      MSSQL_MEMORY_LIMIT_MB: "1024"
+    volumes:
+      - sqldata:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  bot:
+    build: .
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      LMBOT_DB_HOST: sqlserver
+      LMBOT_DB_PASSWORD: ${MSSQL_SA_PASSWORD}
+      LMBOT_TOKEN: ${LMBOT_TOKEN:?set LMBOT_TOKEN (16+ characters)}
+      LMBOT_ALLOWED_ORIGINS: http://localhost:8765
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
+
+volumes:
+  sqldata:

@@ -1,0 +1,12 @@
+.git
+build/
+accounts/
+data/
+logs/
+runtime/
+*.pcap
+*.pcapng
+*.etl
+webui_settings.json
+config.cfg
+**/__pycache__

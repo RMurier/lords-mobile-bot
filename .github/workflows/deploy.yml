@@ -1,0 +1,72 @@
+name: test-build-deploy
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false      # never cut a deployment in half
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bot logic tests
+        run: |
+          gcc -std=gnu11 -Iinclude -o bot_logic_test tests/bot_logic_test.c \
+            src/log.c src/protocol.c src/des.c src/map_point.c src/command.c src/config.c
+          ./bot_logic_test
+      - name: Console compiles
+        run: python3 -m py_compile webui/server.py webui/store.py webui/schema.py webui/config_file.py
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.name.outputs.image }}:${{ github.sha }}
+            ${{ steps.name.outputs.image }}:latest
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-latest
+    env:
+      SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      TARGET: ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}
+      PORT: ${{ secrets.DEPLOY_PORT || 22 }}
+      IMAGE: ${{ needs.image.outputs.image }}:${{ github.sha }}
+      SHA: ${{ github.sha }}
+    steps:
+      - name: SSH key and known host
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Update the server
+        run: |
+          ssh -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes -p "$PORT" "$TARGET" \
+            "cd ~/lords-mobile-bot && git fetch --quiet origin && git reset --hard $SHA && \
+             YES=1 LMBOT_IMAGE=$IMAGE deploy/deploy.sh upgrade"

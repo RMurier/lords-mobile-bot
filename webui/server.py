@@ -26,6 +26,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,16 +43,13 @@ sys.path.insert(0, str(REPO / "tools"))
 import config_file as cf  # noqa: E402
 import extract_credentials as ec  # noqa: E402
 import schema  # noqa: E402
+import store as storage  # noqa: E402
 
-ACCOUNTS_DIR = ROOT / "accounts"
-LOGS_DIR = ROOT / "logs"
 STATIC_DIR = HERE / "static"
-SETTINGS_FILE = ROOT / "webui_settings.json"
 
 ACCOUNT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 MAX_JSON = 1 << 20
 MAX_UPLOAD = 1 << 30
-LOG_ROTATE_BYTES = 5 << 20
 IS_WINDOWS = os.name == "nt"
 
 
@@ -67,14 +66,11 @@ class ApiError(Exception):
 class Settings:
     def __init__(self):
         self.lock = threading.Lock()
-        self.data = {"client_path": "", "stagger": 5, "aliases": {}}
-        try:
-            self.data.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            pass
+        self.data = {"client_path": "", "stagger": 5, "aliases": {}, "autostart": [], "remote_url": "", "remote_token": ""}
+        self.data.update(store.get_settings())
 
     def save(self):
-        SETTINGS_FILE.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+        store.put_settings(self.data)
 
     def get(self, key):
         with self.lock:
@@ -89,7 +85,8 @@ class Settings:
 def detect_clients():
     """Existing client executables, best candidates first."""
     exe = "client.exe" if IS_WINDOWS else "client"
-    candidates = [
+    candidates = [Path(os.environ["LMBOT_CLIENT"])] if os.environ.get("LMBOT_CLIENT") else []
+    candidates += [
         ROOT / "build" / exe,
         ROOT / "build" / "Release" / exe,
         ROOT / exe,
@@ -111,18 +108,16 @@ def detect_clients():
 # --------------------------------------------------------------------------
 
 def account_path(account_id):
+    """Checks that the account exists and gives its id back."""
     if not ACCOUNT_ID.match(account_id or ""):
         raise ApiError(400, "Identifiant de compte invalide.")
-    path = ACCOUNTS_DIR / f"{account_id}.cfg"
-    if not path.is_file():
+    if not store.has_account(account_id):
         raise ApiError(404, "Compte introuvable.")
-    return path
+    return account_id
 
 
 def list_account_ids():
-    if not ACCOUNTS_DIR.is_dir():
-        return []
-    return sorted(p.stem for p in ACCOUNTS_DIR.glob("*.cfg") if ACCOUNT_ID.match(p.stem))
+    return store.list_accounts(ACCOUNT_ID)
 
 
 def merged_admins(present):
@@ -137,7 +132,7 @@ def merged_admins(present):
 
 
 def account_payload(account_id):
-    text = cf.read_file(account_path(account_id))
+    text = store.get_cfg(account_path(account_id))
     present = cf.read_values(text)
     values, secrets_info, defaults_used = {}, {}, []
     for key, field in schema.FIELDS.items():
@@ -171,8 +166,8 @@ def account_payload(account_id):
 
 def account_summary(account_id):
     try:
-        present = cf.read_values(cf.read_file(ACCOUNTS_DIR / f"{account_id}.cfg"))
-    except OSError:
+        present = cf.read_values(store.get_cfg(account_id))
+    except (OSError, storage.StoreError):
         present = {}
     return {
         "id": account_id,
@@ -184,7 +179,7 @@ def account_summary(account_id):
 
 
 def save_changes(account_id, changes):
-    path = account_path(account_id)
+    account_path(account_id)
     normalised, errors = {}, {}
     for key, raw in changes.items():
         field = schema.FIELDS.get(key)
@@ -202,7 +197,7 @@ def save_changes(account_id, changes):
     if "admin.names" in normalised:
         normalised["admin.name"] = ""  # the legacy single-admin key is now part of admin.names
     if normalised:
-        cf.write_private(path, cf.apply_changes(cf.read_file(path), normalised))
+        store.put_cfg(account_id, cf.apply_changes(store.get_cfg(account_id), normalised))
     return account_payload(account_id)
 
 
@@ -211,7 +206,7 @@ def new_account_id(preferred):
     if not base[0].isalnum():
         base = "compte-" + base
     candidate, n = base, 2
-    while (ACCOUNTS_DIR / f"{candidate}.cfg").exists():
+    while store.has_account(candidate):
         candidate, n = f"{base}-{n}", n + 1
     return candidate
 
@@ -220,13 +215,13 @@ def create_account(name, copy_from=None):
     account_id = new_account_id(name)
     values = {}
     if copy_from:
-        source = cf.read_values(cf.read_file(account_path(copy_from)))
+        source = cf.read_values(store.get_cfg(account_path(copy_from)))
         values = {k: v for k, v in source.items() if k in schema.FIELDS and not k.startswith("account.")}
         admins = merged_admins(source)
         if admins:
             values["admin.names"] = admins
     values["data.path"] = f"./data/{account_id}/"
-    cf.write_private(ACCOUNTS_DIR / f"{account_id}.cfg", cf.render_new(values), keep_backup=False)
+    store.put_cfg(account_id, cf.render_new(values), keep_backup=False)
     return account_id
 
 
@@ -245,7 +240,109 @@ def credential_updates(account):
     return updates
 
 
+BUNDLE_VERSION = 1
+BUNDLE_SETTINGS = ("stagger", "aliases")     # what belongs to the accounts, not to this computer
+
+
+def export_bundle():
+    """Everything needed to rebuild the accounts elsewhere: configurations, in-game administrators, names."""
+    accounts = {}
+    for account_id in list_account_ids():
+        accounts[account_id] = {"cfg": store.get_cfg(account_id), "admins": store.get_admins(account_id)}
+    return {"format": "lmbot-export", "version": BUNDLE_VERSION, "exported_at": int(time.time()),
+            "settings": {key: settings.get(key) for key in BUNDLE_SETTINGS}, "accounts": accounts}
+
+
+def import_bundle(bundle, overwrite=False):
+    if not isinstance(bundle, dict) or bundle.get("format") != "lmbot-export" \
+            or not isinstance(bundle.get("accounts"), dict):
+        raise ApiError(400, "Ce fichier n'est pas une sauvegarde de la console.")
+    if bundle.get("version") != BUNDLE_VERSION:
+        raise ApiError(400, f"Version de sauvegarde inconnue : {bundle.get('version')}.")
+    imported, skipped = [], []
+    aliases = dict(settings.get("aliases"))
+    for account_id, entry in bundle["accounts"].items():
+        if not ACCOUNT_ID.match(str(account_id)) or not isinstance(entry, dict) or not isinstance(entry.get("cfg"), str):
+            skipped.append({"id": str(account_id)[:64], "reason": "entrée invalide"})
+            continue
+        exists = store.has_account(account_id)
+        if exists and not overwrite:
+            skipped.append({"id": account_id, "reason": "existe déjà"})
+            continue
+        if exists and bots.status(account_id)["state"] == "running":
+            skipped.append({"id": account_id, "reason": "son bot tourne : arrêtez-le d'abord"})
+            continue
+        # a data folder of the old computer (C:\...) means nothing here: use the standard one
+        text = cf.apply_changes(entry["cfg"], {"data.path": f"./data/{account_id}/"})
+        store.put_cfg(account_id, text, keep_backup=exists)
+        if isinstance(entry.get("admins"), str):
+            store.put_admins(account_id, entry["admins"])
+        alias = (bundle.get("settings", {}).get("aliases") or {}).get(account_id)
+        if isinstance(alias, str) and alias:
+            aliases[account_id] = alias[:40]
+        imported.append(account_id)
+    updates = {"aliases": aliases}
+    stagger = bundle.get("settings", {}).get("stagger")
+    if isinstance(stagger, int) and 0 <= stagger <= 600 and not skipped and imported:
+        updates["stagger"] = stagger
+    settings.update(**updates)
+    return {"imported": imported, "skipped": skipped}
+
+
+def remote_call(path, payload):
+    """POST JSON to the other console (the server)."""
+    base = str(settings.get("remote_url") or "").strip()
+    if not base:
+        raise ApiError(409, "Aucun serveur distant n'est configuré (Paramètres → Serveur distant).")
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(base.rstrip("/") + path, data=data, method="POST", headers={
+        "X-Token": str(settings.get("remote_token") or ""), "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            message = json.loads(e.read().decode("utf-8")).get("error", "")
+        except (ValueError, OSError):
+            message = ""
+        if e.code == 401:
+            message = "Le serveur distant refuse le jeton : vérifiez-le dans les paramètres."
+        raise ApiError(502, f"Console distante : {message or 'erreur HTTP %d' % e.code}")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise ApiError(502, f"Console distante injoignable ({base}) : {getattr(e, 'reason', e)}")
+
+
+def push_capture(capture_path, base_url, token):
+    """Sends the capture to another console (the one on the server), which does the import."""
+    url = base_url.rstrip("/") + "/api/import"
+    size = os.path.getsize(capture_path)
+    with open(capture_path, "rb") as body:
+        request = urllib.request.Request(url, data=body, method="POST", headers={
+            "X-Token": token, "Content-Type": "application/octet-stream", "Content-Length": str(size)})
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                message = json.loads(e.read().decode("utf-8")).get("error", "")
+            except (ValueError, OSError):
+                message = ""
+            if e.code == 401:
+                message = "Le serveur distant refuse le jeton : vérifiez-le dans les paramètres."
+            raise ApiError(502, f"Console distante : {message or 'erreur HTTP %d' % e.code}")
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise ApiError(502, f"Console distante injoignable ({base_url}) : {getattr(e, 'reason', e)}")
+    accounts = result.get("accounts") or []
+    for account in accounts:
+        account["remote"] = True
+    return accounts
+
+
 def import_capture(capture_path):
+    remote = str(settings.get("remote_url") or "").strip()
+    if remote:
+        # this computer has the game, the server has the bots: the identifiers go straight to the server
+        return push_capture(capture_path, remote, str(settings.get("remote_token") or ""))
     try:
         found = ec.extract(capture_path)
     except (OSError, ValueError) as e:
@@ -253,19 +350,17 @@ def import_capture(capture_path):
     if not found:
         raise ApiError(422, "Aucun login trouvé dans la capture. Lancez la capture AVANT d'ouvrir le jeu et "
                             "arrêtez-la seulement une fois en jeu.")
-    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
     results = []
     for account in found:
         account_id = str(account["igg_id"])
-        path = ACCOUNTS_DIR / f"{account_id}.cfg"
         updates = credential_updates(account)
-        created = not path.exists()
+        created = not store.has_account(account_id)
         if created:
             values = {k: v for k, v in updates.items() if v != ""}
             values["data.path"] = f"./data/{account_id}/"
-            cf.write_private(path, cf.render_new(values), keep_backup=False)
+            store.put_cfg(account_id, cf.render_new(values), keep_backup=False)
         else:
-            cf.write_private(path, cf.apply_changes(cf.read_file(path), updates))
+            store.put_cfg(account_id, cf.apply_changes(store.get_cfg(account_id), updates))
         results.append({
             "id": account_id, "created": created,
             "version": "{}.{}.{}".format(*(account.get(k, "?") for k in
@@ -281,11 +376,11 @@ def import_capture(capture_path):
 # --------------------------------------------------------------------------
 
 class Bots:
-    """One bot process per account, with its log file."""
+    """One bot process per account; what it prints goes to the store (a file or the database)."""
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.procs = {}   # account id -> {"proc", "since", "log"}
+        self.procs = {}   # account id -> {"proc", "since", "pump"}
         self.exited = {}  # account id -> exit code of the last run
 
     def _alive(self, account_id):
@@ -294,7 +389,6 @@ class Bots:
             return entry
         if entry:
             self.exited[account_id] = entry["proc"].returncode
-            entry["log"].close()
             del self.procs[account_id]
         return None
 
@@ -306,18 +400,18 @@ class Bots:
             status = {"state": "stopped"}
             if account_id in self.exited:
                 status["exit_code"] = self.exited[account_id]
-            last = self.last_log_line(account_id)
+            last = store.last_log_line(account_id)
             if last:
                 status["last_log"] = last
             return status
 
     def start(self, account_id):
-        path = account_path(account_id)
+        account_path(account_id)
         client = client_path()
         if not client:
             raise ApiError(409, "Exécutable du bot introuvable. Compilez le bot (build.bat) ou indiquez son "
                                 "chemin dans les paramètres.")
-        present = cf.read_values(cf.read_file(path))
+        present = cf.read_values(store.get_cfg(account_id))
         missing = [label for key, label in (("account.igg_id", "IGG ID"), ("account.access_key", "clé d'accès"))
                    if not present.get(key)]
         if missing:
@@ -325,21 +419,20 @@ class Bots:
         with self.lock:
             if self._alive(account_id):
                 raise ApiError(409, "Ce bot est déjà démarré.")
-            LOGS_DIR.mkdir(parents=True, exist_ok=True)
-            log_path = LOGS_DIR / f"{account_id}.log"
-            if log_path.exists() and log_path.stat().st_size > LOG_ROTATE_BYTES:
-                os.replace(log_path, LOGS_DIR / f"{account_id}.log.1")
-            log = open(log_path, "ab", buffering=0)
-            log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} démarrage ---\n".encode())
+            path = store.cfg_path(account_id)
+            store.prepare_start(account_id)
+            store.append_log(account_id, f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} démarrage ---\n")
             flags = subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
             try:
                 proc = subprocess.Popen([client, str(path)], cwd=str(ROOT), stdin=subprocess.DEVNULL,
-                                        stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+                                        creationflags=flags)
             except OSError as e:
-                log.close()
                 raise ApiError(500, f"Impossible de lancer le bot : {e}")
+            pump = threading.Thread(target=self._pump, args=(account_id, proc), daemon=True)
+            pump.start()
             self.exited.pop(account_id, None)
-            self.procs[account_id] = {"proc": proc, "since": time.time(), "log": log}
+            self.procs[account_id] = {"proc": proc, "since": time.time(), "pump": pump}
         return self.status(account_id)
 
     def stop(self, account_id):
@@ -354,7 +447,8 @@ class Bots:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-            entry["log"].write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} arrêté depuis l'interface ---\n".encode())
+            entry["pump"].join(timeout=2)
+            store.append_log(account_id, f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} arrêté depuis l'interface ---\n")
         with self.lock:
             self._alive(account_id)
             self.exited.pop(account_id, None)
@@ -364,30 +458,21 @@ class Bots:
             self.stop(account_id)
 
     @staticmethod
-    def last_log_line(account_id):
+    def _pump(account_id, proc):
+        """Copies what the bot prints into the store until it exits."""
         try:
-            with open(LOGS_DIR / f"{account_id}.log", "rb") as f:
-                f.seek(0, os.SEEK_END)
-                f.seek(max(0, f.tell() - 4096))
-                lines = [ln.strip() for ln in f.read().decode("utf-8", "replace").splitlines() if ln.strip()]
-        except OSError:
-            return ""
-        lines = [ln for ln in lines if not ln.startswith("---")]
-        return lines[-1][:300] if lines else ""
-
-    @staticmethod
-    def read_log(account_id, offset):
-        path = LOGS_DIR / f"{account_id}.log"
-        try:
-            size = path.stat().st_size
-        except OSError:
-            return {"offset": 0, "text": ""}
-        if offset is None or offset < 0 or offset > size:
-            offset = max(0, size - 32768)  # first read or rotated file: the last 32 KiB
-        with open(path, "rb") as f:
-            f.seek(offset)
-            chunk = f.read(131072)
-        return {"offset": offset + len(chunk), "text": chunk.decode("utf-8", "replace")}
+            while True:
+                chunk = proc.stdout.read(4096)
+                if not chunk:
+                    break
+                store.append_log(account_id, chunk.decode("utf-8", "replace"))
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
 
 
 def client_path():
@@ -398,8 +483,54 @@ def client_path():
     return found[0] if found else ""
 
 
+try:
+    store = storage.open_store(ROOT)
+except storage.StoreError as e:
+    sys.exit(f"[webui] {e}")
 settings = Settings()
 bots = Bots()
+
+
+def remember_autostart(account_id, wanted):
+    """Which bots were running when the console stopped: they are started again with it."""
+    with settings.lock:
+        current = list(settings.data.get("autostart") or [])
+    if wanted and account_id not in current:
+        current.append(account_id)
+    elif not wanted and account_id in current:
+        current.remove(account_id)
+    else:
+        return
+    settings.update(autostart=current)
+
+
+def sync_loop():
+    """Every second, group the bot output into the database; every 5 s, save what the bots keep in their folder."""
+    tick = 0
+    while True:
+        time.sleep(1)
+        tick += 1
+        try:
+            flush = getattr(store, "flush_logs", None)
+            if flush:
+                flush()
+            if tick % 5 == 0 and (store.persists_game or store.persists_admins):
+                for account_id in list(bots.procs):
+                    folder = ROOT / "data" / account_id
+                    for name, persist, put in (("status.json", store.persists_game, store.put_game),
+                                               ("admins.txt", store.persists_admins, store.put_admins)):
+                        if not persist:
+                            continue
+                        try:
+                            text = (folder / name).read_text(encoding="utf-8")
+                        except OSError:
+                            continue
+                        try:
+                            put(account_id, json.loads(text) if name.endswith(".json") else text)
+                        except ValueError:
+                            pass    # the bot was writing the file: next time
+        except Exception as e:  # noqa: BLE001 - a database hiccup must not stop the loop
+            print(f"[webui] synchronisation : {type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
 
 # --------------------------------------------------------------------------
@@ -472,8 +603,11 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(401, "Jeton d'accès invalide. Rouvrez le lien affiché dans la console.")
         if method != "GET":
             origin = self.headers.get("Origin")
-            if origin and origin.lower() not in (f"http://127.0.0.1:{self.server.server_address[1]}",
-                                                 f"http://localhost:{self.server.server_address[1]}"):
+            allowed = {f"http://127.0.0.1:{self.server.server_address[1]}",
+                       f"http://localhost:{self.server.server_address[1]}"}
+            allowed.update(o.strip().lower().rstrip("/") for o in os.environ.get("LMBOT_ALLOWED_ORIGINS", "").split(",")
+                           if o.strip())
+            if origin and origin.lower() not in allowed:
                 raise ApiError(403, "Origine non autorisée.")
 
     def _static(self, path):
@@ -525,7 +659,8 @@ def api_state(h, query):
         "accounts": [account_summary(a) for a in list_account_ids()],
         "schema": schema.public_schema(),
         "settings": {"client_path": settings.get("client_path"), "client_used": client_path(),
-                     "client_detected": detected, "stagger": settings.get("stagger")},
+                     "client_detected": detected, "stagger": settings.get("stagger"),
+                     "remote_url": settings.get("remote_url"), "remote_token_set": bool(settings.get("remote_token"))},
         "os": "windows" if IS_WINDOWS else "posix",
     }
 
@@ -545,12 +680,11 @@ def api_account_put(h, query, account_id):
 
 @route("DELETE", "/api/accounts/([^/]+)")
 def api_account_delete(h, query, account_id):
-    path = account_path(account_id)
+    account_path(account_id)
     if bots.status(account_id)["state"] == "running":
         raise ApiError(409, "Arrêtez le bot avant de supprimer le compte.")
-    path.unlink()
-    for leftover in (path.with_suffix(".cfg.bak"),):
-        leftover.unlink(missing_ok=True)
+    store.delete_account(account_id)
+    remember_autostart(account_id, False)
     aliases = dict(settings.get("aliases"))
     if aliases.pop(account_id, None) is not None:
         settings.update(aliases=aliases)
@@ -588,8 +722,11 @@ def api_account_control(h, query, account_id, action):
     account_path(account_id)
     if action in ("stop", "restart"):
         bots.stop(account_id)
+        remember_autostart(account_id, False)
     if action in ("start", "restart"):
-        return bots.start(account_id)
+        status = bots.start(account_id)
+        remember_autostart(account_id, True)
+        return status
     return bots.status(account_id)
 
 
@@ -600,18 +737,16 @@ def api_account_logs(h, query, account_id):
         offset = int(query.get("offset", ["-1"])[0])
     except ValueError:
         offset = -1
-    return {**bots.read_log(account_id, offset), "status": bots.status(account_id)}
+    return {**store.read_log(account_id, offset), "status": bots.status(account_id)}
 
 
 @route("GET", "/api/accounts/([^/]+)/game")
 def api_account_game(h, query, account_id):
     """What the bot knows about the account in game: the status.json it writes every few seconds."""
     account_path(account_id)
-    path = ROOT / "data" / account_id / "status.json"
     running = bots.status(account_id)["state"] == "running"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    data = store.get_game(account_id)
+    if data is None:
         return {"available": False, "running": running}
     age = time.time() - data.get("written_at", 0)
     # the file outlives the bot: it only counts as live while the process runs and keeps writing
@@ -639,6 +774,26 @@ def api_import(h, query):
         os.unlink(tmp)
 
 
+@route("GET", "/api/data/export")
+def api_data_export(h, query):
+    return export_bundle()
+
+
+@route("POST", "/api/data/import")
+def api_data_import(h, query):
+    overwrite = query.get("overwrite", ["0"])[0] == "1"
+    return import_bundle(h.read_json(), overwrite)
+
+
+@route("POST", "/api/data/push")
+def api_data_push(h, query):
+    """Sends this console's accounts to the server's console."""
+    overwrite = query.get("overwrite", ["0"])[0] == "1"
+    if not list_account_ids():
+        raise ApiError(409, "Aucun compte à envoyer.")
+    return remote_call("/api/data/import" + ("?overwrite=1" if overwrite else ""), export_bundle())
+
+
 @route("PUT", "/api/settings")
 def api_settings(h, query):
     body = h.read_json()
@@ -656,6 +811,15 @@ def api_settings(h, query):
         if not 0 <= stagger <= 600:
             raise ApiError(400, "Délai invalide.", errors={"stagger": "Entre 0 et 600 secondes."})
         updates["stagger"] = stagger
+    if "remote_url" in body:
+        remote = str(body["remote_url"] or "").strip().rstrip("/")
+        if remote and not re.match(r"^https?://[^\s/]+(/\S*)?$", remote):
+            raise ApiError(400, "Adresse invalide.", errors={"remote_url": "Adresse du type https://bot.exemple.com"})
+        updates["remote_url"] = remote
+    if body.get("remote_token"):
+        updates["remote_token"] = str(body["remote_token"]).strip()
+    if "remote_url" in updates and not updates["remote_url"]:
+        updates["remote_token"] = ""      # no server, no reason to keep its token
     settings.update(**updates)
     return api_state(h, {})["settings"]
 
@@ -908,35 +1072,61 @@ def main():
     parser.add_argument("--start", nargs="+", metavar="ACCOUNT", default=[],
                         help="start the bots of these accounts as soon as the console is up (one after the other, "
                              "with the start delay of the settings)")
+    parser.add_argument("--host", default=os.environ.get("LMBOT_HOST", "127.0.0.1"),
+                        help="address to listen on (default 127.0.0.1; 0.0.0.0 in a container, with LMBOT_TOKEN)")
     args = parser.parse_args()
 
+    local = args.host in ("127.0.0.1", "localhost")
+    fixed_token = os.environ.get("LMBOT_TOKEN", "")
+    if not local and len(fixed_token) < 16:
+        sys.exit("[webui] Hors de cette machine, définissez LMBOT_TOKEN (16 caractères au moins) : "
+                 "sans lui le jeton change à chaque démarrage.")
+
     server = None
-    for port in range(args.port, args.port + 10):
+    for port in range(args.port, args.port + (10 if local else 1)):
         try:
-            server = Server(("127.0.0.1", port), Handler)
+            server = Server((args.host, port), Handler)
             break
         except OSError:
             continue
     if server is None:
-        sys.exit(f"Ports {args.port}-{args.port + 9} are all in use.")
+        sys.exit(f"Port {args.port} is already in use.")
 
-    server.token = secrets.token_urlsafe(24)
-    url = f"http://127.0.0.1:{server.server_address[1]}/#t={server.token}"
+    server.token = fixed_token or secrets.token_urlsafe(24)
     print("Lords Mobile Bot - web interface", flush=True)
-    print(f"Open this link (it contains your access token, do not share it):\n\n    {url}\n", flush=True)
-    print("Bots started from the interface run as long as this window stays open. Ctrl+C stops everything.",
-          flush=True)
-    if not args.no_browser:
+    print(f"Stockage : {store.describe()}", flush=True)
+    if isinstance(store, storage.SqlStore):
+        imported = store.import_files(ROOT, ACCOUNT_ID)
+        if imported:
+            print(f"[webui] {imported} compte(s) importé(s) depuis les fichiers vers SQL Server", flush=True)
+            settings.data.update(store.get_settings())
+    if fixed_token:
+        url = f"http://{'127.0.0.1' if local else args.host}:{server.server_address[1]}/"
+        print(f"Interface : {url} (jeton : celui de LMBOT_TOKEN, à passer dans l'adresse : #t=<jeton>)", flush=True)
+    else:
+        url = f"http://127.0.0.1:{server.server_address[1]}/#t={server.token}"
+        print(f"Open this link (it contains your access token, do not share it):\n\n    {url}\n", flush=True)
+    print("Bots started from the interface run as long as this process runs. Ctrl+C stops everything.", flush=True)
+    if not args.no_browser and local and not fixed_token:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-    if args.start:
-        threading.Thread(target=start_accounts, args=(args.start,), daemon=True).start()
+    threading.Thread(target=sync_loop, daemon=True).start()
+    wanted = list(args.start)
+    if os.environ.get("LMBOT_AUTOSTART", "1" if isinstance(store, storage.SqlStore) else "0") == "1":
+        wanted += [a for a in (settings.get("autostart") or []) if a not in wanted and store.has_account(a)]
+    if wanted:
+        threading.Thread(target=start_accounts, args=(wanted,), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping bots...")
     finally:
         capture.cancel()
-        bots.stop_all()
+        keep = list(settings.data.get("autostart") or [])
+        bots.stop_all()          # stopping with the console must not forget which bots were wanted
+        settings.update(autostart=keep)
+        flush = getattr(store, "flush_logs", None)
+        if flush:
+            flush()
         server.server_close()
 
 

@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sqlserver
+spec:
+  clusterIP: None            # headless: reached by the StatefulSet's stable name, never from outside the cluster
+  selector: { app: sqlserver }
+  ports:
+    - { name: sql, port: 1433 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sqlserver
+spec:
+  serviceName: sqlserver
+  replicas: 1
+  selector:
+    matchLabels: { app: sqlserver }
+  template:
+    metadata:
+      labels: { app: sqlserver }
+    spec:
+      securityContext:
+        fsGroup: 10001         # the mssql user of the image must be able to write the volume
+      containers:
+        - name: sqlserver
+          image: mcr.microsoft.com/mssql/server:2022-latest
+          ports:
+            - { name: sql, containerPort: 1433 }
+          env:
+            - { name: ACCEPT_EULA, value: "Y" }
+            - { name: MSSQL_PID, value: Express }          # free edition: 10 GB per database, plenty here
+            - { name: MSSQL_MEMORY_LIMIT_MB, value: "1024" }
+            - name: MSSQL_SA_PASSWORD
+              valueFrom: { secretKeyRef: { name: lmbot-secrets, key: sa-password } }
+          resources:
+            requests: { cpu: 200m, memory: 1536Mi }
+            limits: { memory: 2Gi }                          # SQL Server refuses to start under 2 GB of RAM on the node
+          readinessProbe:
+            tcpSocket: { port: 1433 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 1433 }
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          volumeMounts:
+            - { name: data, mountPath: /var/opt/mssql }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        # k3s ships the local-path provisioner: the data lives on the node's disk
+        # (/var/lib/rancher/k3s/storage). Back it up, see docs/deployment.md.
+        resources:
+          requests: { storage: 5Gi }

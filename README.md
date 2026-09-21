@@ -200,6 +200,7 @@ webui.bat       Start the web console (Windows)
 
 - [Getting your account credentials](docs/credentials.md)
 - [Web console](docs/web-interface.md)
+- [Deployment: SQL Server, Docker, k3s](docs/deployment.md)
 - [Configuration reference](docs/configuration.md)
 - [In-game commands](docs/commands.md)
 

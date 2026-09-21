@@ -453,7 +453,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     return `<section class="card"><h2>Comptes importés</h2>${S.importResult.map((r) => `<div class="result">
       <div class="grow"><strong>Compte ${esc(r.id)}</strong> <span class="badge">${r.created ? "créé" : "mis à jour"}</span>
         <div class="help">Client ${esc(r.version)}${r.gateway ? " · passerelle " + esc(r.gateway) : ""} · clé de ${r.key_length} caractères</div></div>
-      <button class="btn small" data-act="open-account" data-id="${esc(r.id)}">Ouvrir</button></div>`).join("")}
+      ${r.remote ? `<span class="badge">envoyé au serveur</span>` : `<button class="btn small" data-act="open-account" data-id="${esc(r.id)}">Ouvrir</button>`}</div>`).join("")}
       <p class="help">Donnez-leur un nom (Bank, Filler…) avec le crayon ✎ à côté du nom du compte.</p></section>`;
   }
 
@@ -561,6 +561,29 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
           <div class="inline"><input type="number" id="set-stagger" min="0" max="600" value="${esc(s.stagger)}"><span class="unit">secondes</span></div>
           <p class="help">« Tout démarrer » lance les comptes un par un avec ce délai, pour ne pas se connecter tous en même temps.</p>
           <p class="error" id="set-stagger-err" hidden></p></div></div>
+      </section>
+      <section class="card"><h3>Serveur distant</h3>
+        <p class="help">Le jeu est sur cet ordinateur, les bots sont sur un serveur : indiquez la console du serveur et
+        <strong>toute capture faite ici (automatique ou importée) lui sera envoyée</strong> au lieu d'être gardée sur ce
+        PC. Laissez vide pour tout garder ici.</p>
+        <div class="fields">
+          <div class="field"><label class="lbl" for="set-remote_url">Adresse de la console du serveur</label>
+            <input type="text" id="set-remote_url" spellcheck="false" placeholder="https://bot.exemple.com" value="${esc(s.remote_url || "")}">
+            <p class="error" id="set-remote_url-err" hidden></p></div>
+          <div class="field"><label class="lbl" for="set-remote_token">Jeton de la console du serveur</label>
+            <input type="password" id="set-remote_token" autocomplete="off" placeholder="${s.remote_token_set ? "Enregistré : laisser vide pour le garder" : "Collez le jeton"}">
+            <p class="help">Celui de l'adresse <span class="mono">…/#t=jeton</span> affichée par <span class="mono">deploy.sh status</span>.</p></div>
+        </div>
+      </section>
+      <section class="card"><h3>Sauvegarde et transfert des comptes</h3>
+        <p class="help">Tout ce qui décrit vos comptes (configurations, <strong>clés d'accès</strong>, administrateurs ajoutés
+        en jeu, noms) tient dans un fichier. Il sert de sauvegarde, ou à installer ces comptes sur un autre serveur.
+        Gardez-le comme un mot de passe.</p>
+        <div class="toolbar">
+          <button class="btn" data-act="data-export">Télécharger une sauvegarde</button>
+          <label class="btn" style="cursor:pointer">Restaurer une sauvegarde<input type="file" id="data-file" accept=".json" hidden></label>
+          <button class="btn" data-act="data-push" ${s.remote_url ? "" : "disabled title=\"Configurez d'abord le serveur distant\""}>Envoyer mes comptes au serveur</button>
+        </div>
       </section>
       <button class="btn primary" data-act="save-settings">Enregistrer les paramètres</button>`;
   }
@@ -925,11 +948,13 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
   }
 
   async function saveSettings() {
-    ["client", "stagger"].forEach((name) => { const el = $(`#set-${name}-err`); el.hidden = true; });
+    ["client", "stagger", "remote_url"].forEach((name) => { const el = $(`#set-${name}-err`); el.hidden = true; });
     try {
       S.settings = await api("PUT", "/api/settings", {
         client_path: $("#set-client").value,
         stagger: $("#set-stagger").value,
+        remote_url: $("#set-remote_url").value,
+        remote_token: $("#set-remote_token").value,
       });
       toast("Paramètres enregistrés", "ok");
       renderMain();
@@ -941,6 +966,41 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       });
       toast(error.message, "err");
     }
+  }
+
+  function showTransfer(result, where) {
+    const done = result.imported.length, skipped = result.skipped || [];
+    toast(`${done} compte${done > 1 ? "s" : ""} ${where}` + (skipped.length ? `, ${skipped.length} ignoré${skipped.length > 1 ? "s" : ""} (${skipped.map((x) => x.id + " : " + x.reason).join(" ; ")})` : ""),
+      skipped.length && !done ? "err" : "ok");
+  }
+
+  async function dataExport() {
+    try {
+      const bundle = await api("GET", "/api/data/export");
+      const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" }));
+      const link = Object.assign(document.createElement("a"), { href: url, download: `lmbot-sauvegarde-${new Date().toISOString().slice(0, 10)}.json` });
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast("Sauvegarde téléchargée : elle contient vos clés d'accès", "ok");
+    } catch (error) { toast(error.message, "err"); }
+  }
+
+  async function dataImport(file) {
+    if (!file) return;
+    try {
+      const bundle = JSON.parse(await file.text());
+      const overwrite = confirm("Remplacer les comptes qui existent déjà ?\nOK = remplacer, Annuler = les conserver et n'ajouter que les nouveaux.");
+      const result = await api("POST", `/api/data/import?overwrite=${overwrite ? 1 : 0}`, bundle);
+      showTransfer(result, "restauré(s)");
+      await refreshState();
+    } catch (error) { toast(error instanceof SyntaxError ? "Ce fichier n'est pas un JSON valide." : error.message, "err"); }
+  }
+
+  async function dataPush() {
+    const overwrite = confirm("Envoyer tous les comptes de cet ordinateur au serveur.\nOK = remplacer ceux qui existent déjà là-bas, Annuler = ne garder que les nouveaux.");
+    try {
+      showTransfer(await api("POST", `/api/data/push?overwrite=${overwrite ? 1 : 0}`), "envoyé(s) au serveur");
+    } catch (error) { toast(error.message, "err"); }
   }
 
   function authProblem() {
@@ -990,6 +1050,8 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     "start-all": startAll,
     "stop-all": stopAll,
     "save-settings": saveSettings,
+    "data-export": dataExport,
+    "data-push": dataPush,
     "use-client": (el) => { $("#set-client").value = el.dataset.path; },
     "clear-log": () => { const box = $("#log"); if (box) box.textContent = ""; },
     copy: async (el) => {
@@ -1213,6 +1275,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     document.addEventListener("input", onInput);
     document.addEventListener("change", (event) => {
       if (event.target.id === "file") importFile(event.target.files[0]);
+      if (event.target.id === "data-file") { dataImport(event.target.files[0]); event.target.value = ""; }
     });
     document.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && S.view === "account" && dirtyKeys().length) {
