@@ -705,6 +705,33 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
   const num = (n) => Number(n).toLocaleString("fr-FR");
   const short = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + " B" : n >= 1e6 ? (n / 1e6).toFixed(2) + " M" : n >= 1e4 ? (n / 1e3).toFixed(1) + " K" : String(n);
 
+  // Small inline icons (no external file, work offline and in both themes).
+  const ICONS = {
+    food: `<path d="M12 22V8" stroke="#8a6a1f" stroke-width="1.6" stroke-linecap="round" fill="none"/><g fill="#f0c53d" stroke="#b8891a" stroke-width=".8"><ellipse cx="8.2" cy="9" rx="2" ry="3.2" transform="rotate(-25 8.2 9)"/><ellipse cx="15.8" cy="9" rx="2" ry="3.2" transform="rotate(25 15.8 9)"/><ellipse cx="8.6" cy="14.4" rx="2" ry="3.2" transform="rotate(-25 8.6 14.4)"/><ellipse cx="15.4" cy="14.4" rx="2" ry="3.2" transform="rotate(25 15.4 14.4)"/><ellipse cx="12" cy="5" rx="1.9" ry="3.1"/></g>`,
+    wood: `<rect x="2.5" y="8" width="19" height="9" rx="4.5" fill="#a86a32" stroke="#6b3f18" stroke-width="1"/><ellipse cx="18" cy="12.5" rx="3.2" ry="4.5" fill="#e0b070" stroke="#6b3f18" stroke-width="1"/><ellipse cx="18" cy="12.5" rx="1.2" ry="2" fill="none" stroke="#a86a32" stroke-width=".9"/><path d="M5 10.5h8M5 14h9" stroke="#7d4b22" stroke-width=".9" stroke-linecap="round"/>`,
+    rock: `<path d="M3 19 8 8l5 4 3-6 5 13z" fill="#9aa3b2" stroke="#5c6473" stroke-width="1" stroke-linejoin="round"/><path d="M8 8l2 6-7 5zM16 6l-2 8 7 5z" fill="#c4cad6" opacity=".55"/>`,
+    ore: `<path d="M12 2.5 20 8v8l-8 5.5L4 16V8z" fill="#5b7fa8" stroke="#2e4a6b" stroke-width="1" stroke-linejoin="round"/><path d="M12 2.5 20 8l-8 4L4 8z" fill="#9dbbdc"/><path d="M12 12v9.5" stroke="#2e4a6b" stroke-width=".9"/><path d="M6.5 9.5l1.6.9" stroke="#fff" stroke-width="1" stroke-linecap="round" opacity=".7"/>`,
+    gold: `<circle cx="12" cy="12" r="9.5" fill="#f2b81c" stroke="#a87a08" stroke-width="1.2"/><circle cx="12" cy="12" r="6.6" fill="none" stroke="#b8860b" stroke-width="1"/><path d="M12 7.5v9M9.6 10.2c0-1.3 1-1.9 2.4-1.9s2.4.6 2.4 1.7-1 1.5-2.4 1.9-2.4.7-2.4 1.9 1 1.8 2.4 1.8 2.4-.6 2.4-1.9" fill="none" stroke="#8a6206" stroke-width="1.1" stroke-linecap="round"/>`,
+    gems: `<path d="M7 3.5h10l4 5-9 12.5L3 8.5z" fill="#37b4e8" stroke="#1a6f96" stroke-width="1" stroke-linejoin="round"/><path d="M3 8.5h18M8.5 8.5 12 21l3.5-12.5M7 3.5l1.5 5M17 3.5l-1.5 5" fill="none" stroke="#e8f8ff" stroke-width=".9" opacity=".8"/>`,
+    shield: `<path d="M12 2.5 20 5.5v6.2c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V5.5z" fill="#3b6fd6" stroke="#1f3f8f" stroke-width="1.2" stroke-linejoin="round"/><path d="M12 5 17.5 7v4.7c0 3.4-2.2 6-5.5 7.3z" fill="#7fa6ff" opacity=".7"/>`,
+    power: `<path d="M13.5 2 5 13.5h6L9.5 22 19 9.5h-6.2z" fill="#f2b81c" stroke="#a87a08" stroke-width="1" stroke-linejoin="round"/>`,
+    kills: `<path d="M12 3C7.6 3 4.5 6 4.5 10c0 2.3 1 3.7 2.5 4.7V18h10v-3.3c1.5-1 2.5-2.4 2.5-4.7 0-4-3.1-7-7.5-7z" fill="#e6e8ee" stroke="#6b7385" stroke-width="1.1" stroke-linejoin="round"/><circle cx="9" cy="10.5" r="1.9" fill="#3a4152"/><circle cx="15" cy="10.5" r="1.9" fill="#3a4152"/><path d="M10 18v3M12 18v3M14 18v3" stroke="#6b7385" stroke-width="1.2" stroke-linecap="round"/>`,
+    vip: `<path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5z" fill="#f2b81c" stroke="#a87a08" stroke-width="1.1" stroke-linejoin="round"/><circle cx="3" cy="8" r="1.4" fill="#f2b81c"/><circle cx="12" cy="5" r="1.4" fill="#f2b81c"/><circle cx="21" cy="8" r="1.4" fill="#f2b81c"/>`,
+    kingdom: `<path d="M3 21V9h3V6h2v3h2V6h2v3h2V6h2v3h3v12h-6v-5a3 3 0 0 0-6 0v5z" fill="#b7bdca" stroke="#5c6473" stroke-width="1" stroke-linejoin="round"/><path d="M12 5V1.5l4 1.3-4 1.2" fill="#d94b4b" stroke="#8f2323" stroke-width=".8"/>`,
+    pin: `<path d="M12 22s7-6.4 7-12a7 7 0 0 0-14 0c0 5.6 7 12 7 12z" fill="#e2564b" stroke="#8f2323" stroke-width="1.1" stroke-linejoin="round"/><circle cx="12" cy="10" r="2.6" fill="#fff"/>`,
+    march: `<path d="M5 22V3" stroke="#6b3f18" stroke-width="1.8" stroke-linecap="round"/><path d="M5 4h14l-3.5 4.5L19 13H5z" fill="#d94b4b" stroke="#8f2323" stroke-width="1" stroke-linejoin="round"/>`,
+    alliance: `<circle cx="8.5" cy="8" r="3.2" fill="#8fa6d6" stroke="#3d5490" stroke-width="1"/><circle cx="16.5" cy="8" r="3.2" fill="#b4c4e6" stroke="#3d5490" stroke-width="1"/><path d="M2.5 20c0-3.6 2.7-5.8 6-5.8s6 2.2 6 5.8zM12 20c.4-2.4 2.2-4 4.6-4 3 0 5 2 5 4z" fill="#8fa6d6" stroke="#3d5490" stroke-width="1" stroke-linejoin="round"/>`,
+    player: `<circle cx="12" cy="8.5" r="4.2" fill="#f0d3a8" stroke="#8a6a3a" stroke-width="1.1"/><path d="M4 21c0-4.6 3.6-7.4 8-7.4s8 2.8 8 7.4z" fill="#5b7fa8" stroke="#2e4a6b" stroke-width="1.1" stroke-linejoin="round"/><path d="M7.8 8c.6-3 2.4-4.5 4.4-4.5s3.8 1.5 4.2 4.5c-1.4-1.2-2.6-1.6-4.2-1.6S9.2 6.8 7.8 8z" fill="#7b4a22"/>`,
+    infantry: `<path d="M18.5 2.5 21.5 5.5 11 16l-2-2z" fill="#dfe3ea" stroke="#5c6473" stroke-width="1" stroke-linejoin="round"/><path d="M7.5 12.5 11.5 16.5M6 18l-3 3M5 14.5l4.5 4.5" stroke="#7d4b22" stroke-width="2" stroke-linecap="round" fill="none"/>`,
+    cavalry: `<path d="M5 20a8 8 0 1 1 14 0h-4a4 4 0 1 0-6 0z" fill="#c9ccd4" stroke="#5c6473" stroke-width="1.3" stroke-linejoin="round"/><path d="M5 20h4M15 20h4" stroke="#5c6473" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="5.5" r="1" fill="#5c6473"/>`,
+    ranged: `<path d="M7 3c8 2 8 16 0 18" fill="none" stroke="#7d4b22" stroke-width="2" stroke-linecap="round"/><path d="M7 3v18" stroke="#c9ccd4" stroke-width="1"/><path d="M4 12h16m-4-3.2L20 12l-4 3.2" fill="none" stroke="#5c6473" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`,
+    siege: `<circle cx="7" cy="18" r="3.2" fill="#a86a32" stroke="#6b3f18" stroke-width="1"/><circle cx="17" cy="18" r="3.2" fill="#a86a32" stroke="#6b3f18" stroke-width="1"/><path d="M4 15h16v-3H4zM6 12 15 4l3 3" fill="#c98b4b" stroke="#6b3f18" stroke-width="1.1" stroke-linejoin="round"/><circle cx="18" cy="6.5" r="2.2" fill="#6b7385" stroke="#3a4152" stroke-width="1"/>`,
+    total: `<path d="M12 2.5 15 9l7 .8-5.2 4.7 1.5 7L12 18l-6.3 3.5 1.5-7L2 9.8 9 9z" fill="#f2b81c" stroke="#a87a08" stroke-width="1" stroke-linejoin="round"/>`,
+    wounded: `<rect x="3" y="3" width="18" height="18" rx="4" fill="#fff" stroke="#c0392b" stroke-width="1.4"/><path d="M12 6.5v11M6.5 12h11" stroke="#d94b4b" stroke-width="3.2" stroke-linecap="round"/>`,
+    clock: `<circle cx="12" cy="12" r="9.5" fill="#eef0f5" stroke="#6b7385" stroke-width="1.2"/><path d="M12 6.5V12l3.6 2.2" fill="none" stroke="#3a4152" stroke-width="1.6" stroke-linecap="round"/>`,
+  };
+  const icon = (name, size = 22) => `<svg class="ico" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
+
   function gameHtml(game) {
     if (!game) return `<div class="card"><p class="help">Chargement…</p></div>`;
     if (!game.available) {
@@ -725,32 +752,43 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     }
     const state = game.live ? `<span class="pill ok">En ligne</span>`
       : game.running ? `<span class="pill warn">Bot démarré, hors ligne (reconnexion…)</span>` : `<span class="pill">Bot arrêté</span>`;
-    const stat = (label, value) => `<div class="stat"><span class="k">${label}</span><span class="v">${value}</span></div>`;
-    const rows = RSS.map(([k, label]) => `<tr><th>${label}</th><td>${num(d.resources[k])}</td><td>${num(d.bag[k])}</td>
-      <td class="${d.production[k] < 0 ? "neg" : ""}">${d.production[k] > 0 ? "+" : ""}${num(d.production[k])}/h</td></tr>`).join("");
+    const stat = (ico, label, value) => `<div class="stat"><span class="badge">${icon(ico, 26)}</span>
+      <span class="txt"><span class="k">${label}</span><span class="v">${value}</span></span></div>`;
+    const tiles = RSS.map(([k, label]) => {
+      const prod = d.production[k];
+      return `<div class="rtile ${k}" title="${label} : ${num(d.resources[k])}">
+        <div class="rtop">${icon(k, 30)}<span class="rname">${label}</span></div>
+        <div class="rval">${short(d.resources[k])}</div>
+        <div class="rsub">Sac : ${short(d.bag[k])}</div>
+        <div class="rsub ${prod < 0 ? "neg" : "pos"}">${prod > 0 ? "+" : ""}${num(prod)}/h</div></div>`;
+    }).join("");
     const t = d.troops;
+    const troop = (ico, label, value) => `<div class="ttile">${icon(ico, 34)}<span class="tval">${value}</span><span class="tname">${label}</span></div>`;
+    const home = d.home_kingdom && d.home_kingdom !== d.kingdom ? ` <span class="help">(origine ${d.home_kingdom})</span>` : "";
     return `
-      <div class="card"><div class="statgrid">
-        ${stat("État", state)}
-        ${stat("Bouclier", shield)}
-        ${stat("Joueur", esc(d.name || "—"))}
-        ${stat("Puissance", num(d.power))}
-        ${stat("Kills", num(d.kills))}
-        ${stat("Gemmes", num(d.gems))}
-        ${stat("VIP", `${d.vip_level} <span class="help">(${num(d.vip_points)} pts)</span>`)}
-        ${stat("Royaume", d.kingdom + (d.home_kingdom && d.home_kingdom !== d.kingdom ? ` <span class="help">(origine ${d.home_kingdom})</span>` : ""))}
-        ${stat("Position", `${d.x}, ${d.y}`)}
-        ${stat("Marches", `${d.current_marches ?? d.marches} / ${d.max_marches}`)}
-        ${stat("Alliance", `${RANKS[d.alliance.rank] || d.alliance.rank}${d.alliance.members ? ` · ${d.alliance.members} membres` : ""}`)}
+      <div class="hero">
+        <div class="avatar">${icon("player", 44)}</div>
+        <div class="who"><div class="pname">${esc(d.name || "—")}</div>
+          <div class="psub">${icon("kingdom", 16)} Royaume ${d.kingdom}${home}
+            <span class="sep">·</span>${icon("pin", 16)} ${d.x}, ${d.y}</div></div>
+        <div class="hpower">${icon("power", 28)}<span class="k">Puissance</span><span class="v">${num(d.power)}</span></div>
+        <div class="hstate">${state}</div>
       </div>
-      <p class="help">Mis à jour il y a ${fmtDuration(game.age)}.</p></div>
-      <div class="card"><h2>Ressources</h2>
-        <table class="rss"><thead><tr><th></th><th>En stock</th><th>Dans le sac</th><th>Production</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="card"><div class="statgrid">
+        ${stat("shield", "Bouclier", shield)}
+        ${stat("kills", "Kills", num(d.kills))}
+        ${stat("gems", "Gemmes", num(d.gems))}
+        ${stat("vip", "VIP", `${d.vip_level} <span class="help">(${num(d.vip_points)} pts)</span>`)}
+        ${stat("march", "Marches", `${d.current_marches ?? d.marches} / ${d.max_marches}`)}
+        ${stat("alliance", "Alliance", `${RANKS[d.alliance.rank] || d.alliance.rank}${d.alliance.members ? ` · ${d.alliance.members} membres` : ""}`)}
+      </div>
+      <p class="help">${icon("clock", 14)} Mis à jour il y a ${fmtDuration(game.age)}.</p></div>
+      <div class="card"><h2>Ressources</h2><div class="rgrid">${tiles}</div></div>
       <div class="card"><h2>Troupes</h2>
-        ${t.loaded ? `<div class="statgrid">
-          ${stat("Total", num(t.total))}${stat("Infanterie", short(t.infantry))}${stat("Cavalerie", short(t.cavalry))}
-          ${stat("Tireurs", short(t.ranged))}${stat("Siège", short(t.siege))}
-          ${d.wounded.loaded ? stat("Blessés", num(d.wounded.total)) : ""}</div>`
+        ${t.loaded ? `<div class="tgrid">
+          ${troop("total", "Total", num(t.total))}${troop("infantry", "Infanterie", short(t.infantry))}${troop("cavalry", "Cavalerie", short(t.cavalry))}
+          ${troop("ranged", "Tireurs", short(t.ranged))}${troop("siege", "Siège", short(t.siege))}
+          ${d.wounded.loaded ? troop("wounded", "Blessés", num(d.wounded.total)) : ""}</div>`
           : `<p class="help">Pas encore reçues du serveur.</p>`}</div>`;
   }
 
