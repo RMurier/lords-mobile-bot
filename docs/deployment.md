@@ -135,11 +135,30 @@ The manual steps below are what the script does, for those who prefer to run the
 ## Automatic deployment (GitHub Actions)
 
 `.github/workflows/deploy.yml` runs on every push to `main` (or `master`): tests, builds the image, pushes it to
-`ghcr.io/<owner>/<repo>` (tags `latest` and the commit), then connects to the server over SSH and runs
-`deploy/deploy.sh upgrade` with that image. Only the console restarts; SQL Server keeps running. It needs these
-repository secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS` and, if not 22,
-`DEPLOY_PORT`. The full step by step is in the answer that came with this change; in short: install k3s, create a
-deploy user and key, make the package public, do the first `install` by hand.
+`ghcr.io/<owner>/<repo>` (tags `latest` and the commit), then runs `deploy/deploy.sh upgrade` with that image
+directly on the server. Only the console restarts; SQL Server keeps running.
+
+The `deploy` job runs on a **self-hosted runner** installed on the server itself, not over SSH: this works even
+when the server has no inbound port open to the internet (behind Tailscale, no DMZ, etc.), since the runner only
+opens an outbound HTTPS connection to GitHub to poll for jobs. Because this workflow only triggers on `push` and
+`workflow_dispatch` (never `pull_request`), a fork's pull request can never run code on the server, which is what
+makes a self-hosted runner safe to use even on a public repository.
+
+Setup, once k3s and the first `deploy/deploy.sh install` are done:
+
+1. On GitHub: repo → *Settings → Actions → Runners → New self-hosted runner*, choose Linux/x64.
+2. On the server, as the `deploy` user (the same one that ran `install`, so it already has `kubectl` and `docker`
+   access): follow the download/config commands GitHub shows you. When asked for a name, a label is optional
+   (the workflow targets the plain `self-hosted` label).
+3. Install it as a service so it survives reboots and keeps polling unattended:
+   ```bash
+   sudo ./svc.sh install deploy
+   sudo ./svc.sh start
+   ```
+4. The registration token GitHub gives you is single-use and expires quickly; if it errors out, generate a new one
+   from the same *Runners* page.
+
+No `DEPLOY_HOST`/`DEPLOY_SSH_KEY`/etc. secrets are needed with this setup.
 
 ## k3s
 
