@@ -10,7 +10,7 @@ containers.
 |---|---|---|
 | Account configuration (with the access key) | `accounts/<id>.cfg` | table `accounts` |
 | Console settings, account names, bots to restart | `webui_settings.json` | table `settings` |
-| Bot journal | `logs/<id>.log` | table `bot_logs` (last 5000 lines per account) |
+| Bot journal | `logs/<id>.log` | table `bot_logs` (last 30000 lines per account) |
 | Game status (Statut tab) | `data/<id>/status.json` | table `game_status` |
 | Administrators added in game (`$admin add`) | `data/<id>/admins.txt` | table `account_admins` |
 

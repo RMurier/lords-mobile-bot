@@ -16,7 +16,7 @@
     view: "welcome",     // welcome | account | add | settings | help
     prefix: "$",         // command prefix of the last opened account, for the commands page
     id: null,
-    tab: "account",
+    tab: "status",
     acc: null,           // last payload of the open account
     form: {},            // current, possibly unsaved, values
     errors: {},
@@ -102,9 +102,9 @@
   }
 
   const HINTS = [
-    [/server error code|rejected by server|Login failed/i,
-      "Le serveur a refusé les identifiants : la clé d'accès est probablement expirée. Réimportez une capture "
-      + "(Ajouter un compte → Importer une capture)."],
+    [/Login refused \d+ times|server error code|rejected by server|Login failed/i,
+      "Le serveur refuse la clé d'accès. Elle est probablement remplacée quand le jeu se connecte de nouveau (surtout avec "
+      + "le lanceur PC) : refaites une capture pendant que le jeu est ouvert (Ajouter un compte → Capture automatique)."],
     [/UPDATE CLIENT VERSION/i,
       "Le jeu a été mis à jour : la version du client est trop ancienne. Réimportez une capture pour récupérer la nouvelle."],
     [/another device.*not reconnecting/i,
@@ -238,13 +238,16 @@
   function accountView() {
     const a = S.acc;
     const summary = accountById(a.id) || { id: a.id, alias: a.alias, igg_id: a.values["account.igg_id"] };
-    const tabs = S.schema.categories.map((c) => {
-      const keys = c.fields.map((f) => f.key);
+    const badgeFor = (categories) => {
+      const keys = categories.flatMap((c) => c.fields.map((f) => f.key));
       const dirty = keys.filter((k) => S.form[k] !== a.values[k]).length;
       const bad = keys.filter((k) => S.errors[k]).length;
-      const badge = bad ? `<span class="count bad">${bad}</span>` : (dirty ? `<span class="count">${dirty}</span>` : "");
-      return `<button class="tab" role="tab" data-act="tab" data-tab="${c.id}" aria-selected="${S.tab === c.id}">${esc(c.label)}${badge}</button>`;
-    }).join("");
+      return bad ? `<span class="count bad">${bad}</span>` : (dirty ? `<span class="count">${dirty}</span>` : "");
+    };
+    const everyday = S.schema.categories.filter((c) => !c.technical);
+    const technical = S.schema.categories.filter((c) => c.technical);
+    const tabs = everyday.map((c) => `<button class="tab" role="tab" data-act="tab" data-tab="${c.id}" aria-selected="${S.tab === c.id}">${esc(c.label)}${badgeFor([c])}</button>`).join("");
+    const technicalTab = `<button class="tab tab-technical" role="tab" data-act="tab" data-tab="technical" aria-selected="${S.tab === "technical"}" title="Identifiants, serveur, version : rarement utile">⚙ Technique${badgeFor(technical)}</button>`;
     const statusTab = `<button class="tab" role="tab" data-act="tab" data-tab="status" aria-selected="${S.tab === "status"}">Statut</button>`;
     const logsTab = `<button class="tab" role="tab" data-act="tab" data-tab="logs" aria-selected="${S.tab === "logs"}">Journal</button>`;
     const category = S.schema.categories.find((c) => c.id === S.tab);
@@ -257,8 +260,9 @@
         <div class="actions" id="ctrl"><span id="ctrl-chip">${slot("ctrl-chip", chipHtml())}</span><span id="ctrl-btns">${slot("ctrl-btns", btnsHtml())}</span></div>
       </div>
       <div id="notes">${slot("notes", notesHtml())}</div>
-      <div class="tabs" role="tablist">${statusTab}${tabs}${logsTab}</div>
-      ${S.tab === "logs" ? logsView() : S.tab === "status" ? `<div id="game">${gameHtml(S.game)}</div>` : categoryView(category)}`;
+      <div class="tabs" role="tablist">${statusTab}${tabs}${logsTab}${technicalTab}</div>
+      ${S.tab === "logs" ? logsView() : S.tab === "status" ? `<div id="game">${gameHtml(S.game)}</div>`
+        : S.tab === "technical" ? technicalView(technical) : categoryView(category)}`;
   }
 
   function chipHtml() {
@@ -288,6 +292,12 @@
     return html;
   }
 
+  function technicalView(categories) {
+    return `<div class="notice warn"><p><strong>Réglages techniques.</strong> Ils viennent de la capture du jeu et sont remplis
+      automatiquement : à modifier seulement si vous savez pourquoi (nouvelle clé d'accès, changement de serveur ou de version du jeu).</p></div>`
+      + categories.map((c) => `<h2 class="subhead">${esc(c.label)}</h2>${categoryView(c)}`).join("") + dangerHtml();
+  }
+
   function categoryView(category) {
     let html = `<p class="desc">${esc(category.description)}</p>`;
     const blocks = [];
@@ -305,7 +315,6 @@
         <div class="fields">${block.fields.map(fieldHtml).join("")}</div></section>`;
     });
     if (category.id === "advanced") html += extraHtml();
-    if (category.id === "account") html += dangerHtml();
     return html;
   }
 
@@ -320,7 +329,7 @@
   function dangerHtml() {
     const running = S.acc.status.state === "running";
     return `<section class="card"><h3>Zone dangereuse</h3>
-      <p class="help">Supprime le fichier de configuration de ce compte (les identifiants seront perdus).</p>
+      <p class="help">Supprime la configuration de ce compte (les identifiants seront perdus).</p>
       <button class="btn danger" data-act="delete-account" ${running ? "disabled" : ""}>Supprimer ce compte</button>
       ${running ? '<p class="help">Arrêtez d\'abord le bot.</p>' : ""}</section>`;
   }
@@ -611,10 +620,12 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
 
   function refreshTabCounts() {
     if (!S.acc) return;
-    S.schema.categories.forEach((c) => {
-      const tab = $(`.tab[data-tab="${c.id}"]`);
+    const groups = {};
+    S.schema.categories.forEach((c) => { (groups[c.technical ? "technical" : c.id] ||= []).push(c); });
+    Object.entries(groups).forEach(([id, categories]) => {
+      const tab = $(`.tab[data-tab="${id}"]`);
       if (!tab) return;
-      const keys = c.fields.map((f) => f.key);
+      const keys = categories.flatMap((c) => c.fields.map((f) => f.key));
       const dirty = keys.filter((k) => S.form[k] !== S.acc.values[k]).length;
       const bad = keys.filter((k) => S.errors[k]).length;
       const old = $(".count", tab);
@@ -854,6 +865,8 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       S.errors = {};
       S.prefix = payload.values["command.prefix"] || "$";
       if (tab) S.tab = tab;
+      // an account without identifiers has nothing to show yet: start where they are entered
+      if (tab && !payload.values["account.igg_id"]) S.tab = "technical";
       try { sessionStorage.setItem("lmbot-last", id); } catch (_) { /* optional */ }
       render();
     } catch (error) {
@@ -896,7 +909,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
         S.errors = error.data.errors;
         const first = Object.keys(S.errors)[0];
         const category = S.schema.categories.find((c) => c.fields.some((f) => f.key === first));
-        if (category) S.tab = category.id;
+        if (category) S.tab = category.technical ? "technical" : category.id;
         toast("Certains réglages sont invalides : corrigez-les puis réessayez.", "err");
       } else {
         toast(error.message, "err");
@@ -977,7 +990,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       S.acc = payload;
       S.form = initialForm(payload);
       S.errors = {};
-      S.tab = "account";
+      S.tab = "technical";
       render();
       toast("Compte créé. Renseignez ses identifiants.", "ok");
     } catch (error) {
@@ -1049,7 +1062,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
   }
 
   const ACTIONS = {
-    "open-account": (el) => openAccount(el.dataset.id, S.view === "account" ? undefined : "account"),
+    "open-account": (el) => openAccount(el.dataset.id, S.view === "account" ? undefined : "status"),
     "add-view": () => showView("add"),
     "settings-view": () => showView("settings"),
     "help-view": () => showView("help"),
@@ -1063,7 +1076,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     rename: () => startRename(),
     "rename-account": async (el) => {
       if (S.view === "account" && S.id === el.dataset.id) { startRename(); return; }
-      await openAccount(el.dataset.id, "account");
+      await openAccount(el.dataset.id, "status");
       if (S.view === "account" && S.id === el.dataset.id) startRename();
     },
     "rename-save": () => saveRename(),
@@ -1081,7 +1094,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
         if (ticket === S.nav) { S.acc = null; S.form = {}; S.view = "welcome"; }
         await refreshState();
         if (ticket !== S.nav) { renderSidebar(); return; }   // the user already went somewhere else
-        if (S.accounts.length) await openAccount(S.accounts[0].id, "account"); else render();
+        if (S.accounts.length) await openAccount(S.accounts[0].id, "status"); else render();
       } catch (error) { toast(error.message, "err"); }
     },
     "create-empty": createEmpty,
@@ -1336,7 +1349,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     let last = null;
     try { last = sessionStorage.getItem("lmbot-last"); } catch (_) { /* optional */ }
     const first = accountById(last) || S.accounts[0];
-    if (first) await openAccount(first.id, "account"); else render();
+    if (first) await openAccount(first.id, "status"); else render();
     setInterval(() => { if (!document.hidden) refreshState(); }, 3000);
   }
 

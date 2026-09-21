@@ -236,7 +236,8 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 	
 	// logging
 	if (strcmp(key, "log.debug") == 0) {
-		g_log_debug |= (strcmp(value, "true") == 0 || strcmp(value, "1") == 0); // the config can only enable debug, never override --debug
+		if (!g_log_debug_forced)
+			g_log_debug = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
 		return true;
 	}
 	

@@ -318,3 +318,6 @@ code { font-family: var(--mono); background: var(--surface-2); padding: 1px 6px;
 .pill.ok { background: var(--ok-soft); color: var(--ok); }
 .pill.warn { background: var(--warn-soft); color: var(--warn); }
 .pill.bad { background: var(--danger-soft); color: var(--danger); }
+.tab-technical { margin-left: auto; font-weight: 500; font-size: 13px; }
+h2.subhead { font-size: 16px; margin: 26px 0 6px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+h2.subhead:first-of-type { margin-top: 18px; }

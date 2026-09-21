@@ -568,15 +568,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _host_ok(self):
+        """Refuses unknown Host names (DNS rebinding): this machine, plus the addresses of LMBOT_ALLOWED_ORIGINS."""
         host = (self.headers.get("Host") or "").lower()
-        port = self.server.server_address[1]
-        if host in (f"127.0.0.1:{port}", f"localhost:{port}"):
+        name = host.rsplit(":", 1)[0] if not host.endswith("]") else host
+        if name in ("127.0.0.1", "localhost"):     # any local port: kubectl port-forward, ssh -L...
             return True
-        for origin in os.environ.get("LMBOT_ALLOWED_ORIGINS", "").split(","):
-            origin = origin.strip()
-            if origin and host == urlparse(origin if "//" in origin else f"//{origin}").netloc.lower():
-                return True
-        return False
+        allowed = {urlparse(o.strip() if "//" in o else f"//{o.strip()}").netloc.lower() for o in os.environ.get("LMBOT_ALLOWED_ORIGINS", "").split(",")
+                   if o.strip()}
+        return host in allowed or name in {a.rsplit(":", 1)[0] for a in allowed}
 
     def _dispatch(self, method):
         parsed = urlparse(self.path)

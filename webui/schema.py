@@ -58,6 +58,7 @@ def _resource_sizes(prefix, default, depends):
 CATEGORIES = [
     {
         "id": "account",
+        "technical": True,      # not for everyday use: grouped in the "Technique" tab
         "label": "Compte",
         "description": "Identifiants du compte. Le plus simple est de les importer depuis une capture "
                       "réseau (Ajouter un compte → Importer une capture), plutôt que de les saisir à la main.",
@@ -75,6 +76,7 @@ CATEGORIES = [
     },
     {
         "id": "network",
+        "technical": True,      # not for everyday use: grouped in the "Technique" tab
         "label": "Connexion",
         "description": "Serveur et version du client à imiter. Ces valeurs viennent de la capture : ne les "
                       "changez que si vous savez pourquoi.",
@@ -215,14 +217,15 @@ CATEGORIES = [
     },
     {
         "id": "advanced",
+        "technical": True,      # not for everyday use: grouped in the "Technique" tab
         "label": "Avancé",
         "description": "Dossier de données et diagnostic.",
         "fields": [
             {"key": "data.path", "label": "Dossier de données", "type": "text", "maxlen": 255, "default": "./data/",
              "help": "Le bot y enregistre les administrateurs ajoutés en jeu (admins.txt). Un dossier par compte."},
             _bool("log.debug", "Mode debug",
-                  "Affiche chaque paquet reçu. Les journaux peuvent alors contenir des données de session : "
-                  "ne les partagez pas."),
+                  "Affiche chaque paquet reçu (activé par défaut : c'est ce qui permet de comprendre un refus de connexion). "
+                  "Les journaux contiennent alors des données de session : ne les partagez pas.", default=True),
         ],
     },
 ]

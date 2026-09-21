@@ -23,7 +23,7 @@ from pathlib import Path
 
 import config_file as cf
 
-LOG_KEEP_LINES = 5000          # per account, older lines are deleted
+LOG_KEEP_LINES = 30000         # per account, older lines are deleted
 LOG_TAIL_LINES = 300           # what a first read of the journal returns
 LOG_LINE_MAX = 2000
 

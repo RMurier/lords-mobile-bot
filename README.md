@@ -156,8 +156,9 @@ client --help, -h                Display help.
 client --version, -v             Display version information.
 ```
 
-`--debug` (or `log.debug = true`) prints every packet received. Debug output can contain
-session data: do not share it.
+Debug output (every packet received, with a hexdump) is **on by default**, so a refused login can be
+diagnosed from the journal. Turn it off with `log.debug = false`; `--debug` on the command line forces it on.
+Debug output can contain session data: do not share it.
 
 ## In-game commands
 

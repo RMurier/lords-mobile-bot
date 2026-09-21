@@ -13,6 +13,7 @@
 
 /* Set to 1 to print raw server responses (config: log.debug, CLI: --debug) */
 extern int g_log_debug;
+extern int g_log_debug_forced;
 
 /* Function declarations */
 void log_error(const char *fmt, ...);

@@ -226,7 +226,7 @@ static SessionResult ProcessConnection(Connection *c)
 					}
 				case _MSG_CLIENT_LOGINTOLRESP: 
 					if (s->packet_size - 4 >= 4) {
-						LOGE("Bootstrap login rejected by server (code=%d, first byte=%u). Payload size=%u. Run with --debug to see the raw response.\n",
+						LOGE("Bootstrap login rejected by server (code=%d, first byte=%u). Payload size=%u. The access key was refused: it is probably replaced when the game logs in again. Run with --debug to see the raw response.\n",
 							read_i32(s->buffer + s->parse_pos + 4),
 							read_u8(s->buffer + s->parse_pos + 4),
 							s->packet_size - 4);
@@ -234,7 +234,8 @@ static SessionResult ProcessConnection(Connection *c)
 						LOGE("Bootstrap login rejected by server (payload size=%u). Run with --debug to see the raw response.\n", s->packet_size - 4);
 					}
 					disconnect(c);
-					return PS_REJECTED;
+					// Seen right after another device logged in: retried slowly, then the bot stops and asks for a new capture
+					return PS_REFUSED;
 				case _MSG_GUESTLOGIN_RESP_TOC:
 					RecvKingdomServer(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
@@ -706,7 +707,7 @@ bool CreateDefaultConfig(const char *filename)
 		"account.access_key = YOUR_ACCESS_KEY_HERE\n\n"
 		
 		"# Print every server packet (name + hexdump). Same as --debug.\n"
-		"log.debug = false\n\n"
+		"log.debug = true\n\n"
 
 		"# Automatic reconnection when the connection drops or the account is logged in\n"
 		"# from another device (for example after you play on your phone).\n"
@@ -982,6 +983,7 @@ int main(int argc, const char *argv[]) {
 	
 	if (argc == 3 && (strcmp(argv[2], "--debug") == 0 || strcmp(argv[2], "-d") == 0)) {
 		g_log_debug = 1;
+		g_log_debug_forced = 1;
 	} else if (argc != 2) {
         printf("Usage: %s <config.cfg> [--debug]\n", argv[0]);
         return EXIT_FAILURE;

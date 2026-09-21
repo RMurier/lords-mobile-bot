@@ -1,7 +1,8 @@
 #include "log.h"
 #include <stdarg.h>
 
-int g_log_debug = 0;
+int g_log_debug = 1;          /* on by default: the raw exchanges are what lets a refused login be diagnosed */
+int g_log_debug_forced = 0;   /* --debug on the command line: the config cannot turn it off */
 
 static void log_base(const char *prefix, const char *fmt, va_list args)
 {
