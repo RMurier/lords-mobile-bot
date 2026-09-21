@@ -33,7 +33,7 @@ spec:
             requests: { cpu: 100m, memory: 128Mi }
             limits: { memory: 512Mi }         # about 10 MB per bot plus the console, see docs
           readinessProbe:
-            httpGet: { path: /, port: http, httpHeaders: [{ name: Host, value: localhost }] }
+            httpGet: { path: /, port: http, httpHeaders: [{ name: Host, value: "localhost:8765" }] }
             periodSeconds: 10
           securityContext:
             allowPrivilegeEscalation: false
