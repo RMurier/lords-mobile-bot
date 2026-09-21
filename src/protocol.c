@@ -2595,13 +2595,21 @@ void RecvLoginError(Connection *c, const uint8_t *data) {
 
 void RecvUseItem(Connection *c, const uint8_t *data, uint16_t size) {
 	uint16_t offset = 0;
-	
+
 	uint8_t status = read_u8(data + offset); offset += 1;
-	
-	// a relocation was asked from the chat: tell the administrator if the server refused
-	if (status != 0)
-		ReportRelocation(c, false, status);
-	
+
+	if (status != 0) {
+		if (c->migration.state == MIGRATION_WAIT_SCROLL_RESULT) {
+			c->migration.state = MIGRATION_IDLE;
+			LOGW("[MIGRATION] Migration par vélin refusée par le serveur (code %d)\n", (int8_t)status);
+			BotReply(c, c->migration.requester, "Migration",
+				"Migration par vélin refusée par le serveur (code %d).", (int8_t)status);
+		} else {
+			// a relocation was asked from the chat: tell the administrator if the server refused
+			ReportRelocation(c, false, status);
+		}
+	}
+
 	if (status == 0) {
 		uint16_t item_id       = read_u16(data + offset); offset += 2;
 		uint16_t item_quantity = read_u16(data + offset); offset += 2;
@@ -2616,7 +2624,13 @@ void RecvUseItem(Connection *c, const uint8_t *data, uint16_t size) {
 			c->player.current_kingdom_id = read_u16(data + offset); offset += 2;
 			ReportRelocation(c, true, 0);
 			return;
-		} else if (item_id == SHIELD_4H || 
+		} else if (item_id == MIGRATION_SCROLL) {
+			c->player.zone_id            = read_u16(data + offset); offset += 2;
+			c->player.point_id           = read_u8(data + offset);  offset += 1;
+			c->player.current_kingdom_id = read_u16(data + offset); offset += 2;
+			RecvMigrationScrollResult(c);
+			return;
+		} else if (item_id == SHIELD_4H ||
 				item_id == SHIELD_8H || 
 				item_id == SHIELD_12H || 
 				item_id == SHIELD_1D || 
@@ -4521,7 +4535,7 @@ void RecvAllianceMemberInfo(Connection *c, const uint8_t *data) {
 		c->alliance_member.recv_index = 0;
 	}
 	
-}
+}
 
 
 /* ------------------------------------------------------------------------
@@ -4723,22 +4737,59 @@ void RequestKingdomServer(Connection *c, uint16_t kingdom_id)
 void RequestFreeCrossTeleport(Connection *c, uint16_t kingdom_id, uint16_t zone_id, uint8_t point_id)
 {
 	c->size = 2; // reserve space for packet length
-	
+
 	write_u16(c->data + c->size, _MSG_REQUEST_OLDPLAYERBACK_FREECROSSTELEPORT);
 	c->size += 2;
-	
+
 	write_u32(c->data + c->size, ++c->protocol.seq_id);
 	c->size += 4;
-	
+
 	write_u16(c->data + c->size, kingdom_id);
 	c->size += 2;
-	
+
 	write_u16(c->data + c->size, zone_id);
 	c->size += 2;
-	
+
 	write_u8(c->data + c->size, point_id);
 	c->size += 1;
-	
+
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/*
+ * Migration paid with a migration scroll: not a dedicated request, but the generic "use item"
+ * request (_MSG_REQUEST_USEITEM) with MIGRATION_SCROLL as the item, laid out exactly like
+ * RequestUseAdvancedRelocator (kingdom/zone/point then 5 zero bytes). Captured from the official
+ * client migrating to a kingdom with a scroll.
+ */
+void RequestMigrationScroll(Connection *c, uint16_t kingdom_id, uint16_t zone_id, uint8_t point_id)
+{
+	c->size = 2; // reserve space for packet length
+
+	write_u16(c->data + c->size, _MSG_REQUEST_USEITEM);
+	c->size += 2;
+
+	write_u32(c->data + c->size, ++c->protocol.seq_id);
+	c->size += 4;
+
+	write_u16(c->data + c->size, MIGRATION_SCROLL);
+	c->size += 2;
+
+	write_u16(c->data + c->size, 0x0001); // quantity: one scroll
+	c->size += 2;
+
+	write_u16(c->data + c->size, kingdom_id);
+	c->size += 2;
+
+	write_u16(c->data + c->size, zone_id);
+	c->size += 2;
+
+	write_u8(c->data + c->size, point_id);
+	c->size += 1;
+
+	write_zero(c->data + c->size, 5); c->size += 5;
+
 	write_u16(c->data, c->size);
 	send_packet(c, true);
 }
@@ -4831,13 +4882,12 @@ void RecvFreeCrossTeleport(Connection *c, const uint8_t *data)
 {
 	if (c->migration.state != MIGRATION_WAIT_RESULT)
 		return;
-	
+
 	int8_t status = (int8_t)read_u8(data);
-	
-	c->migration.state = MIGRATION_IDLE;
-	
+
 	// 0 = SUCCESS, -1 = SUCCESS_IN_FOREST, 1 = SUCCESS_EXPIRE
 	if (status == 0 || status == -1 || status == 1) {
+		c->migration.state = MIGRATION_IDLE;
 		LOGI("[MIGRATION] Migration acceptée vers le royaume %u (code %d)\n", c->migration.kingdom_id, status);
 		BotReply(c, c->migration.requester, "Migration",
 			"Migration acceptée : le château part vers le royaume %u en X:%u Y:%u.%s Le serveur ferme la connexion et le bot se reconnecte tout seul.",
@@ -4845,36 +4895,64 @@ void RecvFreeCrossTeleport(Connection *c, const uint8_t *data)
 			status == -1 ? " (réussite en forêt)" : (status == 1 ? " (l'offre gratuite arrive à expiration)" : ""));
 		return;
 	}
-	
+
 	const char *name;
 	const char *reason = FreeTeleportReason(status, &name);
-	
-	LOGW("[MIGRATION] Migration refusée par le serveur (code %d, %s)\n", status, name);
-	
-	// a precise reason (kingdom full, troops outside...) is a problem scrolls would not fix
-	if (reason != NULL && status != 7) {
+
+	LOGW("[MIGRATION] Migration gratuite refusée par le serveur (code %d, %s)\n", status, name);
+
+	// a precise reason about the destination or the account's state (kingdom full, troops
+	// outside, an event lock...) would block a scroll-paid migration just the same: only fall
+	// through to the scroll for the two reasons that are specifically about the free offer's
+	// own eligibility (NEWBIE_ERROR, and the unexplained UNKNOWN some accounts get instead of it).
+	bool free_offer_not_available = (status == 2 || status == 7);
+
+	if (reason != NULL && !free_offer_not_available) {
+		c->migration.state = MIGRATION_IDLE;
 		BotReply(c, c->migration.requester, "Migration", "Migration refusée : %s (%s).", reason, name);
 		return;
 	}
-	
-	// unknown reason: the free migration is probably not available, say what the scrolls allow
+
+	// the free offer does not apply here: try a scroll if there are enough (captured from the
+	// official client: same _MSG_REQUEST_USEITEM used for the advanced relocator, with
+	// MIGRATION_SCROLL as the item).
 	uint16_t have   = c->items[MIGRATION_SCROLL].quantity;
 	uint16_t needed = c->migration_scrolls_needed ? c->migration_scrolls_needed : 1;
-	
+
+	if (c->items_loaded && have >= needed) {
+		LOGI("[MIGRATION] Bascule sur un vélin de migration (%u disponible(s), %u nécessaire(s))\n", have, needed);
+		RequestMigrationScroll(c, c->migration.kingdom_id, c->migration.zone_id, c->migration.point_id);
+		c->migration.state    = MIGRATION_WAIT_SCROLL_RESULT;
+		c->migration.deadline = time(NULL) + 15;
+		return;
+	}
+
+	c->migration.state = MIGRATION_IDLE;
+
 	if (!c->items_loaded) {
 		BotReply(c, c->migration.requester, "Migration", "Migration refusée par le serveur (code %d, %s).", status, name);
 	} else if (have == 0) {
 		BotReply(c, c->migration.requester, "Migration",
 			"Migration refusée (code %d). Aucune migration gratuite n'est disponible et vous n'avez plus de vélin de migration.", status);
-	} else if (have < needed) {
+	} else {
 		BotReply(c, c->migration.requester, "Migration",
 			"Migration refusée (code %d). Il faut %u vélin(s) de migration et vous n'en avez que %u : il vous en manque %u.",
 			status, needed, have, needed - have);
-	} else {
-		BotReply(c, c->migration.requester, "Migration",
-			"Migration gratuite refusée (code %d). Vous avez %u vélin(s) de migration (il en faut %u), mais le bot ne sait pas encore les utiliser : faites la migration dans le jeu.",
-			status, have, needed);
 	}
+}
+
+/* Called when the server answers the use of a migration scroll (see RequestMigrationScroll). */
+void RecvMigrationScrollResult(Connection *c)
+{
+	if (c->migration.state != MIGRATION_WAIT_SCROLL_RESULT)
+		return;
+
+	c->migration.state = MIGRATION_IDLE;
+	LOGI("[MIGRATION] Migration par vélin acceptée vers le royaume %u\n", c->migration.kingdom_id);
+	BotReply(c, c->migration.requester, "Migration",
+		"Migration acceptée (vélin de migration utilisé) : le château part vers le royaume %u en X:%u Y:%u. "
+		"Le serveur ferme la connexion et le bot se reconnecte tout seul.",
+		c->migration.kingdom_id, c->migration.x, c->migration.y);
 }
 
 void RecvCrossKingdomClose(Connection *c, const uint8_t *data, uint16_t size)

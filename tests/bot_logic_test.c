@@ -591,11 +591,38 @@ int main(void)
 		CHECK(!replied("aucun vélin") && replied("Vélins de migration dans le sac : 2 (1 nécessaire(s))"), "enough scrolls: the count is shown, no warning");
 		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
 
-		/* refused, scrolls available: honest about what the bot cannot do */
+		/* refused, scrolls available: the bot uses one by itself */
 		reset_sent();
 		c->items[MIGRATION_SCROLL].quantity = 3;
 		{ uint8_t refused = 7; RecvFreeCrossTeleport(c, &refused); }
-		CHECK(replied("Vous avez 3 vélin(s) de migration (il en faut 1)") && replied("ne sait pas encore les utiliser"), "free migration unavailable, enough scrolls: the bot says it cannot use them yet");
+		{
+			int k = find_packet(_MSG_REQUEST_USEITEM);
+			CHECK(k >= 0 && useitem_count == 1 && c->migration.state == MIGRATION_WAIT_SCROLL_RESULT,
+				"free migration unavailable, enough scrolls: a migration scroll is used automatically");
+			if (k >= 0) {
+				const uint8_t *pk = sent[k];
+				CHECK((uint16_t)(pk[8] | (pk[9] << 8)) == MIGRATION_SCROLL, "the migration scroll is used");
+				CHECK((uint16_t)(pk[12] | (pk[13] << 8)) == 796, "the packet carries the target kingdom");
+			}
+		}
+		reset_sent();
+		{
+			uint8_t ok[12] = { 0, 0xfb, 0x04, 2, 0, 0, 0, 0x0d, 0x00, 0x3a, 0x2c, 0x01 };
+			RecvUseItem(c, ok, sizeof(ok));
+		}
+		CHECK(c->migration.state == MIGRATION_IDLE &&
+			replied("Migration acceptée (vélin de migration utilisé)") && replied("royaume 796 en X:301 Y:491"),
+			"the migration completes once the server confirms the scroll was used");
+
+		/* the server refuses the scroll itself: reported as such, not as a relocation failure */
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+		reset_sent();
+		{ uint8_t refused = 2; RecvFreeCrossTeleport(c, &refused); } /* NEWBIE_ERROR also falls through to the scroll */
+		reset_sent();
+		{ uint8_t refused[1] = { 5 }; RecvUseItem(c, refused, sizeof(refused)); }
+		CHECK(c->migration.state == MIGRATION_IDLE && replied("Migration par vélin refusée par le serveur (code 5)"),
+			"a scroll refused by the server is reported, not mistaken for a relocation failure");
 
 		/* refused, no scroll left: the message the administrator asked for */
 		c->items[MIGRATION_SCROLL].quantity = 0;

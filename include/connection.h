@@ -792,7 +792,8 @@ typedef struct {
 typedef enum {
     MIGRATION_IDLE,
     MIGRATION_WAIT_SERVER,
-    MIGRATION_WAIT_RESULT
+    MIGRATION_WAIT_RESULT,
+    MIGRATION_WAIT_SCROLL_RESULT
 } MigrationState;
 
 typedef struct {
@@ -980,4 +981,4 @@ bool send_packet(Connection *conn, bool enc);
 int set_nonblocking(Connection *conn);
 void reset_connection(Connection *c);
 
-#endif
+#endif

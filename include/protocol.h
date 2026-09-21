@@ -171,6 +171,8 @@ void ReportRelocation(Connection *c, bool ok, uint8_t status);
 /* Kingdom migration. The packet layouts come from a capture of the official client. */
 void RequestKingdomServer(Connection *c, uint16_t kingdom_id);
 void RequestFreeCrossTeleport(Connection *c, uint16_t kingdom_id, uint16_t zone_id, uint8_t point_id);
+void RequestMigrationScroll(Connection *c, uint16_t kingdom_id, uint16_t zone_id, uint8_t point_id);
+void RecvMigrationScrollResult(Connection *c);
 bool MigrationStart(Connection *c, const char *requester, uint16_t kingdom_id, uint16_t x, uint16_t y, uint16_t zone_id, uint8_t point_id);
 void MigrationScrollStatus(const Connection *c, char *out, size_t size);
 void RequsetWorldTeleportItemCount(Connection *c, uint64_t power);
@@ -184,4 +186,4 @@ void MigrationTick(Connection *c);
 void RecvAllianceMemberInfo(Connection *c, const uint8_t *data);
 void RequestAllianceMemberInfo(Connection *c);
 
-#endif
+#endif

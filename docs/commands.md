@@ -81,11 +81,13 @@ Migration to another kingdom, `$migrate <kingdom> <x> <y>`:
 
 1. The bot asks the game for the server of the target kingdom, as the official client does. An unknown or closed
    kingdom is reported and nothing is sent.
-2. It sends the migration request with the kingdom and the destination tile.
-3. The server accepts (or refuses) and closes the connection; the bot reconnects by itself, into the new kingdom.
-
-The bot only knows the **free migration** offered to returning players, because that is the one that was captured
-from the official client. Migrating with scrolls uses another request that is not known yet.
+2. It sends the **free migration** offered to returning players (no scroll spent).
+3. If the server refuses because that free offer does not apply to this account (`NEWBIE_ERROR`, or an
+   unexplained `UNKNOWN`), and there are enough migration scrolls in the bag, the bot uses one by itself
+   (captured from the official client: a migration scroll is used through the same generic "use item" request as
+   the advanced relocator). A refusal with a precise reason tied to the destination or the account (kingdom full,
+   troops outside, an event lock...) is reported as is instead, since a scroll would fail for the same reason.
+4. The server accepts (or refuses) and closes the connection; the bot reconnects by itself, into the new kingdom.
 
 **Scrolls.** How many scrolls a migration needs depends on the account's power and on the kingdom, so it has to come
 from the game. The game asks the server with `_MSG_REQUEST_WORLD_TELEPORT_ITEM` (the account's power, u64) and the
@@ -168,9 +170,10 @@ been run against the live game yet:
 - the delivery distance against real player positions;
 - accented characters (é, è, à...) in the bot's French mails and chat lines: they are sent as UTF-8
   like any text, but if the game shows them wrongly, tell me and I will remove the accents;
-- migration: both requests are byte for byte the ones captured from the official client (a free migration to
-  kingdom 796), and the server's answers are decoded from the same capture. Only the accepted case was seen: the codes
-  of a refusal are unknown, so the bot shows the number it receives. Try it on a spare account first;
+- migration: the free-migration request and its refusal codes come from a capture of a free migration to kingdom
+  796. The scroll fallback (`_MSG_REQUEST_USEITEM` with `MIGRATION_SCROLL`) comes from a separate capture of a
+  real scroll migration to kingdom 300, accepted case only: a refusal of the scroll itself is reported with its
+  raw code, whose meaning is not decoded yet. Try both on a spare account first;
 - relocation: the packets are the ones the bot already had for the two relocators, and the answer is
   decoded by the existing code, but no relocation was run on a live account. Try it on a spare account.
 
