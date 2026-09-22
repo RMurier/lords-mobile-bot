@@ -353,11 +353,12 @@ typedef struct {
     time_t last_online_gift_try;
 } ActivitySettings;
 
-/* Kingdom map scanner: tracks every player point seen in _MSG_RESP_UPDATE_MAPINFO_PLUS
- * and reports (via Discord webhook) when a point we know sends the compact single-point
- * update that was observed, in a packet capture, at the exact moment a shield bubble
- * disappeared on screen. Reverse-engineered from one confirmed sample: not proven to be
- * exclusively a shield event, so it is logged as such but may need recalibration. */
+/* Passive war watcher: tracks every player point seen in whatever _MSG_RESP_UPDATE_MAPINFO(_PLUS)
+ * the server sends unprompted (no confirmed client request elicits it - see the comment above
+ * WarTick in protocol.c), and reports (via Discord webhook) when a point we know sends the
+ * compact single-point update that was observed, in a packet capture, at the exact moment a
+ * shield bubble disappeared on screen. Reverse-engineered from one confirmed sample: not proven
+ * to be exclusively a shield event, so it is logged as such but may need recalibration. */
 #define WAR_MAX_POINTS 8192
 #define WAR_ZONE_COUNT 1024   /* zoneId is 10 bits: (x>>5) + ((y>>4)<<4), x<512, y<1024 */
 
@@ -373,9 +374,7 @@ typedef struct {
 typedef struct {
     bool     enabled;
     char     discord_webhook[256];
-    uint16_t scan_cursor;     // next zoneId (0..WAR_ZONE_COUNT-1) to request; wraps back to 0, the scan never stops
-    bool     first_lap_done;  // true once the kingdom has been swept at least once (logging only)
-    time_t   last_request;
+    time_t   last_status_log; // throttles the periodic "N points known" log line
     uint16_t point_count;
     WarPoint points[WAR_MAX_POINTS];
 } WarSettings;

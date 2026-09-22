@@ -24,7 +24,6 @@ void RequestJoinRally(Connection *c, const char *ally_name, const uint32_t troop
 
 void Send_Mall_TestBuy(Connection *c, uint16_t type);
 
-void RequestMapData(Connection *c, uint8_t count, uint16_t zone[]);
 
 void RequestBlackMarketData(Connection *c);
 void RequestBlackMarketBuy(Connection *c, uint8_t mIdx);

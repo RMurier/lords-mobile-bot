@@ -216,42 +216,6 @@ void RequestUseAdvancedRelocator(Connection *c, uint16_t kingdom_id, uint16_t zo
     send_packet(c, true);
 }
 
-void RequestMapData(Connection *c, uint8_t count, uint16_t zone[]) {
-	c->size = 2; // reserve space for packet length
-	
-	// write packet type 
-	write_u16(c->data + c->size, _MSG_REQUEST_MAPDATA);
-	c->size += 2;
-	
-	// write sequence 
-	write_u32(c->data + c->size, ++c->protocol.seq_id);
-	c->size += 4;
-	
-	// count
-	write_u8 (c->data + c->size, count);
-	c->size += 1;
-	
-	// zone id
-	write_u16(c->data + c->size, zone[0]);
-	c->size += 2;
-	
-	write_u16(c->data + c->size, zone[1]);
-	c->size += 2;
-	
-	write_u16(c->data + c->size, zone[2]);
-	c->size += 2;
-	
-	write_u16(c->data + c->size, zone[3]);
-	c->size += 2;
-	
-	write_zero(c->data + c->size, 32);
-	c->size += 32;
-	
-	write_u16(c->data,  c->size);
-	
-	send_packet(c, true);
-}
-
 
 void GetBlackMarketData(Connection *c) {
 	c->size = 2;
@@ -3097,19 +3061,38 @@ void ActivityTick(Connection *c) {
 }
 
 /* ------------------------------------------------------------------------
- * "War" kingdom scanner: sweeps every zone of the current kingdom on a loop
- * (RequestMapData, 4 zones at a time, paced), forever, to build and refresh
- * a roster of every player point (_MSG_RESP_UPDATE_MAPINFO_PLUS, bulk
- * snapshot format). It also watches for the compact single-point update
- * captured, in a live test, at the exact moment a shield bubble disappeared
- * on the map for a tracked point, and reports it (name + coordinates) to a
- * Discord webhook.
+ * "War" watcher: PASSIVE. Builds a roster of player points from whatever
+ * _MSG_RESP_UPDATE_MAPINFO_PLUS / _MSG_RESP_UPDATE_MAPINFO (bulk snapshot
+ * format) the server sends on its own, then watches for the compact
+ * single-point update captured, in a live test, at the exact moment a
+ * shield bubble disappeared on the map for a tracked point, and reports it
+ * (name + coordinates) to a Discord webhook.
  *
- * The loop never stops: it is not confirmed that the point-changed delta
- * still arrives for a zone the bot is no longer actively requesting (the
- * one confirmed sample came from a live client with the zone on screen), so
- * continuously re-requesting every zone is what keeps the roster itself
- * fresh and is the closest available proxy for "still watching" each zone.
+ * It used to actively request every zone of the kingdom (RequestMapData,
+ * _MSG_REQUEST_MAPDATA) in a loop. That request was reverse-engineered from
+ * opcode numbering alone and never confirmed: several packet captures of
+ * real play sessions, some spanning a deliberate trip far from the castle,
+ * never once showed the client sending it, or anything else identifiable
+ * as a map-data request, on the connection that does carry these bulk
+ * snapshots. The snapshots did appear in some of those captures, seemingly
+ * tied to login/reconnect rather than to any client action - so sending
+ * that request was, at best, doing nothing, and WarTick no longer does.
+ *
+ * Net effect: coverage is whatever the server happens to push. Confirmed
+ * samples range from ~45 player points near the account's own castle (on
+ * ordinary login) up to 61 points spread across a dozen zones of a kingdom
+ * the account had never visited before (right after using the game's own
+ * "view another kingdom" feature) - so the format and pipeline clearly
+ * support kingdom-wide coverage, the bot just has no way to ask for it
+ * itself yet. That "view kingdom" action opens a whole separate TCP
+ * connection (its own host/port, its own short-lived auth token) rather
+ * than sending a request on the existing one, and nothing resembling that
+ * setup was ever observed in the plaintext binary protocol captured so
+ * far - it is most likely negotiated over an HTTPS call (there are several
+ * per session, all opaque without TLS interception) that hands back where
+ * and how to open it. Simulating that would need those HTTPS calls
+ * decrypted first (e.g. PCAPdroid's TLS interception, or mitmproxy with a
+ * CA installed on the device) to see the actual request/response shape.
  *
  * Reverse-engineered from packet captures with only one or two confirmed
  * samples each, so both record shapes below may need recalibration once
@@ -3271,28 +3254,13 @@ void WarTick(Connection *c) {
 	if (!c->war.enabled)
 		return;
 
+	// Nothing to request (see the header comment above): just a slow, occasional
+	// reminder of how many points have been seen so far, purely for visibility.
 	time_t now = time(NULL);
-	if (now - c->war.last_request < 2) // 4 zones every 2s: paced, not a flood
+	if (now - c->war.last_status_log < 600)
 		return;
-
-	c->war.last_request = now;
-
-	uint16_t zone[4];
-	for (int i = 0; i < 4; i++) {
-		uint16_t z = c->war.scan_cursor + i;
-		zone[i] = (z < WAR_ZONE_COUNT) ? z : c->war.scan_cursor;
-	}
-
-	RequestMapData(c, 4, zone);
-
-	c->war.scan_cursor += 4;
-	if (c->war.scan_cursor >= WAR_ZONE_COUNT) {
-		c->war.scan_cursor = 0; // loop forever: re-sweep instead of stopping
-		if (!c->war.first_lap_done) {
-			c->war.first_lap_done = true;
-			LOGI("[WAR] Premier passage du royaume terminé : %u points suivis\n", c->war.point_count);
-		}
-	}
+	c->war.last_status_log = now;
+	LOGI("[WAR] %u point(s) connu(s) (reçus passivement, pas de scan actif)\n", c->war.point_count);
 }
 
 
