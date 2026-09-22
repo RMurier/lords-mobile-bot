@@ -216,6 +216,28 @@ CATEGORIES = [
         ],
     },
     {
+        "id": "activity",
+        "label": "Activité",
+        "description": "Réclamations automatiques, retentées toutes les 5 minutes tant qu'elles ne sont pas disponibles.",
+        "fields": [
+            _bool("activity.auto_double_ticket", "Récupérer automatiquement le coupon trésor (1 acheté = 1 offert)", default=True),
+            _bool("activity.auto_online_gift", "Récupérer automatiquement le cadeau périodique (boîte mystère)", default=True),
+        ],
+    },
+    {
+        "id": "war",
+        "technical": True,      # experimental: reverse-engineered from a single sample, needs field validation
+        "label": "War (scan de royaume)",
+        "description": "Scanne tout le royaume une fois, puis prévient sur un webhook Discord quand un joueur suivi "
+                      "perd son bouclier. Expérimental : détecté à partir d'un seul échantillon capturé.",
+        "fields": [
+            _bool("war.enabled", "Activer le scan de royaume"),
+            {"key": "war.discord_webhook", "label": "Webhook Discord", "type": "text", "maxlen": 255,
+             "default": "", "optional": True, "depends": "war.enabled",
+             "help": "URL du webhook Discord (Paramètres du salon → Intégrations → Webhooks)."},
+        ],
+    },
+    {
         "id": "advanced",
         "technical": True,      # not for everyday use: grouped in the "Technique" tab
         "label": "Avancé",

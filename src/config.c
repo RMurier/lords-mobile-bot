@@ -311,7 +311,28 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		c->alliance.auto_open_gifts = (strcmp(value, "true") == 0);
 		return true;
 	}
-	
+
+	if (strcmp(key, "activity.auto_double_ticket") == 0) {
+		c->activity.auto_double_ticket = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "activity.auto_online_gift") == 0) {
+		c->activity.auto_online_gift = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "war.enabled") == 0) {
+		c->war.enabled = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "war.discord_webhook") == 0) {
+		strncpy(c->war.discord_webhook, value, sizeof(c->war.discord_webhook) - 1);
+		c->war.discord_webhook[sizeof(c->war.discord_webhook) - 1] = '\0';
+		return true;
+	}
+
 	if (strcmp(key, "protection.enabled") == 0) {
 		c->protection.enabled = (strcmp(value, "true") == 0);
 		return true;

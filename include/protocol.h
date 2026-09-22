@@ -99,6 +99,16 @@ void ShieldTick(Connection *c);
 void AllianceGiftTick(Connection*);
 void RecvAllianceInfo(Connection*, const uint8_t*);
 
+void RequestTreasureGetDoubleTicket(Connection *c);
+void RecvTreasureGetDoubleTicket(Connection *c, const uint8_t *data, uint16_t size);
+void RequestOnlineGift(Connection *c);
+void RecvOnlineGift(Connection *c, const uint8_t *data, uint16_t size);
+void ActivityTick(Connection *c);
+
+void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size);
+void WarTick(Connection *c);
+void NotifyDiscord(Connection *c, const char *message);
+
 void RecvBuildingQueue(Connection*, const uint8_t*);
 
 void RecvUpdateWatchTowerAddLineInfo(Connection*, const uint8_t*);

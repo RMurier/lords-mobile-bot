@@ -346,6 +346,40 @@ typedef struct {
     SmartUseItem items[MAX_SMART_USE_ITEMS];
 } SmartUseList;
 
+typedef struct {
+    bool auto_double_ticket;   // claim the "buy 1 get 1" treasure coupon automatically
+    bool auto_online_gift;     // claim the periodic online/mystery gift automatically
+    time_t last_double_ticket_try;
+    time_t last_online_gift_try;
+} ActivitySettings;
+
+/* Kingdom map scanner: tracks every player point seen in _MSG_RESP_UPDATE_MAPINFO_PLUS
+ * and reports (via Discord webhook) when a point we know sends the compact single-point
+ * update that was observed, in a packet capture, at the exact moment a shield bubble
+ * disappeared on screen. Reverse-engineered from one confirmed sample: not proven to be
+ * exclusively a shield event, so it is logged as such but may need recalibration. */
+#define WAR_MAX_POINTS 8192
+#define WAR_ZONE_COUNT 1024   /* zoneId is 10 bits: (x>>5) + ((y>>4)<<4), x<512, y<1024 */
+
+typedef struct {
+    bool     used;
+    uint16_t zone_id;
+    uint8_t  point_id;
+    uint16_t kingdom_id;
+    char     name[13];
+    char     tag[4];
+} WarPoint;
+
+typedef struct {
+    bool     enabled;
+    char     discord_webhook[256];
+    uint16_t scan_cursor;     // next zoneId (0..WAR_ZONE_COUNT-1) to request
+    bool     scan_complete;
+    time_t   last_request;
+    uint16_t point_count;
+    WarPoint points[WAR_MAX_POINTS];
+} WarSettings;
+
 typedef enum
 {
 	// Token: 0x04000893 RID: 2195
@@ -920,6 +954,8 @@ typedef struct {
 	AllianceGiftList alliance_gifts;
 	AllianceSettings alliance;
 	SmartUseList smart_use;
+	ActivitySettings activity;
+	WarSettings war;
 	
 	HelpSpam help_spam;
 	

@@ -3022,6 +3022,244 @@ void AllianceGiftTick(Connection *c) {
 	return;
 }
 
+/* ------------------------------------------------------------------------
+ * Treasure "buy 1 get 1" coupon and the periodic online gift ("mystery
+ * box"). Both are argument-less claims: send a sequence number, the server
+ * either grants the reward (status 0) or refuses because it is not ready
+ * yet (any other status, no known meaning so far). Captured with pktmon/
+ * PCAPdroid: neither packet is DES-encrypted, unlike most in-game requests.
+ * ------------------------------------------------------------------------ */
+
+void RequestTreasureGetDoubleTicket(Connection *c) {
+	c->size = 2; // reserve space for packet length
+	write_u16(c->data + c->size, _MSG_REQUEST_TREASURE_GET_DOUBLETICKET);
+	c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);
+	c->size += 4;
+	write_u16(c->data, c->size);
+	send_packet(c, false);
+}
+
+void RecvTreasureGetDoubleTicket(Connection *c, const uint8_t *data, uint16_t size) {
+	(void)c;
+	if (size < 1) return;
+	uint8_t status = read_u8(data);
+	if (status == 0) {
+		LOGI("[ACTIVITY] Coupon 1+1 récupéré\n");
+	} else {
+		LOGD("[ACTIVITY] Coupon 1+1 : pas disponible (code %u)\n", status);
+	}
+}
+
+void RequestOnlineGift(Connection *c) {
+	c->size = 2; // reserve space for packet length
+	write_u16(c->data + c->size, _MSG_REQUEST_ONLINE_GIFT);
+	c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);
+	c->size += 4;
+	write_u16(c->data, c->size);
+	send_packet(c, false);
+}
+
+void RecvOnlineGift(Connection *c, const uint8_t *data, uint16_t size) {
+	(void)c;
+	if (size < 1) return;
+	uint8_t status = read_u8(data);
+	if (status != 0) {
+		LOGD("[ACTIVITY] Boîte mystère : pas disponible (code %u)\n", status);
+		return;
+	}
+	// status(1) + server time(4) + reward list: the exact item/quantity
+	// encoding of the reward list is not confirmed yet (only one sample
+	// captured so far), so it is logged raw instead of mis-parsed.
+	if (size > 5) {
+		LOGI("[ACTIVITY] Boîte mystère récupérée, récompense (brut) : ");
+		log_hexdump("online_gift reward", data + 5, size - 5);
+	} else {
+		LOGI("[ACTIVITY] Boîte mystère récupérée\n");
+	}
+}
+
+void ActivityTick(Connection *c) {
+	time_t now = time(NULL);
+
+	// Retried every 5 minutes: a claim that is not ready yet is a cheap,
+	// harmless refusal, so there is no need to know the real cooldown.
+	if (c->activity.auto_double_ticket && now - c->activity.last_double_ticket_try >= 300) {
+		c->activity.last_double_ticket_try = now;
+		RequestTreasureGetDoubleTicket(c);
+	}
+
+	if (c->activity.auto_online_gift && now - c->activity.last_online_gift_try >= 300) {
+		c->activity.last_online_gift_try = now;
+		RequestOnlineGift(c);
+	}
+}
+
+/* ------------------------------------------------------------------------
+ * "War" kingdom scanner: sweeps every zone of the current kingdom once
+ * (RequestMapData, 4 zones at a time, paced) to build a roster of every
+ * player point (_MSG_RESP_UPDATE_MAPINFO_PLUS, bulk snapshot format), then
+ * watches for the compact single-point update captured, in a live test, at
+ * the exact moment a shield bubble disappeared on the map for a tracked
+ * point, and reports it (name + coordinates) to a Discord webhook.
+ *
+ * Reverse-engineered from packet captures with only one or two confirmed
+ * samples each, so both record shapes below may need recalibration once
+ * used at scale:
+ *   - Bulk record (51 bytes): zone(2) point(1) tag(1, 0x08=player)
+ *     name(13) alliance_tag(3) kingdom_id(2) + 29 bytes not decoded.
+ *   - Point-changed delta (13 bytes): kind(1) id(8) zone(2) point(1) pad(1).
+ *     Confirmed once to fire for a point whose shield had just dropped;
+ *     not confirmed to be exclusive to shields.
+ * ------------------------------------------------------------------------ */
+
+#define WAR_RECORD_SIZE 51
+#define WAR_RECORD_TAG  0x08
+
+static WarPoint *WarFindPoint(Connection *c, uint16_t zone_id, uint8_t point_id) {
+	for (uint16_t i = 0; i < c->war.point_count; i++) {
+		WarPoint *p = &c->war.points[i];
+		if (p->zone_id == zone_id && p->point_id == point_id)
+			return p;
+	}
+	return NULL;
+}
+
+static WarPoint *WarTrackPoint(Connection *c, uint16_t zone_id, uint8_t point_id) {
+	WarPoint *p = WarFindPoint(c, zone_id, point_id);
+	if (p) return p;
+	if (c->war.point_count >= WAR_MAX_POINTS) return NULL;
+	p = &c->war.points[c->war.point_count++];
+	memset(p, 0, sizeof(*p));
+	p->zone_id = zone_id;
+	p->point_id = point_id;
+	return p;
+}
+
+static void JsonEscape(const char *in, char *out, size_t out_size) {
+	size_t j = 0;
+	for (size_t i = 0; in[i] != '\0' && j + 2 < out_size; i++) {
+		unsigned char ch = (unsigned char)in[i];
+		if (ch == '"' || ch == '\\') {
+			out[j++] = '\\';
+			out[j++] = (char)ch;
+		} else if (ch == '\n') {
+			out[j++] = '\\';
+			out[j++] = 'n';
+		} else if (ch >= 0x20) {
+			out[j++] = (char)ch;
+		}
+	}
+	out[j] = '\0';
+}
+
+/* Writes the message to a local file (data.path/war_alert.json) and shells out to
+ * curl to POST it, so the message content never goes through a shell string: only
+ * the file path (ours) and the webhook URL (from the local config) do. */
+void NotifyDiscord(Connection *c, const char *message) {
+	if (c->war.discord_webhook[0] == '\0')
+		return;
+
+	char escaped[512];
+	JsonEscape(message, escaped, sizeof(escaped));
+
+	char path[300];
+	snprintf(path, sizeof(path), "%swar_alert.json", c->bot.data_path);
+
+	FILE *f = fopen(path, "w");
+	if (!f) {
+		LOGE("[WAR] Impossible d'écrire le message pour le webhook (%s)\n", path);
+		return;
+	}
+	fprintf(f, "{\"content\":\"%s\"}", escaped);
+	fclose(f);
+
+	char cmd[900];
+#ifdef _WIN32
+	snprintf(cmd, sizeof(cmd),
+		"curl -s -X POST -H \"Content-Type: application/json\" --data @\"%s\" \"%s\" >NUL 2>&1",
+		path, c->war.discord_webhook);
+#else
+	snprintf(cmd, sizeof(cmd),
+		"curl -s -X POST -H 'Content-Type: application/json' --data @%s '%s' >/dev/null 2>&1",
+		path, c->war.discord_webhook);
+#endif
+	system(cmd);
+}
+
+void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
+	if (!c->war.enabled) return;
+
+	// Compact single-point update: matches the shape seen, once, at the exact moment
+	// a shield bubble disappeared for a tracked point.
+	if (size == 13) {
+		uint16_t zone_id  = read_u16(data + 9);
+		uint8_t  point_id = read_u8(data + 11);
+
+		if (zone_id < WAR_ZONE_COUNT) {
+			WarPoint *p = WarFindPoint(c, zone_id, point_id);
+			if (p) {
+				map_pos_t pos = getTileMapPosbyPointCode(zone_id, point_id);
+				char msg[256];
+				snprintf(msg, sizeof(msg), "%s [%s] a débullé à X:%u Y:%u", p->name, p->tag, pos.x, pos.y);
+				LOGI("[WAR] %s\n", msg);
+				NotifyDiscord(c, msg);
+			}
+		}
+		return;
+	}
+
+	// Bulk snapshot: several record kinds back to back, sharing this shape when the
+	// tag byte is WAR_RECORD_TAG (player point). Anything else is skipped one byte at
+	// a time to resync, since its width is not decoded yet.
+	uint16_t pos = 3; // packet-level prefix, not decoded (kind + a count-like field)
+	while (pos + WAR_RECORD_SIZE <= size) {
+		uint16_t zone_id  = read_u16(data + pos);
+		uint8_t  point_id = read_u8(data + pos + 2);
+		uint8_t  tag      = read_u8(data + pos + 3);
+
+		if (zone_id < WAR_ZONE_COUNT && tag == WAR_RECORD_TAG) {
+			WarPoint *p = WarTrackPoint(c, zone_id, point_id);
+			if (p) {
+				read_bytes((uint8_t*)p->name, data + pos + 4, 13);
+				p->name[12] = '\0';
+				read_bytes((uint8_t*)p->tag, data + pos + 17, 3);
+				p->tag[3] = '\0';
+				p->kingdom_id = read_u16(data + pos + 20);
+			}
+			pos += WAR_RECORD_SIZE;
+		} else {
+			pos += 1;
+		}
+	}
+}
+
+void WarTick(Connection *c) {
+	if (!c->war.enabled || c->war.scan_complete)
+		return;
+
+	time_t now = time(NULL);
+	if (now - c->war.last_request < 2) // 4 zones every 2s: paced, not a flood
+		return;
+
+	c->war.last_request = now;
+
+	uint16_t zone[4];
+	for (int i = 0; i < 4; i++) {
+		uint16_t z = c->war.scan_cursor + i;
+		zone[i] = (z < WAR_ZONE_COUNT) ? z : c->war.scan_cursor;
+	}
+
+	RequestMapData(c, 4, zone);
+
+	c->war.scan_cursor += 4;
+	if (c->war.scan_cursor >= WAR_ZONE_COUNT) {
+		c->war.scan_complete = true;
+		LOGI("[WAR] Scan du royaume terminé : %u points suivis\n", c->war.point_count);
+	}
+}
+
 
 
 // Not fully understand core mechanism yet
@@ -4192,13 +4430,6 @@ void point_kind_str(int pk, char *buf) {
     }
     
     strcpy(buf, str);
-}
-
-
-// Not implemented core logic for parse map information
-void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
-	uint16_t offset = 0;
-	
 }
 
 

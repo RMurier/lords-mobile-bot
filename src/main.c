@@ -70,7 +70,11 @@ void BotTick(Connection *c)
 	ShieldTick(c);
 	
 	AllianceGiftTick(c);
-	
+
+	ActivityTick(c);
+
+	WarTick(c);
+
 	MigrationTick(c);
 	
 	StatusTick(c);
@@ -277,8 +281,14 @@ static SessionResult ProcessConnection(Connection *c)
 					
 					// RequestDeleteAllianceGiftBox(c, 0xFFFFFFFF);
 					break;
-				case _MSG_RESP_ITEMINFO: 
+				case _MSG_RESP_ITEMINFO:
 					RecvItemInfo(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_TREASURE_GET_DOUBLETICKET:
+					RecvTreasureGetDoubleTicket(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_ONLINE_GIFT:
+					RecvOnlineGift(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_BUFFINFO: 
 					RecvIBuffInfo(c, s->buffer + s->parse_pos + 4);
@@ -525,9 +535,13 @@ void Configuration(Connection *client)
 	client->alliance.auto_help = true;
 	
 	// Open alliance gifts
-	client->alliance.auto_open_gifts = true; // Guild Gift will not open auto if set false 
-	
-	
+	client->alliance.auto_open_gifts = true; // Guild Gift will not open auto if set false
+
+	// Claim the treasure coupon and the periodic online gift automatically
+	client->activity.auto_double_ticket = true;
+	client->activity.auto_online_gift = true;
+
+
 	// Master switch for the protection system.
 	client->protection.enabled = true;
 	
