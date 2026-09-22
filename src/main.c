@@ -435,7 +435,15 @@ static SessionResult ProcessConnection(Connection *c)
 				case _MSG_HOSPITAL_HOSPITALINFO: 
 					RecvWoundedTroopData(c, s->buffer + s->parse_pos + 4);
 					break;
-				case _MSG_RESP_UPDATE_MAPINFO_PLUS: 
+				case _MSG_RESP_UPDATE_MAPINFO_PLUS:
+					RecvMapInfoPlus(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_UPDATE_MAPINFO:
+					// Unconfirmed: this is the reply _MSG_REQUEST_MAPDATA's opcode number is adjacent to
+					// (2201 -> 2203), and is the only candidate ever observed in practice — the "_PLUS"
+					// variant (2220) that WarTick was written to expect has never once come back after
+					// several full kingdom sweeps. Routed to the same parser to see if its bulk-record
+					// shape happens to match; RecvMapInfoPlus logs enough to tell if it does not.
 					RecvMapInfoPlus(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_SEND_RESHELP: 

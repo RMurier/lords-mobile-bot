@@ -3222,6 +3222,12 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 	// Bulk snapshot: several record kinds back to back, sharing this shape when the
 	// tag byte is WAR_RECORD_TAG (player point). Anything else is skipped one byte at
 	// a time to resync, since its width is not decoded yet.
+	if (size < 3 + WAR_RECORD_SIZE) {
+		LOGD("[WAR] map data reçue, taille=%u (trop petite pour un seul record de %u : format non reconnu)\n",
+			size, WAR_RECORD_SIZE);
+		return;
+	}
+	uint16_t matched = 0;
 	uint16_t pos = 3; // packet-level prefix, not decoded (kind + a count-like field)
 	while (pos + WAR_RECORD_SIZE <= size) {
 		uint16_t zone_id  = read_u16(data + pos);
@@ -3237,11 +3243,17 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 				p->tag[3] = '\0';
 				p->kingdom_id = read_u16(data + pos + 20);
 			}
+			matched++;
 			pos += WAR_RECORD_SIZE;
 		} else {
 			pos += 1;
 		}
 	}
+	// If almost nothing lined up on a WAR_RECORD_TAG byte, the 51-byte record shape is
+	// probably wrong for this packet rather than the zone just being empty: dump it raw
+	// so the format can be recalibrated against a real sample instead of guessed again.
+	if (matched == 0)
+		log_hexdump("war map_data (0 record reconnu)", data, size);
 }
 
 void WarTick(Connection *c) {
