@@ -353,6 +353,24 @@ typedef struct {
     time_t last_online_gift_try;
 } ActivitySettings;
 
+/* $join <tag> / $leave: at most one alliance operation in flight at a time, its
+ * outcome reported back to whoever asked for it. Reverse-engineered from a capture
+ * of leaving a guild, searching by tag text, and applying (which is either an
+ * instant join or a pending application depending on the target's settings - the
+ * bot does not distinguish the two, both are reported as "candidature envoyée"). */
+typedef enum {
+    ALLIANCE_OP_NONE,
+    ALLIANCE_OP_JOIN_SEARCHING,  // sent ALLIANCE_SEARCH, waiting for SRARCHRESULT
+    ALLIANCE_OP_JOIN_APPLYING,   // sent ALLIANCE_APPLY, waiting for its response
+    ALLIANCE_OP_LEAVING          // sent ALLIANCE_QUIT, waiting for its response
+} AllianceOpState;
+
+typedef struct {
+    AllianceOpState state;
+    char tag[4];         // 3-character alliance tag, case-sensitive
+    char requester[13];
+} AllianceOp;
+
 /* Passive war watcher: tracks every player point seen in whatever _MSG_RESP_UPDATE_MAPINFO(_PLUS)
  * the server sends unprompted (no confirmed client request elicits it - see the comment above
  * WarTick in protocol.c), and reports (via Discord webhook) when a point we know sends the
@@ -955,7 +973,8 @@ typedef struct {
 	SmartUseList smart_use;
 	ActivitySettings activity;
 	WarSettings war;
-	
+	AllianceOp alliance_op;
+
 	HelpSpam help_spam;
 	
 	BankSettings bank;

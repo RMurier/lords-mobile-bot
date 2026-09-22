@@ -335,6 +335,20 @@ COMMANDS = [
                  "n'est pas encore décodé : cette commande la montre telle quelle pour pouvoir la décoder.",
                  "Comparez avec le nombre affiché par le jeu pour le même royaume."],
      "example": "migrate cost"},
+    {"group": "Administration", "name": "join", "usage": "join <tag>", "who": "Administrateurs",
+     "summary": "Cherche une guilde par son tag (3 caractères, sensible à la casse) et envoie une candidature.",
+     "details": ["La recherche du jeu n'est pas sensible à la casse et peut trouver plusieurs guildes qui ne "
+                 "diffèrent que par la casse (ex. JFK et JfK) : seule une correspondance exacte sur la casse est "
+                 "utilisée, sinon le bot répond « Guilde introuvable ».",
+                 "Le bot envoie une candidature dans tous les cas : selon les réglages de la guilde visée, elle est "
+                 "acceptée tout de suite ou mise en attente d'un officier. Le bot ne sait pas distinguer les deux : "
+                 "il répond toujours « Candidature envoyée ». Vérifiez dans le jeu si besoin.",
+                 "Une seule opération de guilde à la fois (join ou leave) : une deuxième commande pendant que la "
+                 "première tourne encore est refusée."],
+     "example": "join JfK"},
+    {"group": "Administration", "name": "leave", "usage": "leave", "who": "Administrateurs",
+     "summary": "Quitte la guilde actuelle tout de suite, sans confirmation.",
+     "example": "leave"},
     {"group": "Administration", "name": "su", "usage": "su <pseudo>", "who": "Administrateurs",
      "summary": "Ancienne commande, équivalente à admin add.", "example": "su Bob"},
 ]

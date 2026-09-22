@@ -28,6 +28,8 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$relocate random` | administrators | Moves the castle to a place chosen by the game (uses a random relocator) |
 | `$relocate <x> <y>` | administrators | Moves the castle to these coordinates in the current kingdom (uses an advanced relocator) |
 | `$migrate <kingdom> <x> <y>` | administrators | Migrates the castle to another kingdom at these coordinates |
+| `$join <tag>` | administrators | Searches for an alliance by its 3-character tag (case-sensitive) and applies to join it |
+| `$leave` | administrators | Quits the current alliance |
 | `$su <player>` | administrators | Old command, same as `$admin add` |
 
 ### Examples
@@ -43,6 +45,8 @@ $bank bal
 $relocate random
 $relocate 100 100
 $migrate 796 301 491
+$join JfK          3-character tag, case-sensitive
+$leave
 ```
 
 ## Who can do what
@@ -122,6 +126,21 @@ which is why the name always follows.
 
 Other errors: unknown kingdom, invalid coordinates, already in that kingdom, a migration already running, or a server
 that does not answer.
+
+## Joining and leaving an alliance
+
+`$join <tag>` and `$leave` are for administrators only, one operation at a time (a second command while one is
+still running is refused: *"Une opération de guilde est déjà en cours"*).
+
+- `$join` takes the alliance's **3-character tag, case-sensitive** (not its full name) — the game's own search is
+  case-insensitive and can match several alliances that only differ by case (for example `JFK` and `JfK`), so an
+  exact tag is what picks the right one. Only an exact-case match is used; anything else is reported as
+  *"Guilde "xyz" introuvable."*.
+- The bot applies (`$join` never joins instantly by itself): depending on the target alliance's own settings, that
+  application either joins right away or waits for one of its officers to accept it. **The bot cannot tell which one
+  happened** — both are reported the same way: *"Candidature envoyée à la guilde "xyz"."*. Check in game (or with
+  `$admin list` once a member) if it actually went through.
+- `$leave` quits the current alliance at once, no confirmation asked.
 
 ## The bank
 

@@ -108,6 +108,13 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size);
 void WarTick(Connection *c);
 void NotifyDiscord(Connection *c, const char *message);
 
+void RequestAllianceQuit(Connection *c);
+void RequestAllianceSearchByTag(Connection *c, const char *tag);
+void RequestAllianceApplyById(Connection *c, uint32_t alliance_id);
+void RecvAllianceQuitResp(Connection *c, const uint8_t *data, uint16_t size);
+void RecvAllianceSearchResult(Connection *c, const uint8_t *data, uint16_t size);
+void RecvAllianceApplyResp(Connection *c, const uint8_t *data, uint16_t size);
+
 void RecvBuildingQueue(Connection*, const uint8_t*);
 
 void RecvUpdateWatchTowerAddLineInfo(Connection*, const uint8_t*);

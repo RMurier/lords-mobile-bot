@@ -3263,6 +3263,109 @@ void WarTick(Connection *c) {
 	LOGI("[WAR] %u point(s) connu(s) (reçus passivement, pas de scan actif)\n", c->war.point_count);
 }
 
+/* ------------------------------------------------------------------------
+ * $join <tag> / $leave. Reverse-engineered from a capture of: quitting the
+ * current alliance, searching "jfk" (free text, case-insensitive - matched
+ * both "JFK" and "JfK"), applying to the exact-case "JfK" match (pending
+ * approval), cancelling that, then applying to "s5l" picked from the default
+ * (no-filter) search result (joined instantly). Both outcomes use the same
+ * request; the bot cannot tell them apart and reports both as "sent".
+ *
+ * All three requests are sent encrypted (send_packet(c, true)); EncryptData
+ * only transforms whole 8-byte blocks (src/des.c), so each payload below is
+ * built with its fixed part first so only that part ends up encrypted on the
+ * wire, matching the exact bytes captured. ------------------------------ */
+
+void RequestAllianceQuit(Connection *c) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_ALLIANCE_QUIT); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_u8(c->data + c->size, 1); c->size += 1; // confirm
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/* Free-text search (matches by substring, case-insensitively - the caller still
+ * has to pick the exact-case tag from the result). Captured payload is a fixed
+ * 26 bytes for a 3-character query; kept at that width regardless of query
+ * length, matching what a real client typing a longer name would still pad. */
+void RequestAllianceSearchByTag(Connection *c, const char *tag) {
+	uint8_t len = (uint8_t)strlen(tag);
+	if (len > 18) len = 18; // keeps the packet within the 26-byte width observed
+
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_ALLIANCE_SEARCH); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_u8(c->data + c->size, 0); c->size += 1;
+	write_u8(c->data + c->size, len); c->size += 1;
+	write_raw(c->data + c->size, tag, len); c->size += len;
+
+	int total_query_field = 4 + 1 + 1 + 18; // seq + pad + len + 18-byte text buffer
+	int written = 4 + 1 + 1 + len;
+	if (total_query_field > written) {
+		write_zero(c->data + c->size, (uint32_t)(total_query_field - written));
+		c->size += (uint16_t)(total_query_field - written);
+	}
+
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+void RequestAllianceApplyById(Connection *c, uint32_t alliance_id) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_ALLIANCE_APPLY); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_u8(c->data + c->size, 0); c->size += 1;
+	write_u32(c->data + c->size, alliance_id); c->size += 4;
+	write_zero(c->data + c->size, 2); c->size += 2;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+void RecvAllianceQuitResp(Connection *c, const uint8_t *data, uint16_t size) {
+	if (c->alliance_op.state != ALLIANCE_OP_LEAVING) return;
+
+	uint8_t status = (size >= 1) ? read_u8(data) : 1;
+	if (status == 0) {
+		BotReply(c, c->alliance_op.requester, "Guilde", "Guilde quittée.");
+	} else {
+		BotReply(c, c->alliance_op.requester, "Guilde", "Échec pour quitter la guilde (code %u).", status);
+	}
+	c->alliance_op.state = ALLIANCE_OP_NONE;
+}
+
+/* The id (4 bytes LE) is immediately followed by the 3-byte tag in every entry
+ * seen so far; searching for that exact adjacency sidesteps decoding the rest
+ * of the (only partly understood) per-entry record. */
+void RecvAllianceSearchResult(Connection *c, const uint8_t *data, uint16_t size) {
+	if (c->alliance_op.state != ALLIANCE_OP_JOIN_SEARCHING) return;
+
+	for (uint16_t i = 4; (uint32_t)i + 3 <= size; i++) {
+		if (memcmp(data + i, c->alliance_op.tag, 3) == 0) {
+			uint32_t alliance_id = read_u32(data + i - 4);
+			c->alliance_op.state = ALLIANCE_OP_JOIN_APPLYING;
+			RequestAllianceApplyById(c, alliance_id);
+			return;
+		}
+	}
+
+	BotReply(c, c->alliance_op.requester, "Guilde", "Guilde \"%s\" introuvable.", c->alliance_op.tag);
+	c->alliance_op.state = ALLIANCE_OP_NONE;
+}
+
+void RecvAllianceApplyResp(Connection *c, const uint8_t *data, uint16_t size) {
+	if (c->alliance_op.state != ALLIANCE_OP_JOIN_APPLYING) return;
+
+	uint8_t status = (size >= 1) ? read_u8(data) : 0xff;
+	if (status == 0 || status == 1) {
+		BotReply(c, c->alliance_op.requester, "Guilde", "Candidature envoyée à la guilde \"%s\".", c->alliance_op.tag);
+	} else {
+		BotReply(c, c->alliance_op.requester, "Guilde", "La guilde \"%s\" a refusé la candidature (code %u).",
+			c->alliance_op.tag, status);
+	}
+	c->alliance_op.state = ALLIANCE_OP_NONE;
+}
+
 
 
 // Not fully understand core mechanism yet

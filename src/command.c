@@ -483,6 +483,56 @@ void ReportRelocation(Connection *c, bool ok, uint8_t status)
 	}
 }
 
+/* $join <tag> / $leave. Administrators only, one operation in flight at a time.
+ * Outcome (success or refusal) is always reported back to whoever asked. */
+static void AllianceJoinCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
+{
+	char p = c->bot.command_prefix;
+
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent faire rejoindre une guilde.");
+		return;
+	}
+
+	if (c->alliance_op.state != ALLIANCE_OP_NONE) {
+		BotReply(c, player_name, "Guilde", "Une opération de guilde est déjà en cours, réessayez dans un instant.");
+		return;
+	}
+
+	size_t len = strlen(args);
+	while (len > 0 && args[len - 1] == ' ') len--;
+
+	if (len != 3) {
+		BotReply(c, player_name, "Guilde", "Usage : %cjoin <tag sur 3 caractères, sensible à la casse>", p);
+		return;
+	}
+
+	snprintf(c->alliance_op.tag, sizeof(c->alliance_op.tag), "%.3s", args);
+	snprintf(c->alliance_op.requester, sizeof(c->alliance_op.requester), "%s", player_name);
+	c->alliance_op.state = ALLIANCE_OP_JOIN_SEARCHING;
+
+	RequestAllianceSearchByTag(c, c->alliance_op.tag);
+	BotReply(c, player_name, "Guilde", "Recherche de la guilde \"%s\"...", c->alliance_op.tag);
+}
+
+static void AllianceLeaveCommand(Connection *c, const char *player_name, bool is_admin)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent faire quitter une guilde.");
+		return;
+	}
+
+	if (c->alliance_op.state != ALLIANCE_OP_NONE) {
+		BotReply(c, player_name, "Guilde", "Une opération de guilde est déjà en cours, réessayez dans un instant.");
+		return;
+	}
+
+	snprintf(c->alliance_op.requester, sizeof(c->alliance_op.requester), "%s", player_name);
+	c->alliance_op.state = ALLIANCE_OP_LEAVING;
+
+	RequestAllianceQuit(c);
+}
+
 /* ------------------------------------------------------------------------
  * Commands
  * ------------------------------------------------------------------------ */
@@ -541,6 +591,8 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <joueur>|remove <joueur> - gérer les administrateurs", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate <royaume> <x> <y> - migrer vers un autre royaume", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cjoin <tag> - rejoindre une guilde (tag sur 3 caractères)", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cleave - quitter la guilde actuelle", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%csu <joueur> - équivaut à %cadmin add", p, p);
 	}
 
@@ -616,7 +668,17 @@ void command_handler(Connection *c, const char *player_name, const char *message
 		MigrateCommand(c, player_name, is_admin, args);
 		return;
 	}
-	
+
+	if (IsCommand(message, "join", &args)) {
+		AllianceJoinCommand(c, player_name, is_admin, args);
+		return;
+	}
+
+	if (IsCommand(message, "leave", &args)) {
+		AllianceLeaveCommand(c, player_name, is_admin);
+		return;
+	}
+
 	if (IsCommand(message, "su", &args)) {
 		if (*args == '\0') {
 			BotReply(c, player_name, "Administrateurs", "Usage : %csu <joueur>", c->bot.command_prefix);
