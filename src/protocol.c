@@ -3250,10 +3250,21 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 		}
 	}
 	// If almost nothing lined up on a WAR_RECORD_TAG byte, the 51-byte record shape is
-	// probably wrong for this packet rather than the zone just being empty: dump it raw
-	// so the format can be recalibrated against a real sample instead of guessed again.
-	if (matched == 0)
-		log_hexdump("war map_data (0 record reconnu)", data, size);
+	// probably wrong for this packet rather than the zone just being empty. A hexdump is
+	// hard to eyeball for this (mostly-text) payload, so print it decoded instead: non-
+	// printable bytes become '.', which is enough to spot a player/alliance name and
+	// recalibrate the record's offsets from a real sample instead of guessing again.
+	if (matched == 0) {
+		char text[1025];
+		uint16_t n = size < sizeof(text) - 1 ? size : (uint16_t)(sizeof(text) - 1);
+		for (uint16_t i = 0; i < n; i++) {
+			uint8_t ch = data[i];
+			text[i] = (ch >= 32 && ch < 127) ? (char)ch : '.';
+		}
+		text[n] = '\0';
+		LOGI("[WAR] map data non reconnue (%u octets%s) : %s\n",
+			size, size > n ? ", tronqué" : "", text);
+	}
 }
 
 void WarTick(Connection *c) {
