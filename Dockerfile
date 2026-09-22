@@ -8,7 +8,10 @@ COPY src ./src
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j2
 
 FROM python:3.12-slim
-RUN pip install --no-cache-dir "pymssql>=2.3" \
+# curl: the bot shells out to it to post war alerts to the Discord webhook (src/protocol.c, NotifyDiscord).
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir "pymssql>=2.3" \
  && useradd --uid 10001 --create-home --shell /usr/sbin/nologin lmbot \
  && mkdir -p /var/lib/lmbot && chown lmbot /var/lib/lmbot
 WORKDIR /app

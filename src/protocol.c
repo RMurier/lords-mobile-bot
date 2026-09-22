@@ -3185,14 +3185,16 @@ void NotifyDiscord(Connection *c, const char *message) {
 	char cmd[900];
 #ifdef _WIN32
 	snprintf(cmd, sizeof(cmd),
-		"curl -s -X POST -H \"Content-Type: application/json\" --data @\"%s\" \"%s\" >NUL 2>&1",
+		"curl -s -f -X POST -H \"Content-Type: application/json\" --data @\"%s\" \"%s\" >NUL 2>&1",
 		path, c->war.discord_webhook);
 #else
 	snprintf(cmd, sizeof(cmd),
-		"curl -s -X POST -H 'Content-Type: application/json' --data @%s '%s' >/dev/null 2>&1",
+		"curl -s -f -X POST -H 'Content-Type: application/json' --data @%s '%s' >/dev/null 2>&1",
 		path, c->war.discord_webhook);
 #endif
-	system(cmd);
+	int rc = system(cmd);
+	if (rc != 0)
+		LOGE("[WAR] Échec de l'envoi au webhook Discord (curl absent, réseau bloqué ou webhook invalide ; code %d)\n", rc);
 }
 
 void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
