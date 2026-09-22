@@ -373,8 +373,8 @@ typedef struct {
 typedef struct {
     bool     enabled;
     char     discord_webhook[256];
-    uint16_t scan_cursor;     // next zoneId (0..WAR_ZONE_COUNT-1) to request
-    bool     scan_complete;
+    uint16_t scan_cursor;     // next zoneId (0..WAR_ZONE_COUNT-1) to request; wraps back to 0, the scan never stops
+    bool     first_lap_done;  // true once the kingdom has been swept at least once (logging only)
     time_t   last_request;
     uint16_t point_count;
     WarPoint points[WAR_MAX_POINTS];

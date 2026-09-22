@@ -3097,12 +3097,19 @@ void ActivityTick(Connection *c) {
 }
 
 /* ------------------------------------------------------------------------
- * "War" kingdom scanner: sweeps every zone of the current kingdom once
- * (RequestMapData, 4 zones at a time, paced) to build a roster of every
- * player point (_MSG_RESP_UPDATE_MAPINFO_PLUS, bulk snapshot format), then
- * watches for the compact single-point update captured, in a live test, at
- * the exact moment a shield bubble disappeared on the map for a tracked
- * point, and reports it (name + coordinates) to a Discord webhook.
+ * "War" kingdom scanner: sweeps every zone of the current kingdom on a loop
+ * (RequestMapData, 4 zones at a time, paced), forever, to build and refresh
+ * a roster of every player point (_MSG_RESP_UPDATE_MAPINFO_PLUS, bulk
+ * snapshot format). It also watches for the compact single-point update
+ * captured, in a live test, at the exact moment a shield bubble disappeared
+ * on the map for a tracked point, and reports it (name + coordinates) to a
+ * Discord webhook.
+ *
+ * The loop never stops: it is not confirmed that the point-changed delta
+ * still arrives for a zone the bot is no longer actively requesting (the
+ * one confirmed sample came from a live client with the zone on screen), so
+ * continuously re-requesting every zone is what keeps the roster itself
+ * fresh and is the closest available proxy for "still watching" each zone.
  *
  * Reverse-engineered from packet captures with only one or two confirmed
  * samples each, so both record shapes below may need recalibration once
@@ -3236,7 +3243,7 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 }
 
 void WarTick(Connection *c) {
-	if (!c->war.enabled || c->war.scan_complete)
+	if (!c->war.enabled)
 		return;
 
 	time_t now = time(NULL);
@@ -3255,8 +3262,11 @@ void WarTick(Connection *c) {
 
 	c->war.scan_cursor += 4;
 	if (c->war.scan_cursor >= WAR_ZONE_COUNT) {
-		c->war.scan_complete = true;
-		LOGI("[WAR] Scan du royaume terminé : %u points suivis\n", c->war.point_count);
+		c->war.scan_cursor = 0; // loop forever: re-sweep instead of stopping
+		if (!c->war.first_lap_done) {
+			c->war.first_lap_done = true;
+			LOGI("[WAR] Premier passage du royaume terminé : %u points suivis\n", c->war.point_count);
+		}
 	}
 }
 
