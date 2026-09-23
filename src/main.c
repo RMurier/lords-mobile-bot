@@ -235,11 +235,15 @@ static SessionResult ProcessConnection(Connection *c)
 				case _MSG_RESP_ACTIVE: 
 					c->server_time = read_u64(s->buffer + s->parse_pos + 4);
 					break;
-				case _MSG_RESP_CHATMESSAGE: 
+				case _MSG_RESP_CHATMESSAGE:
 					RecvChatMessage(c, s->buffer + s->parse_pos + 4);
-					
+
+					if (c->chat.message[0] == c->bot.command_prefix) {
+						printf("[%s] [%s]: %s\n", c->chat.channel == 0 ? "WORLD" : "GUILD", c->chat.player_name, c->chat.message);
+					}
+
 					command_handler(c, c->chat.player_name, c->chat.message, c->chat.channel == 0 ? COMMAND_CHANNEL_WORLD : COMMAND_CHANNEL_GUILD);
-					
+
 					if (c->chat.message[0] != c->bot.command_prefix) {
 						printf("[MSG] [%s]: %s\n", c->chat.player_name, c->chat.message);
 					}
