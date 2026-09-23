@@ -1136,9 +1136,6 @@ void RecvChatMessage(Connection *c, const uint8_t *data) {
 	
 	LOGD("b2: %u\n", b2);
 	
-	// channel of this message: 0 = world, 1 = alliance
-	c->chat.channel = b2;
-	
 	if (c->app.version_major != 0) {
 		uint8_t num3 = read_u8(data + offset);
 		offset += 1;
@@ -1162,6 +1159,9 @@ void RecvChatMessage(Connection *c, const uint8_t *data) {
 			int64_t num7 = read_u64(data + offset);
 			offset += 8;
 			
+			// channel of THIS message: 0 = world/kingdom, 1 = alliance. b2 above is a
+			// per-packet wrapper field, always 0 in every capture so far - it is NOT the
+			// channel; alli_or_king is (confirmed: 1 on a message sent in alliance chat).
 			uint8_t alli_or_king = read_u8(data + offset);
 			offset += 1;
 			uint8_t num8 = read_u8(data + offset);
@@ -1214,11 +1214,12 @@ void RecvChatMessage(Connection *c, const uint8_t *data) {
 				 * entries (emoji, position share) after this one, which must not overwrite
 				 * whose message this is. */
 				memcpy(c->chat.player_name, player_name, sizeof(c->chat.player_name));
+				c->chat.channel = alli_or_king;
 				read_bytes(c->chat.message, data + offset, copy);
 				offset += num9;
 				c->chat.message[copy] = '\0';
 
-				if (b2 == 1) // alliance channel: keep it for the web console
+				if (alli_or_king == 1) // alliance channel: keep it for the web console
 					GuildChatLogAppend(c, c->chat.player_name, c->chat.message);
 			}
 		}
@@ -4738,12 +4739,16 @@ void SendResourceMarch(Connection *c) {
 	}
 	
 	uint32_t amount = CalculateTransferAmount(c);
-	
+
+	LOGI("[TRANSFER] Envoi de %u vers zone=%u point=%u (supply_capacity=%u, marches=%u/%u)\n",
+		amount, c->transfer.zone_id, c->transfer.point_id,
+		c->supply_capacity, c->player.current_marches, c->player.max_marches);
+
 	if (amount == 0) {
 		c->transfer.state = TRANSFER_COMPLETE;
 		return;
 	}
-	
+
 	Resources resource = {0};
 	
 	switch (c->transfer.resource_type) {

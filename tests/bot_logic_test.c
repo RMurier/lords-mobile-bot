@@ -340,10 +340,10 @@ int main(void)
 		strcpy(c->mail.sender_name, "canary");
 		c->app.version_major = 0; /* skips the extra byte */
 
-		packet[o++] = 1;                               /* b2: alliance chat */
+		packet[o++] = 0;                               /* b2: always 0 in captures, not the channel */
 		packet[o++] = 1; packet[o++] = 0;              /* one message */
 		o += 24;                                       /* three u64 */
-		packet[o++] = 0; packet[o++] = 0;              /* alli_or_king, num8 = plain text */
+		packet[o++] = 1; packet[o++] = 0;              /* alli_or_king = alliance, num8 = plain text */
 		o += 2;                                        /* pic id */
 		memcpy(packet + o, "eve", 4); o += 13;         /* name */
 		o += 1 + 3 + 1 + 1 + 1;                        /* vip, title, block id, title id, arabic */
