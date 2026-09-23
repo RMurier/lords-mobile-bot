@@ -4785,6 +4785,22 @@ void SendResourceMarch(Connection *c) {
 		c->supply_capacity, c->player.current_marches, c->player.max_marches);
 
 	if (amount == 0) {
+		/* Available resources dropped below what's needed to continue (spent elsewhere,
+		 * production, ...): never complete a short delivery in silence. */
+		uint32_t sent = c->transfer.amount - c->transfer.remaining;
+
+		if (sent == 0) {
+			BotReply(c, c->transfer.target_name, "Livraison impossible",
+				"Ressources insuffisantes pour commencer la livraison.");
+		} else {
+			char sent_str[20], total_str[20];
+			format_number2(sent, sent_str, sizeof(sent_str));
+			format_number2(c->transfer.amount, total_str, sizeof(total_str));
+			BotReply(c, c->transfer.target_name, "Livraison incomplète",
+				"%s envoyé sur %s demandé : ressources insuffisantes pour continuer.",
+				sent_str, total_str);
+		}
+
 		c->transfer.state = TRANSFER_COMPLETE;
 		return;
 	}

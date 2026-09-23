@@ -780,6 +780,15 @@ static void ResourceCommandHandler(
 	if (!BankAllows(c, player_name, type))
 		return;
 
+	/* c->resources is zeroed by the reconnect memset until the server sends fresh values
+	 * (resource_loaded). Without this, a command arriving right after a reconnect sees 0
+	 * and wrongly refuses as "not enough", however large the real balance actually is. */
+	if (!c->resource_loaded) {
+		BotReply(c, player_name, "Indisponible",
+			"Le solde n'est pas encore reçu du serveur (reconnexion en cours ?). Réessayez dans un instant.");
+		return;
+	}
+
 	/* ResourceTransferTick() waits forever for supply_capacity > 0 with no
 	 * timeout - refuse up front instead of silently swallowing the command
 	 * (no Trading Post, or its level hasn't been received from the server yet). */
