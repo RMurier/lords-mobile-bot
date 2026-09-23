@@ -2423,6 +2423,11 @@ void RecvAllyPoint(Connection *c, const uint8_t *data)
 
 				RequestMapAdvance(c, zone_id, point_id); // see RequestMapAdvance()'s comment
 
+				/* A human takes a few seconds between finding the target and confirming a
+				 * send (typing the amount, tapping confirm) - the bot was doing it inside the
+				 * same tick. Code 14 persisted even with byte-identical packets to a target
+				 * that succeeds for a real client, so this is now the next experiment. */
+				c->transfer.not_before = time(NULL) + 3 + (rand() % 3);
 				c->transfer.state = TRANSFER_SEND_MARCH;
 			}
 
