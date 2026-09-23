@@ -180,6 +180,21 @@ typedef struct {
     bool pending;
 } ChatState;
 
+/* Recent alliance chat, kept for the web console (status.json -> "guild_chat"); a ring
+ * buffer so a very chatty guild only ever costs a fixed, small amount of memory. */
+#define GUILD_CHAT_LOG_SIZE 20
+typedef struct {
+    time_t time;
+    char   player_name[13];
+    char   message[241]; // web console chat lines are capped at 240 characters
+} GuildChatEntry;
+
+typedef struct {
+    GuildChatEntry entries[GUILD_CHAT_LOG_SIZE];
+    uint32_t next;  // ring buffer write cursor
+    uint32_t count; // valid entries, caps at GUILD_CHAT_LOG_SIZE
+} GuildChatLog;
+
 /*
 typedef enum {
     TRANSFER_IDLE,
@@ -313,11 +328,13 @@ typedef struct {
 
 
 typedef enum {
-    GIFT_STATE_IDLE,      // No gift data loaded yet.
-    GIFT_STATE_LOADING,   // Waiting for RequestAllianceGiftInfo() response.
-    GIFT_STATE_READY,     // Ready to process gifts.
-    GIFT_STATE_OPENING,   // Waiting for open gift response.
-    GIFT_STATE_DELETING   // Waiting for delete gift response.
+    GIFT_STATE_IDLE,          // No gift data loaded yet.
+    GIFT_STATE_LOADING,       // Waiting for RequestAllianceGiftInfo() response.
+    GIFT_STATE_READY,         // Ready to process gifts.
+    GIFT_STATE_OPENING,       // Waiting for open gift response.
+    GIFT_STATE_DELETING,      // Waiting for delete gift response.
+    GIFT_STATE_BULK_OPENING,  // VIP 12+: waiting for RequestOpenAllAllianceGiftBox()'s response.
+    GIFT_STATE_BULK_CHECKING  // VIP 12+: waiting for RequestAllianceGiftCheckExpired()'s response.
 } GiftState;
 
 typedef struct {
@@ -325,10 +342,11 @@ typedef struct {
     bool auto_open_gifts;
     uint16_t gift_count;
     uint16_t gift_offset;
-    
+
     uint16_t unopened_gift_count;
-    
+
     GiftState gift_state;
+    uint8_t bulk_check_kind; // GIFT_STATE_BULK_CHECKING: which "kind" argument is in flight (2, then 1)
     uint16_t recv_index;
     AllianceGift gifts[300];
 } AllianceSettings;
@@ -977,6 +995,7 @@ typedef struct {
 	ActivitySettings activity;
 	WarSettings war;
 	AllianceOp alliance_op;
+	GuildChatLog guild_chat_log;
 
 	HelpSpam help_spam;
 	

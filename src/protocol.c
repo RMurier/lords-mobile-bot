@@ -6,6 +6,7 @@
 #include "items.h"
 #include "log.h"
 #include <stdlib.h>
+#include <time.h>
 
 #include <stdarg.h>
 
@@ -785,8 +786,75 @@ void RequestDeleteAllianceGiftBox(Connection *c, uint32_t sn) {
 	
 	// Update packet size
 	write_u16(c->data, c->size);
-	
+
 	send_packet(c, true);
+}
+
+/* ------------------------------------------------------------------------
+ * VIP 12+ bulk gift actions: "open all" then "clear expired", instead of one
+ * RequestOpenAllianceGift()/RequestDeleteAllianceGiftBox() per box. Reverse-
+ * engineered from a capture of pressing it in game:
+ *   -> _MSG_REQUEST_ALLIANCE_GIFT_OPENALLBOX  seq(4)
+ *   <- _MSG_RESP_ALLIANCE_GIFT_OPENALLBOX     count(2) - boxes opened
+ *   -> _MSG_REQUEST_ALLIANCE_GIFT_CHECKEXPIRED  seq(4) 0xFFFFFFFF(4, "all") kind(1)=2
+ *   <- _MSG_RESP_ALLIANCE_GIFT_CHECKEXPIRED     state(1) ?(2) count(1) ?(1) sn(4)*count
+ *   -> _MSG_REQUEST_ALLIANCE_GIFT_CHECKEXPIRED  same, kind=1
+ *   <- _MSG_RESP_ALLIANCE_GIFT_CHECKEXPIRED     same shape
+ * kind 2 and kind 1 were the only two ever seen (in that order) and together listed
+ * every expired box exactly once; what distinguishes them (box category?) is not known.
+ * No separate delete request appeared anywhere near this sequence, so CHECKEXPIRED is
+ * assumed to also remove the expired boxes server-side, not just report them - this is
+ * the only thing in the capture "supprime" could refer to. Not confirmed against an
+ * in-game "boxes remaining" count. */
+
+void RequestOpenAllAllianceGiftBox(Connection *c) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_ALLIANCE_GIFT_OPENALLBOX); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+void RequestAllianceGiftCheckExpired(Connection *c, uint8_t kind) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_ALLIANCE_GIFT_CHECKEXPIRED); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_u32(c->data + c->size, 0xFFFFFFFF); c->size += 4; // target: every box
+	write_u8(c->data + c->size, kind); c->size += 1;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+void RecvAllianceGiftOpenAll(Connection *c, const uint8_t *data, uint16_t size) {
+	if (c->alliance.gift_state != GIFT_STATE_BULK_OPENING) return;
+
+	uint16_t opened = (size >= 2) ? read_u16(data) : 0;
+	LOGI("[GIFT] Ouverture groupée : %u cadeau(x) ouvert(s)\n", opened);
+
+	c->alliance.bulk_check_kind = 2;
+	RequestAllianceGiftCheckExpired(c, c->alliance.bulk_check_kind);
+	c->alliance.gift_state = GIFT_STATE_BULK_CHECKING;
+}
+
+void RecvAllianceGiftCheckExpired(Connection *c, const uint8_t *data, uint16_t size) {
+	if (c->alliance.gift_state != GIFT_STATE_BULK_CHECKING) return;
+
+	uint8_t count = (size >= 4) ? read_u8(data + 3) : 0;
+	uint16_t offset = 5;
+
+	for (uint8_t i = 0; i < count && (uint32_t)offset + 4 <= size; i++) {
+		LOGD("[GIFT] Cadeau expiré supprimé : SN %u\n", read_u32(data + offset));
+		offset += 4;
+	}
+	LOGI("[GIFT] Nettoyage (genre %u) : %u cadeau(x) expiré(s)\n", c->alliance.bulk_check_kind, count);
+
+	if (c->alliance.bulk_check_kind == 2) {
+		c->alliance.bulk_check_kind = 1;
+		RequestAllianceGiftCheckExpired(c, c->alliance.bulk_check_kind);
+		return;
+	}
+
+	c->alliance.gift_state = GIFT_STATE_READY;
 }
 
 /*
@@ -1036,6 +1104,19 @@ void HandleLoginValidate(Connection *c, const uint8_t *data, uint16_t size)
 }
 
 
+/* Appends to the ring buffer the web console reads (via status.json's "guild_chat"). */
+static void GuildChatLogAppend(Connection *c, const char *player_name, const char *message) {
+	GuildChatLog *log = &c->guild_chat_log;
+	GuildChatEntry *entry = &log->entries[log->next];
+
+	entry->time = time(NULL);
+	snprintf(entry->player_name, sizeof(entry->player_name), "%s", player_name);
+	snprintf(entry->message, sizeof(entry->message), "%s", message);
+
+	log->next = (log->next + 1) % GUILD_CHAT_LOG_SIZE;
+	if (log->count < GUILD_CHAT_LOG_SIZE) log->count++;
+}
+
 void RecvChatMessage(Connection *c, const uint8_t *data) {
 	char player_name[13] = {0};
 	char title_name[3] = {0};
@@ -1136,6 +1217,9 @@ void RecvChatMessage(Connection *c, const uint8_t *data) {
 				read_bytes(c->chat.message, data + offset, copy);
 				offset += num9;
 				c->chat.message[copy] = '\0';
+
+				if (b2 == 1) // alliance channel: keep it for the web console
+					GuildChatLogAppend(c, c->chat.player_name, c->chat.message);
 			}
 		}
 	}
@@ -2138,8 +2222,28 @@ static const uint32_t trading_post_supply_capacity[] = {
 
 uint32_t GetTradingPostSupplyCapacity(uint8_t level) {
 	if (level > 25) return 0;
-	
+
 	return trading_post_supply_capacity[level];
+}
+
+uint8_t GetVIPLevel(uint32_t vipPoints)
+{
+	if (vipPoints >= 1500000) return 15;
+	if (vipPoints >= 730000)  return 14;
+	if (vipPoints >= 350000)  return 13;
+	if (vipPoints >= 175000)  return 12;
+	if (vipPoints >= 90000)   return 11;
+	if (vipPoints >= 50000)   return 10;
+	if (vipPoints >= 20000)   return 9;
+	if (vipPoints >= 8000)	return 8;
+	if (vipPoints >= 4000)	return 7;
+	if (vipPoints >= 1600)	return 6;
+	if (vipPoints >= 800)	 return 5;
+	if (vipPoints >= 400)	 return 4;
+	if (vipPoints >= 300)	 return 3;
+	if (vipPoints >= 100)	 return 2;
+
+	return 1;
 }
 
 void RecvAllBuildData(Connection *c, const uint8_t *data)
@@ -2300,15 +2404,19 @@ void RecvAllyPoint(Connection *c, const uint8_t *data)
 			break;
 		case 1:
 			printf("Target is in another kingdom\n");
-			
+
 			if (c->transfer.state == TRANSFER_WAIT_TARGET) {
+				BotReply(c, c->transfer.target_name, "Livraison impossible",
+					"Vous êtes dans un autre royaume, livraison annulée.");
 				c->transfer.state = TRANSFER_FAILED;
 			}
-			
+
 			break;
 		default:
 			printf("AllyPoint failed: %u\n", status);
 			if (c->transfer.state == TRANSFER_WAIT_TARGET) {
+				BotReply(c, c->transfer.target_name, "Livraison impossible",
+					"Vous n'avez pas été retrouvé dans le jeu (code %u), livraison annulée.", status);
 				c->transfer.state = TRANSFER_FAILED;
 			}
 			break;
@@ -2974,7 +3082,17 @@ void AllianceGiftTick(Connection *c) {
 	
 	if (c->alliance.gift_state != GIFT_STATE_READY)
 		return;
-	
+
+	// VIP 12+: one bulk "open all + clear expired" round trip instead of one request per box.
+	if (GetVIPLevel(c->player.vip_point) >= 12) {
+		if (c->alliance.unopened_gift_count == 0)
+			return;
+
+		RequestOpenAllAllianceGiftBox(c);
+		c->alliance.gift_state = GIFT_STATE_BULK_OPENING;
+		return;
+	}
+
 	for (int i = c->alliance.gift_offset; i < c->alliance.gift_count; i++) {
 		AllianceGift *gift = &c->alliance.gifts[i];
 		
@@ -4646,10 +4764,14 @@ void SendResourceMarch(Connection *c) {
 	} 
 	
 	SendResource(c, resource, c->transfer.zone_id, c->transfer.point_id);
-	
+
 	c->transfer.remaining -= amount;
 	c->transfer.state = TRANSFER_WAIT_MARCH;
-	
+
+	/* human pacing: whenever transfer.state next reaches TRANSFER_SEND_MARCH (this batch's
+	 * march accepted, or one comes home freeing a slot), wait this long before the next one. */
+	c->transfer.not_before = time(NULL) + 1 + (rand() % 2);
+
 	return;
 }
 
@@ -4672,13 +4794,18 @@ void ResourceTransferTick(Connection *c)
 			c->transfer.state = TRANSFER_WAIT_TARGET;
 			// printf("TRANSFER_FIND_TARGET\n");
 			break;
-		case TRANSFER_WAIT_TARGET: 
+		case TRANSFER_WAIT_TARGET:
 			if (time(NULL) >= c->transfer.timeout) {
-				// printf("[TRANSFER] Target lookup timed out.\n");
+				BotReply(c, c->transfer.target_name, "Livraison impossible",
+					"Vous n'avez pas été retrouvé dans le jeu (délai dépassé), livraison annulée.");
 				c->transfer.state = TRANSFER_FAILED;
 			}
 			break;
 		case TRANSFER_SEND_MARCH:
+			/* human pacing between batches: not_before is set by RecvSHelp() after the first */
+			if (time(NULL) < c->transfer.not_before)
+				break;
+
 			SendResourceMarch(c);
 			// printf("TRANSFER_SEND_MARCH\n");
 			break;
@@ -4702,21 +4829,25 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 	
 	uint8_t b = read_u8(data + offset); offset += 1;
 	
-	// b == 1 means max march reached 
+	// b == 1 means max march reached
 	if (b != 0) {
+		BotReply(c, c->transfer.target_name, "Livraison impossible",
+			"Nombre maximum de marches atteint, livraison annulée (code %u).", b);
 		c->transfer.state = TRANSFER_FAILED;
 		return;
 	}
-	
+
 	// marches counts
 	uint8_t b2 = read_u8(data + offset); offset += 1;
-	
+
 	if (b2 >= 8)
 	{
+		BotReply(c, c->transfer.target_name, "Livraison impossible",
+			"Nombre maximum de marches atteint, livraison annulée.");
 		c->transfer.state = TRANSFER_FAILED;
 		return;
 	}
-	
+
 	uint16_t zoneID      = read_u16(data + offset); offset += 2;
 	uint8_t pointID      = read_u8(data + offset);  offset += 1;
 	uint64_t BeginTime   = read_u64(data + offset); offset += 8;
@@ -4750,13 +4881,15 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 void RecvHelp_Home(Connection *c, const uint8_t *data) {
 	uint16_t offset = 0;
 	
-	uint8_t b = read_u8(data + offset); offset += 1;	
-	
+	uint8_t b = read_u8(data + offset); offset += 1;
+
 	if (b >= 8) {
+		BotReply(c, c->transfer.target_name, "Livraison impossible",
+			"La marche a échoué au retour (code %u), livraison annulée.", b);
 		c->transfer.state = TRANSFER_FAILED;
 		return;
 	}
-	
+
 	if (b < 8) {
 		c->resources.food  = read_u32(data + offset); offset += 4;
 		c->resources.rock  = read_u32(data + offset); offset += 4;

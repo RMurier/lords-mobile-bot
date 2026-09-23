@@ -45,6 +45,13 @@ void RequestOpenAllianceGift(Connection*, uint32_t);
 
 void RequestDeleteAllianceGiftBox(Connection*, uint32_t);
 
+/* VIP 12+ bulk gift actions: open every ready box, then clear every expired one, in two clicks
+ * instead of one per box. See the comment above RequestOpenAllAllianceGiftBox() in protocol.c. */
+void RequestOpenAllAllianceGiftBox(Connection *c);
+void RequestAllianceGiftCheckExpired(Connection *c, uint8_t kind);
+void RecvAllianceGiftOpenAll(Connection *c, const uint8_t *data, uint16_t size);
+void RecvAllianceGiftCheckExpired(Connection *c, const uint8_t *data, uint16_t size);
+
 void ServerRename(Connection *c, bool bought, uint16_t num, const char *name);
 void RequestBuyItem(Connection *c, uint8_t Type, uint16_t Key, uint16_t ItemID, uint16_t Qty);
 void RequestBuyGiftItem(Connection *c, uint8_t Type, uint16_t Key, uint16_t ItemID, uint16_t Qty, const char Name[13]);
@@ -96,6 +103,7 @@ void HeartbeatTick(Connection *c);
 void BlackMarketTick(Connection *c);
 void ShieldTick(Connection *c);
 void AllianceGiftTick(Connection*);
+uint8_t GetVIPLevel(uint32_t vipPoints);
 void RecvAllianceInfo(Connection*, const uint8_t*);
 
 void RequestTreasureGetDoubleTicket(Connection *c);

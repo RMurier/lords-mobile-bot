@@ -95,6 +95,7 @@ static Connection *fresh(const char *admins)
 	c->resources.gold = 100000000;
 	c->resources.food = 100000000;
 	c->supply_capacity = 100000000; // Trading Post loaded: bank tests are not about its capacity
+	c->player.max_marches = 6; // marches loaded: bank tests are not about march availability
 	reset_sent();
 	return c;
 }

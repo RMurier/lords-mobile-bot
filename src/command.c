@@ -208,6 +208,50 @@ void AdminLoadRuntime(Connection *c)
 	fclose(fp);
 }
 
+/* ------------------------------------------------------------------------
+ * Guild chat outbox: the web console writes a message to <data.path>/chat_outbox.txt,
+ * this polls for it and forwards it to the alliance channel. One pending message at a
+ * time (the console only ever writes one), consumed and deleted once sent.
+ * ------------------------------------------------------------------------ */
+
+static bool ChatOutboxPath(const Connection *c, char *out, size_t size)
+{
+	size_t length = strlen(c->bot.data_path);
+
+	if (length == 0)
+		return false;
+
+	char last = c->bot.data_path[length - 1];
+	int written = snprintf(out, size, "%s%schat_outbox.txt", c->bot.data_path, (last == '/' || last == '\\') ? "" : "/");
+
+	return written > 0 && (size_t)written < size;
+}
+
+void ChatOutboxTick(Connection *c)
+{
+	char path[400];
+	char message[241] = {0};
+
+	if (!ChatOutboxPath(c, path, sizeof(path)))
+		return;
+
+	FILE *fp = fopen(path, "r");
+	if (!fp)
+		return; // nothing pending: the common case, checked every tick
+
+	size_t read = fread(message, 1, sizeof(message) - 1, fp);
+	message[read] = '\0';
+	fclose(fp);
+	remove(path); // consumed whether or not it turns out empty
+
+	message[strcspn(message, "\r\n")] = '\0'; // a single line
+
+	if (message[0] == '\0')
+		return;
+
+	RequestSendChat(c, 1 /* alliance */, message);
+}
+
 /* True when `text` starts with `word` followed by the end of the string or a space. args = the rest. */
 static bool StartsWithWord(const char *text, const char *word, const char **args)
 {
@@ -741,6 +785,14 @@ static void ResourceCommandHandler(
 	if (c->supply_capacity == 0) {
 		BotReply(c, player_name, "Indisponible",
 			"Le Poste de Commerce n'a pas de capacité de livraison disponible (bâtiment absent, niveau trop bas, ou pas encore chargé). Réessayez plus tard.");
+		return;
+	}
+
+	/* max_marches is 0 on a real account only before the server has sent it (SendResourceMarch()
+	 * would then read 0 >= 0 as "all marches busy" and retry forever, silently, with no report). */
+	if (c->player.max_marches == 0) {
+		BotReply(c, player_name, "Indisponible",
+			"Nombre de marches disponibles pas encore reçu du serveur. Réessayez plus tard.");
 		return;
 	}
 

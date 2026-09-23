@@ -759,6 +759,23 @@ def api_account_game(h, query, account_id):
             "age": max(0, int(age)), "data": data}
 
 
+@route("POST", "/api/accounts/([^/]+)/chat/send")
+def api_account_chat_send(h, query, account_id):
+    """Queues a guild chat message: dropped where the bot polls for it (like admins.txt, the folder
+    it actually reads from at runtime is the same for both stores - see SqlStore.prepare_start)."""
+    account_path(account_id)
+    if bots.status(account_id)["state"] != "running":
+        raise ApiError(409, "Le bot n'est pas démarré.")
+    message = str(h.read_json().get("message") or "").strip()
+    if not message:
+        raise ApiError(400, "Message vide.")
+    message = message.splitlines()[0][:240]
+    folder = ROOT / "data" / account_id
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "chat_outbox.txt").write_text(message, encoding="utf-8")
+    return {"ok": True}
+
+
 @route("POST", "/api/import")
 def api_import(h, query):
     length = int(h.headers.get("Content-Length") or 0)

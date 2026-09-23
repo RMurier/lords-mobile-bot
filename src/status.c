@@ -98,7 +98,25 @@ void StatusWrite(Connection *c, bool connected)
 	fprintf(f, "\"wounded\":{\"loaded\":%s,\"total\":%u},",
 		c->wounded.loaded ? "true" : "false", c->wounded.troop.total);
 
-	fprintf(f, "\"alliance\":{\"rank\":%d,\"members\":%u}}\n", (int)c->RoleAlliance.Rank, c->alliance_member.count);
+	fprintf(f, "\"alliance\":{\"rank\":%d,\"members\":%u},", (int)c->RoleAlliance.Rank, c->alliance_member.count);
+
+	fputs("\"guild_chat\":[", f);
+	{
+		const GuildChatLog *log = &c->guild_chat_log;
+		uint32_t start = (log->count < GUILD_CHAT_LOG_SIZE) ? 0 : log->next;
+
+		for (uint32_t i = 0; i < log->count; i++) {
+			const GuildChatEntry *e = &log->entries[(start + i) % GUILD_CHAT_LOG_SIZE];
+
+			if (i) fputc(',', f);
+			fprintf(f, "{\"time\":%lld,\"player\":", (long long)e->time);
+			JsonString(f, e->player_name);
+			fputs(",\"message\":", f);
+			JsonString(f, e->message);
+			fputc('}', f);
+		}
+	}
+	fputs("]}\n", f);
 
 	fclose(f);
 #ifdef _WIN32

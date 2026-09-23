@@ -15,4 +15,7 @@ bool AdminSaveRuntime(const Connection *c);
 void MakeDirectories(const char *path);
 void AdminLoadRuntime(Connection *c);
 
+/* Web console -> guild chat: polls <data.path>/chat_outbox.txt and forwards it. */
+void ChatOutboxTick(Connection *c);
+
 #endif

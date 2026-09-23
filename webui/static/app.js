@@ -201,7 +201,7 @@
       main.innerHTML = accountView();
       applyDerived();
       if (S.tab === "logs") startLogs();
-      if (S.tab === "status") startGame();
+      if (S.tab === "status" || S.tab === "chat") startGame();
     } else if (S.view === "add") {
       main.innerHTML = addView();
       S.capTimer = setInterval(() => {
@@ -249,6 +249,7 @@
     const tabs = everyday.map((c) => `<button class="tab" role="tab" data-act="tab" data-tab="${c.id}" aria-selected="${S.tab === c.id}">${esc(c.label)}${badgeFor([c])}</button>`).join("");
     const technicalTab = `<button class="tab tab-technical" role="tab" data-act="tab" data-tab="technical" aria-selected="${S.tab === "technical"}" title="Identifiants, serveur, version : rarement utile">⚙ Technique${badgeFor(technical)}</button>`;
     const statusTab = `<button class="tab" role="tab" data-act="tab" data-tab="status" aria-selected="${S.tab === "status"}">Statut</button>`;
+    const chatTab = `<button class="tab" role="tab" data-act="tab" data-tab="chat" aria-selected="${S.tab === "chat"}">Chat de guilde</button>`;
     const logsTab = `<button class="tab" role="tab" data-act="tab" data-tab="logs" aria-selected="${S.tab === "logs"}">Journal</button>`;
     const category = S.schema.categories.find((c) => c.id === S.tab);
     return `
@@ -260,9 +261,9 @@
         <div class="actions" id="ctrl"><span id="ctrl-chip">${slot("ctrl-chip", chipHtml())}</span><span id="ctrl-btns">${slot("ctrl-btns", btnsHtml())}</span></div>
       </div>
       <div id="notes">${slot("notes", notesHtml())}</div>
-      <div class="tabs" role="tablist">${statusTab}${tabs}${logsTab}${technicalTab}</div>
+      <div class="tabs" role="tablist">${statusTab}${chatTab}${tabs}${logsTab}${technicalTab}</div>
       ${S.tab === "logs" ? logsView() : S.tab === "status" ? `<div id="game">${gameHtml(S.game)}</div>`
-        : S.tab === "technical" ? technicalView(technical) : categoryView(category)}`;
+        : S.tab === "chat" ? chatView() : S.tab === "technical" ? technicalView(technical) : categoryView(category)}`;
   }
 
   function chipHtml() {
@@ -815,20 +816,68 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
 
   async function pollGame() {
     clearTimeout(S.gameTimer);
-    if (S.view !== "account" || S.tab !== "status" || !S.acc) return;
+    if (S.view !== "account" || (S.tab !== "status" && S.tab !== "chat") || !S.acc) return;
     const id = S.id;
     try {
       const game = await api("GET", `/api/accounts/${enc(id)}/game`);
-      if (id === S.id && S.tab === "status" && S.view === "account") {
+      if (id === S.id && S.view === "account" && (S.tab === "status" || S.tab === "chat")) {
         game.fetched = Date.now();
         S.game = game;
         const box = $("#game");
         if (box) box.innerHTML = gameHtml(game);
+        // the message list only: the input/form must survive the poll untouched (focus, draft text)
+        const log = $("#chat-log");
+        if (log) { const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
+          log.innerHTML = chatLogHtml(game); if (stick) log.scrollTop = log.scrollHeight; }
       }
     } catch (error) {
       if (error.status === 401) return authProblem();
     }
     S.gameTimer = setTimeout(pollGame, 4000);
+  }
+
+  // ------------------------------------------------------------ guild chat
+
+  function chatLogHtml(game) {
+    if (!game) return `<p class="help">Chargement…</p>`;
+    if (!game.available) {
+      return `<p class="help">${game.running ? "Le bot démarre : le chat arrive dès qu'il est en jeu."
+        : "Démarrez le bot pour voir le chat de guilde."}</p>`;
+    }
+    const msgs = game.data.guild_chat;
+    if (!msgs || !msgs.length) return `<p class="help">Aucun message récent.</p>`;
+    return msgs.map((m) => {
+      const time = new Date(m.time * 1000).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+      return `<div class="chat-line"><span class="chat-time">${time}</span>
+        <span class="chat-player">${esc(m.player)}</span><span class="chat-text">${esc(m.message)}</span></div>`;
+    }).join("");
+  }
+
+  function chatView() {
+    return `<div class="card chat-card">
+      <div class="chat-log" id="chat-log">${chatLogHtml(S.game)}</div>
+      <div class="inline chat-form">
+        <input type="text" id="chat-input" maxlength="240" placeholder="Écrire dans le chat de guilde…" autocomplete="off">
+        <button class="btn primary" data-act="chat-send">Envoyer</button>
+      </div>
+    </div>`;
+  }
+
+  async function chatSend() {
+    const input = $("#chat-input");
+    if (!input) return;
+    const message = input.value.trim();
+    if (!message) return;
+    input.disabled = true;
+    try {
+      await api("POST", `/api/accounts/${enc(S.id)}/chat/send`, { message });
+      input.value = "";
+    } catch (error) {
+      toast(error.message, "err");
+    } finally {
+      input.disabled = false;
+      input.focus();
+    }
   }
 
   // --------------------------------------------------------------- actions
@@ -1085,6 +1134,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     "capture-start": () => captureStart(),
     "capture-stop": () => captureStop(),
     "capture-cancel": () => captureCancel(),
+    "chat-send": () => chatSend(),
     "delete-account": async () => {
       if (!confirm(`Supprimer définitivement le compte « ${S.id} » et ses identifiants ?`)) return;
       const ticket = ++S.nav;   // we are leaving this account: anything slower than the user must not navigate for them
@@ -1338,6 +1388,10 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       if (event.target && event.target.id === "rename-input") {
         if (event.key === "Enter") { event.preventDefault(); saveRename(); }
         if (event.key === "Escape") { event.preventDefault(); cancelRename(); }
+      }
+      if (event.target && event.target.id === "chat-input" && event.key === "Enter") {
+        event.preventDefault();
+        chatSend();
       }
     });
     window.addEventListener("beforeunload", (event) => { if (dirtyKeys().length) { event.preventDefault(); event.returnValue = ""; } });

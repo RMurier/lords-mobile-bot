@@ -86,28 +86,9 @@ void BotTick(Connection *c)
 
 	AllianceOpTick(c);
 
-}
+	ChatOutboxTick(c);
 
-uint8_t GetVIPLevel(uint32_t vipPoints)
-{
-	if (vipPoints >= 1500000) return 15;
-	if (vipPoints >= 730000)  return 14;
-	if (vipPoints >= 350000)  return 13;
-	if (vipPoints >= 175000)  return 12;
-	if (vipPoints >= 90000)   return 11;
-	if (vipPoints >= 50000)   return 10;
-	if (vipPoints >= 20000)   return 9;
-	if (vipPoints >= 8000)	return 8;
-	if (vipPoints >= 4000)	return 7;
-	if (vipPoints >= 1600)	return 6;
-	if (vipPoints >= 800)	 return 5;
-	if (vipPoints >= 400)	 return 4;
-	if (vipPoints >= 300)	 return 3;
-	if (vipPoints >= 100)	 return 2;
-	
-	return 1;
 }
-
 
 void logger(Connection *c) {
 	
@@ -371,8 +352,14 @@ static SessionResult ProcessConnection(Connection *c)
 					RecvUseItem(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					// dump_data("_MSG_RESP_USEITEM", "", s->buffer + s->parse_pos, s->packet_size);
 					break;
-				case 0x0B31: 
+				case 0x0B31:
 					RecvAllianceGiftOpen(c, s->buffer + s->parse_pos + 4);
+					break;
+				case _MSG_RESP_ALLIANCE_GIFT_OPENALLBOX:
+					RecvAllianceGiftOpenAll(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_ALLIANCE_GIFT_CHECKEXPIRED:
+					RecvAllianceGiftCheckExpired(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_BUYITEM: 
 					RecvBuyItem(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);

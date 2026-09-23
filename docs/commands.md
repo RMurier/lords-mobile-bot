@@ -162,6 +162,14 @@ A resource command sends resources to the player who wrote it, subject to:
 - **Trading Post**: delivery is limited by the Trading Post's supply capacity. Without one built
   (or if its level hasn't been received from the server yet, right after connecting), a resource
   command is refused with *"Le Poste de Commerce n'a pas de capacité de livraison disponible..."*.
+- **Marches**: if the number of available marches hasn't been received from the server yet (same
+  timing issue, right after connecting), the command is refused with *"Nombre de marches disponibles
+  pas encore reçu du serveur..."*. If every march is genuinely busy, the delivery just waits for one
+  to free up; if the target can't be found, a march is refused by the server, or a march that already
+  left never comes back, the requester is told and the delivery is cancelled instead of stalling
+  silently.
+- **Pacing**: when an amount needs several marches, the bot waits 1-2 seconds (random) between each
+  one instead of sending them back to back.
 
 `$stop` cancels the transfer, but marches that have already left still arrive.
 
