@@ -158,6 +158,9 @@ A resource command sends resources to the player who wrote it, subject to:
   answer says how much is available.
 - **One transfer at a time**: while one is in progress, another player receives an "Occupé"
   answer. The requester can write a new command to replace theirs, or `$stop` to cancel.
+- **Trading Post**: delivery is limited by the Trading Post's supply capacity. Without one built
+  (or if its level hasn't been received from the server yet, right after connecting), a resource
+  command is refused with *"Le Poste de Commerce n'a pas de capacité de livraison disponible..."*.
 
 `$stop` cancels the transfer, but marches that have already left still arrive.
 

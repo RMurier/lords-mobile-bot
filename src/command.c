@@ -734,7 +734,16 @@ static void ResourceCommandHandler(
 	
 	if (!BankAllows(c, player_name, type))
 		return;
-	
+
+	/* ResourceTransferTick() waits forever for supply_capacity > 0 with no
+	 * timeout - refuse up front instead of silently swallowing the command
+	 * (no Trading Post, or its level hasn't been received from the server yet). */
+	if (c->supply_capacity == 0) {
+		BotReply(c, player_name, "Indisponible",
+			"Le Poste de Commerce n'a pas de capacité de livraison disponible (bâtiment absent, niveau trop bas, ou pas encore chargé). Réessayez plus tard.");
+		return;
+	}
+
 	if (c->transfer.state != TRANSFER_IDLE) {
 		// Same player -> replace current pending request 
 		if (strcmp(c->transfer.target_name, player_name) == 0) {
