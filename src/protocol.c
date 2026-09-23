@@ -352,14 +352,34 @@ void RequestMissionInfo(Connection *c, uint8_t missionType) {
 	return;
 }
 
-void RequestAllyPoint(Connection *c, const char *name) 
+void RequestAllyPoint(Connection *c, const char *name)
 {
 	c->size = 2;
-	
+
 	write_u16(c->data + c->size, _MSG_REQUEST_ALLYPOINT);   c->size += 2;
 	write_u32(c->data + c->size, ++c->protocol.seq_id);     c->size += 4;
 	write_raw(c->data + c->size, name, 13);                 c->size += 13;
-	
+
+	write_u16(c->data, c->size); // update packet size
+	send_packet(c, true);
+}
+
+/* The official client sends this constantly, always for wherever its camera/viewport is
+ * currently looking (its own castle screen while composing a resource send, going by every
+ * capture so far). Every resource march that has ever succeeded in a capture targeted a point
+ * the client had just "advanced" to this way; every one that failed (code 14, ally 2 tiles
+ * away, plenty of marches and capacity free) targeted a point that never got this treatment.
+ * Experimental: sent once toward the recipient right before a resource march, mimicking the
+ * client looking at them first - not confirmed as the actual mechanism, worth trying. */
+void RequestMapAdvance(Connection *c, uint16_t zone_id, uint8_t point_id)
+{
+	c->size = 2;
+
+	write_u16(c->data + c->size, _MSG_REQUEST_MAP_ADVANCE); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);     c->size += 4;
+	write_u16(c->data + c->size, zone_id);                  c->size += 2;
+	write_u8 (c->data + c->size, point_id);                 c->size += 1;
+
 	write_u16(c->data, c->size); // update packet size
 	send_packet(c, true);
 }
@@ -2400,9 +2420,12 @@ void RecvAllyPoint(Connection *c, const uint8_t *data)
 				
 				c->transfer.zone_id  = zone_id;
 				c->transfer.point_id = point_id;
+
+				RequestMapAdvance(c, zone_id, point_id); // see RequestMapAdvance()'s comment
+
 				c->transfer.state = TRANSFER_SEND_MARCH;
 			}
-			
+
 			break;
 		case 1:
 			printf("Target is in another kingdom\n");
