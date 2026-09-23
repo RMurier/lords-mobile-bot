@@ -340,8 +340,8 @@ COMMANDS = [
      "details": ["La recherche du jeu n'est pas sensible à la casse et peut trouver plusieurs guildes qui ne "
                  "diffèrent que par la casse (ex. JFK et JfK) : seule une correspondance exacte sur la casse est "
                  "utilisée, sinon le bot répond « Guilde introuvable ».",
-                 "Si le château est déjà dans une guilde, il la quitte d'abord, puis recherche et postule à la "
-                 "nouvelle. Si le départ échoue, join s'arrête là et ne cherche pas.",
+                 "Si le château est déjà dans une guilde, il la quitte d'abord, attend 3 à 4 secondes, puis "
+                 "recherche et postule à la nouvelle. Si le départ échoue, join s'arrête là et ne cherche pas.",
                  "Le bot envoie une candidature dans tous les cas : selon les réglages de la guilde visée, elle est "
                  "acceptée tout de suite ou mise en attente d'un officier. Le bot ne sait pas distinguer les deux : "
                  "il répond toujours « Candidature envoyée ». Vérifiez dans le jeu si besoin.",

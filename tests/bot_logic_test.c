@@ -94,6 +94,7 @@ static Connection *fresh(const char *admins)
 	c->bot.admin_config_count = c->bot.admin_count;
 	c->resources.gold = 100000000;
 	c->resources.food = 100000000;
+	c->supply_capacity = 100000000; // Trading Post loaded: bank tests are not about its capacity
 	reset_sent();
 	return c;
 }

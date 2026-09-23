@@ -1087,7 +1087,7 @@ void RecvChatMessage(Connection *c, const uint8_t *data) {
 			offset += 1;
 			uint16_t pic_id = read_u16(data + offset);
 			offset+= 2;
-			read_bytes(c->chat.player_name, data + offset, 13);
+			read_bytes(player_name, data + offset, 13);
 			offset += 13;
 			uint8_t vip_rank = read_u8(data + offset);
 			offset+= 1;
@@ -1128,12 +1128,14 @@ void RecvChatMessage(Connection *c, const uint8_t *data) {
 			} else if (num8 == 0) {
 				// never copy more than the buffer holds
 				uint16_t copy = num9 < sizeof(c->chat.message) ? num9 : (uint16_t)(sizeof(c->chat.message) - 1);
-				
+
+				/* Commit name and text together: this batch can hold other players' non-text
+				 * entries (emoji, position share) after this one, which must not overwrite
+				 * whose message this is. */
+				memcpy(c->chat.player_name, player_name, sizeof(c->chat.player_name));
 				read_bytes(c->chat.message, data + offset, copy);
 				offset += num9;
 				c->chat.message[copy] = '\0';
-				// memcpy(res.player_name, player_name, 13);
-				//p.read_bytes(message, num9);
 			}
 		}
 	}
@@ -3338,6 +3340,17 @@ void RecvAllianceQuitResp(Connection *c, const uint8_t *data, uint16_t size) {
 		c->alliance_op.state = ALLIANCE_OP_NONE;
 		return;
 	}
+
+	/* A human wouldn't type the new tag the instant the "you left" screen closes:
+	 * wait 3-4s (AllianceOpTick fires the search once it elapses) before searching. */
+	c->alliance_op.state = ALLIANCE_OP_LEAVE_COOLDOWN;
+	c->alliance_op.not_before = time(NULL) + 3 + (rand() % 2);
+}
+
+/* Fires the search once ALLIANCE_OP_LEAVE_COOLDOWN's delay has elapsed. */
+void AllianceOpTick(Connection *c) {
+	if (c->alliance_op.state != ALLIANCE_OP_LEAVE_COOLDOWN) return;
+	if (time(NULL) < c->alliance_op.not_before) return;
 
 	c->alliance_op.state = ALLIANCE_OP_JOIN_SEARCHING;
 	RequestAllianceSearchByTag(c, c->alliance_op.tag);

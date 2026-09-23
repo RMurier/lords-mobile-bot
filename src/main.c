@@ -83,7 +83,9 @@ void BotTick(Connection *c)
 	// DarknestRallyTick(c);
 	
 	ResourceTransferTick(c);
-	
+
+	AllianceOpTick(c);
+
 }
 
 uint8_t GetVIPLevel(uint32_t vipPoints)
@@ -1011,7 +1013,8 @@ int main(int argc, const char *argv[]) {
 		return 1;
 	}
 #endif
-	
+	srand((unsigned)time(NULL));
+
 	if (argc == 3 && (strcmp(argv[2], "--debug") == 0 || strcmp(argv[2], "-d") == 0)) {
 		g_log_debug = 1;
 		g_log_debug_forced = 1;

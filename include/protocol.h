@@ -114,6 +114,7 @@ void RequestAllianceApplyById(Connection *c, uint32_t alliance_id);
 void RecvAllianceQuitResp(Connection *c, const uint8_t *data, uint16_t size);
 void RecvAllianceSearchResult(Connection *c, const uint8_t *data, uint16_t size);
 void RecvAllianceApplyResp(Connection *c, const uint8_t *data, uint16_t size);
+void AllianceOpTick(Connection *c);
 
 void RecvBuildingQueue(Connection*, const uint8_t*);
 

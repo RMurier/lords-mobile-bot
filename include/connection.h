@@ -363,13 +363,15 @@ typedef enum {
     ALLIANCE_OP_JOIN_SEARCHING,   // sent ALLIANCE_SEARCH, waiting for SRARCHRESULT
     ALLIANCE_OP_JOIN_APPLYING,    // sent ALLIANCE_APPLY, waiting for its response
     ALLIANCE_OP_LEAVING,          // sent ALLIANCE_QUIT, waiting for its response ($leave)
-    ALLIANCE_OP_LEAVING_TO_JOIN   // sent ALLIANCE_QUIT, waiting for its response, then $join's search runs
+    ALLIANCE_OP_LEAVING_TO_JOIN,  // sent ALLIANCE_QUIT, waiting for its response, then a cooldown before $join's search
+    ALLIANCE_OP_LEAVE_COOLDOWN    // left the previous alliance, waiting out not_before before searching for the new one
 } AllianceOpState;
 
 typedef struct {
     AllianceOpState state;
     char tag[4];         // 3-character alliance tag, case-sensitive
     char requester[13];
+    time_t not_before;   // ALLIANCE_OP_LEAVE_COOLDOWN: do not search before this time
 } AllianceOp;
 
 /* Passive war watcher: tracks every player point seen in whatever _MSG_RESP_UPDATE_MAPINFO(_PLUS)
