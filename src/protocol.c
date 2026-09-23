@@ -12,6 +12,18 @@
 
 #include "MAP_UPDATE_KIND.h"
 
+/* Monotonic milliseconds, for pacing deadlines (immune to wall-clock adjustments,
+ * and fine-grained enough that two "human" delays are never exactly the same). */
+uint64_t now_ms(void) {
+#ifdef _WIN32
+	return (uint64_t)GetTickCount64();
+#else
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+#endif
+}
+
 // Bootstrap login
 void RequestGuestLogIn(Connection *c)
 {
@@ -2423,11 +2435,11 @@ void RecvAllyPoint(Connection *c, const uint8_t *data)
 
 				RequestMapAdvance(c, zone_id, point_id); // see RequestMapAdvance()'s comment
 
-				/* A human takes a few seconds between finding the target and confirming a
-				 * send (typing the amount, tapping confirm) - the bot was doing it inside the
-				 * same tick. Code 14 persisted even with byte-identical packets to a target
-				 * that succeeds for a real client, so this is now the next experiment. */
-				c->transfer.not_before = time(NULL) + 3 + (rand() % 3);
+				/* A human takes a moment between finding the target and confirming a send
+				 * (typing the amount, tapping confirm) - the bot was doing it inside the same
+				 * tick, which a byte-identical packet to a target that works for a real client
+				 * was refused for (code 14) until this delay was added. */
+				c->transfer.not_before = now_ms() + 2000 + (rand() % 1000);
 				c->transfer.state = TRANSFER_SEND_MARCH;
 			}
 
@@ -4803,8 +4815,9 @@ void SendResourceMarch(Connection *c) {
 	c->transfer.state = TRANSFER_WAIT_MARCH;
 
 	/* human pacing: whenever transfer.state next reaches TRANSFER_SEND_MARCH (this batch's
-	 * march accepted, or one comes home freeing a slot), wait this long before the next one. */
-	c->transfer.not_before = time(NULL) + 1 + (rand() % 2);
+	 * march accepted, or one comes home freeing a slot), wait this long before the next one.
+	 * ~2s, millisecond jitter so it's never the same wait twice. */
+	c->transfer.not_before = now_ms() + 1500 + (rand() % 1000);
 
 	return;
 }
@@ -4819,7 +4832,7 @@ void ResourceTransferTick(Connection *c)
 	switch (c->transfer.state) {
 		case TRANSFER_FIND_TARGET:
 			/* bag items were just used: wait until the resources are credited */
-			if (time(NULL) < c->transfer.not_before)
+			if (now_ms() < c->transfer.not_before)
 				break;
 			
 			/* Find player's location */
@@ -4837,7 +4850,7 @@ void ResourceTransferTick(Connection *c)
 			break;
 		case TRANSFER_SEND_MARCH:
 			/* human pacing between batches: not_before is set by RecvSHelp() after the first */
-			if (time(NULL) < c->transfer.not_before)
+			if (now_ms() < c->transfer.not_before)
 				break;
 
 			SendResourceMarch(c);

@@ -277,6 +277,18 @@ Farther players are refused and told the distance. `0` = no limit.
 bank.max_delivery_distance = 100
 ```
 
+### Delivery Tax
+
+The game silently deducts a percentage of a resource march on arrival — it never appears in any
+in-game message, only as a smaller-than-expected increase in the recipient's stock. The rate isn't
+universal: it depends on the account, so check yours with a small test send and set it here.
+Requests are grossed up by this percentage before sending, so `$food 1M` still delivers exactly
+1M net. `0` (default) sends the amount as requested, no adjustment.
+
+```cfg
+bank.delivery_tax_percent = 0
+```
+
 ### Use Resource Items
 
 When a command asks for more than is available above the reserve, the bot uses resource items from

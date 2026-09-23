@@ -286,7 +286,7 @@ int main(void)
 	say(c, "boss", "$gold 3M", COMMAND_CHANNEL_MAIL);
 	CHECK(c->transfer.state == TRANSFER_FIND_TARGET && useitem_count == 1 && c->items[GOLD_2M].quantity == 1,
 		"bag allowed: the missing 2M is covered by one item");
-	CHECK(c->transfer.not_before > time(NULL), "the transfer waits for the resources to be credited");
+	CHECK(c->transfer.not_before > now_ms(), "the transfer waits for the resources to be credited");
 	free(c);
 	c = fresh("boss");
 	c->resources.gold = 1000000;

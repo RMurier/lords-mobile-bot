@@ -425,6 +425,11 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 
+	if (strcmp(key, "bank.delivery_tax_percent") == 0) {
+		c->bank.delivery_tax_percent = strtod(value, NULL);
+		return true;
+	}
+
 	if (strcmp(key, "bank.use_bag_rss") == 0) {
 		c->bank.use_bag_rss = ParseBool(value);
 		return true;

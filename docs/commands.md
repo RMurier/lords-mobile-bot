@@ -151,6 +151,8 @@ still running is refused: *"Une opération de guilde est déjà en cours"*).
 A resource command sends resources to the player who wrote it, subject to:
 
 - **Reserve**: the bot never goes below `bank.reserve_*` of each resource.
+- **Delivery tax**: the game deducts a percentage on arrival that never shows up in any message.
+  Set `bank.delivery_tax_percent` (varies per account) so `$food 1M` still delivers exactly 1M net.
 - **Distance**: a player farther than `bank.max_delivery_distance` tiles (straight line) is refused
   and told how far they are. `0` = no limit.
 - **Bag items**: with `bank.use_bag_rss` and `bank.use_bag_<resource>` on, when the resource is

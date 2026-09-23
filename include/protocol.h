@@ -33,6 +33,7 @@ void SendBlackMarketBuy(Connection *c, uint8_t mIdx);
 void RequestMissionInfo(Connection *c, uint8_t missionType);
 void RequestAllyPoint(Connection *c, const char *name);
 void RequestMapAdvance(Connection *c, uint16_t zone_id, uint8_t point_id);
+uint64_t now_ms(void);
 
 void RequestWatchTowerLineDetail(Connection *c, uint32_t);
 void RequestTroopTakeBack(Connection*, uint8_t);

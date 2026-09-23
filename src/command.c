@@ -10,6 +10,7 @@
 #include "items.h"
 #include "protocol.h"
 #include "map_point.h"
+#include "log.h"
 
 /*
  * NOTE:
@@ -823,10 +824,20 @@ static void ResourceCommandHandler(
 		return;
 	
 	uint64_t amount = parse_number_u64(amount_str);
-	
+
 	if (amount == 0 || amount > UINT32_MAX)
 		return;
-	
+
+	/* The game deducts bank.delivery_tax_percent on arrival (not visible anywhere in the
+	 * march packets themselves - observed only in the recipient's actual stock change).
+	 * Gross the request up so what arrives matches what was asked for. */
+	if (c->bank.delivery_tax_percent > 0.0 && c->bank.delivery_tax_percent < 100.0) {
+		uint64_t gross = (uint64_t)((double)amount * 100.0 / (100.0 - c->bank.delivery_tax_percent) + 0.5);
+		LOGD("[TRANSFER] Taxe %.2f%% : %llu demandé -> %llu envoyé\n",
+			c->bank.delivery_tax_percent, (unsigned long long)amount, (unsigned long long)gross);
+		amount = gross > UINT32_MAX ? UINT32_MAX : gross;
+	}
+
 	uint32_t current = 0;
 	uint32_t reserve = 0;
 	
@@ -854,16 +865,16 @@ static void ResourceCommandHandler(
 	}
 	
 	uint32_t available = current > reserve ? current - reserve : 0;
-	time_t not_before = 0;
-	
+	uint64_t not_before = 0;
+
 	if (amount > available) {
 		// bank.use_bag_*: cover the difference with resource items from the bag
 		BagUse plan[BAG_PLAN_MAX];
 		int used = BankMayUseBag(c, type) ? BagPlan(c, type, amount - available, plan) : -1;
-		
+
 		if (used > 0) {
 			BagApply(c, plan, used);
-			not_before = time(NULL) + 3; // wait for the resources to be credited
+			not_before = now_ms() + 3000; // wait for the resources to be credited
 		} else {
 			char available_str[20];
 			uint64_t reachable = available;

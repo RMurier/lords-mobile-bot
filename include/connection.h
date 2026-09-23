@@ -497,6 +497,7 @@ typedef struct {
 	
 	ResourceStock reserve;
 	uint32_t max_delivery_distance;
+	double delivery_tax_percent; // the game deducts this % on arrival; requests are grossed up to compensate
 	
 	bool use_bag_rss;
 	bool use_bag_food;
@@ -896,7 +897,7 @@ typedef struct {
     uint16_t zone_id;
     uint8_t point_id;
     
-    time_t not_before; /* do not start before this time (waiting for used bag items to be credited) */
+    uint64_t not_before; /* now_ms() deadline: do not start before this (bag credit wait, human pacing) */
 
     TransferState state;
 } ResourceTransfer;

@@ -653,7 +653,8 @@ void Configuration(Connection *client)
 	client->bank.reserve.gold = 0;
 	
 	client->bank.max_delivery_distance = 100;
-	
+	client->bank.delivery_tax_percent = 0;
+
 	client->bank.use_bag_rss  = false;
 	client->bank.use_bag_food = false;
 	client->bank.use_bag_rock = false;
@@ -781,7 +782,13 @@ bool CreateDefaultConfig(const char *filename)
 		
 		"# Maximum map distance (tiles) for resource delivery.\n"
 		"bank.max_delivery_distance = 100\n\n"
-		
+
+		"# The game deducts this percentage of a resource march on arrival (not shown anywhere\n"
+		"# in game, only noticeable in the recipient's stock afterwards - it varies per account,\n"
+		"# check yours once with a small test send). Requests are grossed up to compensate, so\n"
+		"# 'X <amount>' still delivers exactly <amount>. 0 = no adjustment.\n"
+		"bank.delivery_tax_percent = 0\n\n"
+
 		"# Automatically use resource items from the bag if the available\n"
 		"# resources are insufficient to fulfill a banking command.\n"
 		"bank.use_bag_rss  = false\n"
