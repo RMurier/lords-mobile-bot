@@ -332,6 +332,40 @@ int main(void)
 		free(c);
 	}
 
+	/* ---- multi-march pacing: the 2nd+ march must wait too, not just the 1st ---------- */
+	{
+		uint8_t shelp[72] = {0};
+		uint8_t home[21] = {0};
+
+		c = fresh("boss");
+		snprintf(c->transfer.target_name, sizeof(c->transfer.target_name), "eve");
+		c->transfer.zone_id = 489; c->transfer.point_id = 182;
+		c->transfer.remaining = 1000000;
+		c->transfer.state = TRANSFER_WAIT_MARCH;
+		c->player.current_marches = 0;
+
+		reset_sent();
+		/* shelp[0] = b = 0 (accepted), shelp[1] = b2 = 0 (marches count), rest unused by this test */
+		RecvSHelp(c, shelp);
+		CHECK(c->transfer.state == TRANSFER_SEND_MARCH && c->transfer.not_before > now_ms()
+			&& find_packet(_MSG_REQUEST_MAP_ADVANCE) >= 0,
+			"a march accepted (RecvSHelp) refreshes the target and waits before the next one");
+
+		c->transfer.state = TRANSFER_WAIT_MARCH;
+		c->transfer.not_before = 0;
+		c->player.current_marches = 1;
+		c->transfer.remaining = 500000;
+
+		reset_sent();
+		/* home[0] = b = 0 (success), then food/rock/wood/ore/gold stocks (4 bytes each, unused here) */
+		RecvHelp_Home(c, home);
+		CHECK(c->transfer.state == TRANSFER_SEND_MARCH && c->transfer.not_before > now_ms()
+			&& find_packet(_MSG_REQUEST_MAP_ADVANCE) >= 0,
+			"a march returning home (RecvHelp_Home) also refreshes the target and waits");
+
+		free(c);
+	}
+
 	/* ---- chat channel and the buffer overflow fix ---------------------- */
 	{
 		enum { MSG = 3000 };

@@ -2439,7 +2439,7 @@ void RecvAllyPoint(Connection *c, const uint8_t *data)
 				 * (typing the amount, tapping confirm) - the bot was doing it inside the same
 				 * tick, which a byte-identical packet to a target that works for a real client
 				 * was refused for (code 14) until this delay was added. */
-				c->transfer.not_before = now_ms() + 2000 + (rand() % 1000);
+				c->transfer.not_before = now_ms() + 1000 + (rand() % 1000);
 				c->transfer.state = TRANSFER_SEND_MARCH;
 			}
 
@@ -4832,8 +4832,8 @@ void SendResourceMarch(Connection *c) {
 
 	/* human pacing: whenever transfer.state next reaches TRANSFER_SEND_MARCH (this batch's
 	 * march accepted, or one comes home freeing a slot), wait this long before the next one.
-	 * ~2s, millisecond jitter so it's never the same wait twice. */
-	c->transfer.not_before = now_ms() + 1500 + (rand() % 1000);
+	 * 1-2s, millisecond jitter so it's never the same wait twice. */
+	c->transfer.not_before = now_ms() + 1000 + (rand() % 1000);
 
 	return;
 }
@@ -4945,6 +4945,16 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 	
 	// c->transfer.cur_marches++;
 	c->player.current_marches++;
+
+	// Same "look at the target, then wait" pacing as the first march (see RequestMapAdvance's
+	// comment): without it, this march's accept response was arriving fast enough that the next
+	// one went out with no human delay at all - not_before alone did not fix it, since nothing
+	// here was setting it.
+	if (c->transfer.remaining > 0) {
+		RequestMapAdvance(c, c->transfer.zone_id, c->transfer.point_id);
+		c->transfer.not_before = now_ms() + 1000 + (rand() % 1000);
+	}
+
 	c->transfer.state = TRANSFER_SEND_MARCH;
 }
 
@@ -4974,11 +4984,15 @@ void RecvHelp_Home(Connection *c, const uint8_t *data) {
 		}
 		
 		if (c->transfer.remaining > 0) {
+			// Same pacing as after RecvSHelp: refresh "looking at the target" and wait
+			// before the next march.
+			RequestMapAdvance(c, c->transfer.zone_id, c->transfer.point_id);
+			c->transfer.not_before = now_ms() + 1000 + (rand() % 1000);
 			c->transfer.state = TRANSFER_SEND_MARCH;
 		} else {
 			c->transfer.state = TRANSFER_COMPLETE;
 		}
-		
+
 		return;
 	}		
 }
