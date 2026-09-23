@@ -2280,7 +2280,8 @@ void RecvAllBuildData(Connection *c, const uint8_t *data)
 		
 	}
 	
-	c->supply_capacity += GetTradingPostSupplyCapacity(trading_post_lv);
+	c->supply_capacity = GetTradingPostSupplyCapacity(trading_post_lv);
+	LOGD("[BUILD] Poste de Commerce niveau %u : capacité de transport %u\n", trading_post_lv, c->supply_capacity);
 	
 }
 
@@ -4828,11 +4829,18 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 	uint16_t offset = 0;
 	
 	uint8_t b = read_u8(data + offset); offset += 1;
-	
-	// b == 1 means max march reached
+
+	// b == 1 means max march reached; other non-zero codes seen (e.g. 14 with marches free) are
+	// refusals for a different, unidentified reason - report the code, don't guess the cause.
+	if (b == 1) {
+		BotReply(c, c->transfer.target_name, "Livraison impossible",
+			"Nombre maximum de marches atteint, livraison annulée.");
+		c->transfer.state = TRANSFER_FAILED;
+		return;
+	}
 	if (b != 0) {
 		BotReply(c, c->transfer.target_name, "Livraison impossible",
-			"Nombre maximum de marches atteint, livraison annulée (code %u).", b);
+			"La marche a été refusée par le serveur (code %u), livraison annulée.", b);
 		c->transfer.state = TRANSFER_FAILED;
 		return;
 	}
@@ -4843,7 +4851,7 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 	if (b2 >= 8)
 	{
 		BotReply(c, c->transfer.target_name, "Livraison impossible",
-			"Nombre maximum de marches atteint, livraison annulée.");
+			"Réponse de marche invalide (code %u), livraison annulée.", b2);
 		c->transfer.state = TRANSFER_FAILED;
 		return;
 	}
