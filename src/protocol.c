@@ -3323,15 +3323,25 @@ void RequestAllianceApplyById(Connection *c, uint32_t alliance_id) {
 }
 
 void RecvAllianceQuitResp(Connection *c, const uint8_t *data, uint16_t size) {
-	if (c->alliance_op.state != ALLIANCE_OP_LEAVING) return;
+	bool leaving_to_join = (c->alliance_op.state == ALLIANCE_OP_LEAVING_TO_JOIN);
+	if (c->alliance_op.state != ALLIANCE_OP_LEAVING && !leaving_to_join) return;
 
 	uint8_t status = (size >= 1) ? read_u8(data) : 1;
-	if (status == 0) {
-		BotReply(c, c->alliance_op.requester, "Guilde", "Guilde quittée.");
-	} else {
+	if (status != 0) {
 		BotReply(c, c->alliance_op.requester, "Guilde", "Échec pour quitter la guilde (code %u).", status);
+		c->alliance_op.state = ALLIANCE_OP_NONE;
+		return;
 	}
-	c->alliance_op.state = ALLIANCE_OP_NONE;
+
+	if (!leaving_to_join) {
+		BotReply(c, c->alliance_op.requester, "Guilde", "Guilde quittée.");
+		c->alliance_op.state = ALLIANCE_OP_NONE;
+		return;
+	}
+
+	c->alliance_op.state = ALLIANCE_OP_JOIN_SEARCHING;
+	RequestAllianceSearchByTag(c, c->alliance_op.tag);
+	BotReply(c, c->alliance_op.requester, "Guilde", "Recherche de la guilde \"%s\"...", c->alliance_op.tag);
 }
 
 /* The id (4 bytes LE) is immediately followed by the 3-byte tag in every entry

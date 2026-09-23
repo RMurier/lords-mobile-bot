@@ -360,9 +360,10 @@ typedef struct {
  * bot does not distinguish the two, both are reported as "candidature envoyée"). */
 typedef enum {
     ALLIANCE_OP_NONE,
-    ALLIANCE_OP_JOIN_SEARCHING,  // sent ALLIANCE_SEARCH, waiting for SRARCHRESULT
-    ALLIANCE_OP_JOIN_APPLYING,   // sent ALLIANCE_APPLY, waiting for its response
-    ALLIANCE_OP_LEAVING          // sent ALLIANCE_QUIT, waiting for its response
+    ALLIANCE_OP_JOIN_SEARCHING,   // sent ALLIANCE_SEARCH, waiting for SRARCHRESULT
+    ALLIANCE_OP_JOIN_APPLYING,    // sent ALLIANCE_APPLY, waiting for its response
+    ALLIANCE_OP_LEAVING,          // sent ALLIANCE_QUIT, waiting for its response ($leave)
+    ALLIANCE_OP_LEAVING_TO_JOIN   // sent ALLIANCE_QUIT, waiting for its response, then $join's search runs
 } AllianceOpState;
 
 typedef struct {

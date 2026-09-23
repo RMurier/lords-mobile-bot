@@ -136,6 +136,9 @@ still running is refused: *"Une opération de guilde est déjà en cours"*).
   case-insensitive and can match several alliances that only differ by case (for example `JFK` and `JfK`), so an
   exact tag is what picks the right one. Only an exact-case match is used; anything else is reported as
   *"Guilde "xyz" introuvable."*.
+- If the castle is already in an alliance, `$join` first leaves it (*"Départ de la guilde actuelle avant de
+  rejoindre "xyz"..."*) and only then searches for and applies to the new one. If leaving fails, `$join` stops there
+  and reports the failure instead of searching.
 - The bot applies (`$join` never joins instantly by itself): depending on the target alliance's own settings, that
   application either joins right away or waits for one of its officers to accept it. **The bot cannot tell which one
   happened** — both are reported the same way: *"Candidature envoyée à la guilde "xyz"."*. Check in game (or with

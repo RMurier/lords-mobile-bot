@@ -509,8 +509,15 @@ static void AllianceJoinCommand(Connection *c, const char *player_name, bool is_
 
 	snprintf(c->alliance_op.tag, sizeof(c->alliance_op.tag), "%.3s", args);
 	snprintf(c->alliance_op.requester, sizeof(c->alliance_op.requester), "%s", player_name);
-	c->alliance_op.state = ALLIANCE_OP_JOIN_SEARCHING;
 
+	if (c->RoleAlliance.Rank != NONE) {
+		c->alliance_op.state = ALLIANCE_OP_LEAVING_TO_JOIN;
+		RequestAllianceQuit(c);
+		BotReply(c, player_name, "Guilde", "Départ de la guilde actuelle avant de rejoindre \"%s\"...", c->alliance_op.tag);
+		return;
+	}
+
+	c->alliance_op.state = ALLIANCE_OP_JOIN_SEARCHING;
 	RequestAllianceSearchByTag(c, c->alliance_op.tag);
 	BotReply(c, player_name, "Guilde", "Recherche de la guilde \"%s\"...", c->alliance_op.tag);
 }
