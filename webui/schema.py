@@ -30,6 +30,14 @@ SHIELDS = [
     ("SHIELD_14D", "Bouclier 14 jours"),
 ]
 
+ANTISCOUT = [
+    ("ANTISCOUT_4H", "Anti-espionnage 4 heures"),
+    ("ANTISCOUT_8H", "Anti-espionnage 8 heures"),
+    ("ANTISCOUT_1D", "Anti-espionnage 1 jour"),
+    ("ANTISCOUT_3D", "Anti-espionnage 3 jours"),
+    ("ANTISCOUT_7D", "Anti-espionnage 7 jours"),
+]
+
 CHANNELS = [
     ("WORLD", "Chat du monde"),
     ("GUILD", "Chat d'alliance"),
@@ -184,6 +192,17 @@ CATEGORIES = [
             {"key": "protection.shield_priority", "label": "Ordre de priorité des boucliers", "type": "shields",
              "default": "SHIELD_4H, SHIELD_8H, SHIELD_12H, SHIELD_1D", "depends": "protection.enabled",
              "help": "Le bot utilise le premier bouclier disponible de cette liste."},
+            _bool("protection.antiscout_always_on", "Toujours garder l'anti-espionnage actif",
+                  "Le maintient actif en permanence, indépendamment du bouclier.",
+                  depends="protection.enabled"),
+            _bool("protection.antiscout_on_no_shield", "Anti-espionnage si pas de bouclier",
+                  "Masque le compte des rapports d'espionnage quand aucun bouclier n'est actif (le bouclier reste "
+                  "prioritaire sur ce mode : il protège aussi des attaques, l'anti-espionnage seul ne bloque qu'un "
+                  "espionnage). Inutile en plus de l'option précédente, qui couvre déjà ce cas.",
+                  depends="protection.enabled"),
+            {"key": "protection.antiscout_priority", "label": "Ordre de priorité anti-espionnage", "type": "antiscout",
+             "default": "ANTISCOUT_4H, ANTISCOUT_8H, ANTISCOUT_1D", "depends": "protection.enabled",
+             "help": "Le bot utilise le premier objet disponible de cette liste."},
             _bool("protection.recall_on_incoming_attack", "Rappeler les troupes si attaque entrante",
                   depends="protection.enabled"),
             _bool("protection.recall_on_incoming_scout", "Rappeler les troupes si espionnage entrant",
@@ -228,29 +247,42 @@ CATEGORIES = [
         "id": "war",
         "technical": True,      # experimental: reverse-engineered from a single sample, needs field validation
         "label": "War (scan de royaume)",
-        "description": "Scanne tout le royaume une fois, puis prévient sur un webhook Discord quand un joueur suivi "
-                      "perd son bouclier. Expérimental : détecté à partir d'un seul échantillon capturé.",
+        "description": "Scanne tout le royaume une fois, puis prévient (onglet Notifications) quand un joueur "
+                      "suivi perd son bouclier. Expérimental : détecté à partir d'un seul échantillon capturé.",
         "fields": [
             _bool("war.enabled", "Activer le scan de royaume"),
-            {"key": "war.discord_webhook", "label": "Webhook Discord", "type": "text", "maxlen": 255,
-             "default": "", "optional": True, "depends": "war.enabled",
+        ],
+    },
+    {
+        "id": "notify",
+        "label": "Notifications Discord",
+        "description": "Une seule URL de webhook, partagée par toutes les alertes ci-dessous : chacune a son "
+                      "propre interrupteur, et n'affecte que le compte sur lequel elle est réglée.",
+        "fields": [
+            {"key": "notify.discord_webhook", "label": "Webhook Discord", "type": "text", "maxlen": 255,
+             "default": "", "optional": True,
              "help": "URL du webhook Discord (Paramètres du salon → Intégrations → Webhooks)."},
+            _bool("notify.on_war", "Un joueur suivi (War) perd son bouclier", default=True, depends="war.enabled"),
+            _bool("notify.on_antiscout_report", "Quelqu'un a tenté de vous espionner", depends="protection.enabled"),
+            _bool("notify.on_shield_expiring", "Bouclier bientôt expiré, plus aucun en stock", depends="protection.enabled"),
+            _bool("notify.on_antiscout_expiring", "Anti-espionnage bientôt expiré, plus aucun en stock", depends="protection.enabled"),
+            _bool("notify.on_transfer_done", "Une livraison de ressources ($bank) est terminée"),
         ],
     },
     {
         "id": "gather",
         "technical": True,      # experimental: troop count formula derived from a single capture
         "label": "Récolte automatique",
-        "description": "Scanne les tuiles de ressources autour du château et y envoie des marches de récolte. "
-                      "Expérimental : la formule du nombre de troupes vient d'un seul échantillon capturé.",
+        "description": "Envoie des marches de récolte sur les tuiles de ressources connues du bot. Le bot ne "
+                      "scanne pas la carte lui-même (le serveur ne répond pas à cette demande venant de lui) : "
+                      "il ne connaît que les tuiles vues passivement (par ex. si le compte ouvre la carte de temps "
+                      "en temps). Expérimental aussi côté troupes : la formule du nombre envoyé vient d'un seul "
+                      "échantillon capturé.",
         "fields": [
             _bool("gather.enabled", "Activer la récolte automatique"),
             {"key": "gather.max_marches", "label": "Marches réservées à la récolte", "type": "int",
              "min": 1, "max": 30, "default": "1", "depends": "gather.enabled",
              "help": "Sur le total de marches du compte, combien peuvent être utilisées pour la récolte en même temps."},
-            {"key": "gather.radius", "label": "Rayon de recherche", "type": "int", "min": 5, "max": 200,
-             "default": "30", "unit": "cases", "depends": "gather.enabled",
-             "help": "Distance autour du château dans laquelle chercher des tuiles de ressources."},
         ],
     },
     {
@@ -404,7 +436,7 @@ def validate(field, raw):
             return ""
         if kind == "bool":
             raise ValueError("Valeur requise.")
-        if kind in ("int", "text", "ip", "select", "size", "shields", "secret") and field.get("default", "") == "":
+        if kind in ("int", "text", "ip", "select", "size", "shields", "antiscout", "secret") and field.get("default", "") == "":
             raise ValueError("Valeur requise.")
 
     if kind == "bool":
@@ -461,6 +493,17 @@ def validate(field, raw):
             raise ValueError("Maximum 8 boucliers.")
         return ", ".join(names)
 
+    if kind == "antiscout":
+        names = [part.strip() for part in text.split(",") if part.strip()]
+        known = {name for name, _ in ANTISCOUT}
+        if not names:
+            raise ValueError("Choisissez au moins un objet anti-espionnage.")
+        if any(name not in known for name in names) or len(set(names)) != len(names):
+            raise ValueError("Liste anti-espionnage invalide.")
+        if len(names) > 8:
+            raise ValueError("Maximum 8 objets.")
+        return ", ".join(names)
+
     if kind == "names":
         names = []
         for part in text.split(","):
@@ -498,5 +541,6 @@ def public_schema():
             for c in CATEGORIES
         ],
         "shields": [list(s) for s in SHIELDS],
+        "antiscout": [list(s) for s in ANTISCOUT],
         "commands": COMMANDS,
     }

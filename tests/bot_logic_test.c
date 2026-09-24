@@ -755,6 +755,62 @@ int main(void)
 		free(c);
 	}
 
+	/* ---- notify: "about to expire, nothing to renew with" fires once, resets later --- */
+	{
+		c = fresh("boss");
+		c->protection.enabled = true;
+		c->protection.shield_always_on = true;
+		c->shield_info.loaded = true;
+		c->shield_info.active = false; // no shield at all: immediately "expiring"
+		c->notify.on_shield_expiring = true;
+		// c->protection.shield_priority_count stays 0: HasAnyShieldItem() has nothing to check -> false
+		ShieldTick(c);
+		CHECK(c->shield_info.expiring_notified, "shield expiring with nothing to renew with: notified once");
+		ShieldTick(c);
+		CHECK(c->shield_info.expiring_notified, "still notified: does not un-notify itself while still expiring");
+		c->shield_info.active = true;
+		c->shield_info.begin_time = c->server_time;
+		c->shield_info.duration = 3600; // plenty of time left
+		ShieldTick(c);
+		CHECK(!c->shield_info.expiring_notified, "a shield with time to spare re-arms the notification for next time");
+		free(c);
+
+		c = fresh("boss");
+		c->protection.enabled = true;
+		c->protection.antiscout_always_on = true;
+		c->antiscout_info.loaded = true;
+		c->antiscout_info.active = false;
+		c->notify.on_antiscout_expiring = true;
+		AntiScoutTick(c);
+		CHECK(c->antiscout_info.expiring_notified, "anti-scout expiring with nothing to renew with: notified once");
+		free(c);
+	}
+
+	/* ---- notify: _MSG_RESP_ANTISCOUTREPORTINFO (3420), real 55-byte payloads from a live
+	 * capture - one report where anti-scout blocked the attempt (byte 40 = 0x0c), one where
+	 * it did not (byte 40 = 0x00). Only checked for not crashing / not over-reading: the
+	 * packet carries no state the bot keeps, so there is nothing else to assert on. */
+	{
+		c = fresh("boss");
+		uint8_t blocked[] = {
+			0xc0, 0xed, 0x00, 0x00, 0x00, 0x44, 0x1c, 0x65, 0x6a, 0x00, 0x00, 0x00, 0x00, 0xe8, 0x00,
+			0xf0, 0x02, 0xa9, 0x08, 0x00, 0x19, 0xe8, 0x00, 0x54, 0x48, 0x20, 0x46, 0x61, 0x6b, 0x65,
+			0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x54, 0x5c, 0x48, 0x51, 0x0c, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		uint8_t not_blocked[] = {
+			0xc1, 0xed, 0x00, 0x00, 0x00, 0xb4, 0x61, 0x65, 0x6a, 0x00, 0x00, 0x00, 0x00, 0xe8, 0x00,
+			0xf0, 0x02, 0xa9, 0x08, 0x00, 0x19, 0xfd, 0x00, 0x6f, 0x6f, 0x4e, 0x6f, 0x6b, 0x5a, 0x61,
+			0x6f, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x4b, 0x50, 0x59, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+		RecvAntiScoutReportInfo(c, blocked, sizeof(blocked));
+		RecvAntiScoutReportInfo(c, not_blocked, sizeof(not_blocked));
+		RecvAntiScoutReportInfo(c, blocked, 10); // too short: must be ignored, not read out of bounds
+		CHECK(1, "anti-scout report packets (blocked, not blocked, truncated) parse without crashing");
+		free(c);
+	}
+
 	printf("%s\n", failures ? "SOME TESTS FAILED" : "ALL BOT LOGIC TESTS PASSED");
 	return failures ? 1 : 0;
 }

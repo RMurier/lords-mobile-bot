@@ -66,9 +66,11 @@ void BotTick(Connection *c)
 	// Automatic game features
 	BlackMarketTick(c);
 	
-	// 
+	//
 	ShieldTick(c);
-	
+
+	AntiScoutTick(c);
+
 	AllianceGiftTick(c);
 
 	ActivityTick(c);
@@ -302,6 +304,9 @@ static SessionResult ProcessConnection(Connection *c)
 					break;
 				case _MSG_RESP_GATHERREPORTINFO:
 					RecvGatherReportInfo(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_ANTISCOUTREPORTINFO:
+					RecvAntiScoutReportInfo(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_BUFFINFO: 
 					RecvIBuffInfo(c, s->buffer + s->parse_pos + 4);

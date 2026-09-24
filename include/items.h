@@ -15,6 +15,16 @@
 #define SHIELD_7D  1287
 #define SHIELD_14D 1288
 
+/* "Anti-espionnage" in the French client: hides the account from scout reports
+ * without blocking attacks the way a shield does. Same _MSG_REQUEST_USEITEM /
+ * _MSG_RESP_USEITEM mechanism as shields, response has the same extra fields
+ * (quantity, item_id, begin_time, duration) - captured using all 5 at once. */
+#define ANTISCOUT_4H  1147
+#define ANTISCOUT_8H  1156
+#define ANTISCOUT_1D  1054
+#define ANTISCOUT_3D  1055
+#define ANTISCOUT_7D  1056
+
 #define FAMILIAR_MAGMA_LORD  0x0012
 
 #define FOOD_5K 0x0492 

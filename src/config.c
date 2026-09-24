@@ -95,6 +95,57 @@ static bool ParseShieldPriority(Connection *c, const char *value)
     return true;
 }
 
+static uint16_t ParseAntiScout(const char *value)
+{
+    if (strcmp(value, "ANTISCOUT_4H") == 0)
+        return ANTISCOUT_4H;
+
+    if (strcmp(value, "ANTISCOUT_8H") == 0)
+        return ANTISCOUT_8H;
+
+    if (strcmp(value, "ANTISCOUT_1D") == 0)
+        return ANTISCOUT_1D;
+
+    if (strcmp(value, "ANTISCOUT_3D") == 0)
+        return ANTISCOUT_3D;
+
+    if (strcmp(value, "ANTISCOUT_7D") == 0)
+        return ANTISCOUT_7D;
+
+    return 0;
+}
+
+static bool ParseAntiScoutPriority(Connection *c, const char *value)
+{
+    char buffer[512];
+
+    strncpy(buffer, value, sizeof(buffer));
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    int count = 0;
+
+    char *token = strtok(buffer, ",");
+
+    while (token && count < 8) {
+        while (*token == ' ')
+            token++;
+
+        uint16_t item = ParseAntiScout(token);
+
+        if (item == 0) {
+            printf("Invalid anti-scout priority value: %s\n", token);
+            return false;
+        }
+
+        c->protection.antiscout_priority[count++] = item;
+
+        token = strtok(NULL, ",");
+    }
+
+    c->protection.antiscout_priority_count = count;
+    return true;
+}
+
 /*
 uint64_t parse_number_u64(const char *str) {
     double value = 0.0;
@@ -327,9 +378,42 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 
+	// Old key, kept as an alias: it used to be war-only, now every notify.on_* feature
+	// shares the same webhook URL (notify.discord_webhook, below).
 	if (strcmp(key, "war.discord_webhook") == 0) {
-		strncpy(c->war.discord_webhook, value, sizeof(c->war.discord_webhook) - 1);
-		c->war.discord_webhook[sizeof(c->war.discord_webhook) - 1] = '\0';
+		strncpy(c->notify.discord_webhook, value, sizeof(c->notify.discord_webhook) - 1);
+		c->notify.discord_webhook[sizeof(c->notify.discord_webhook) - 1] = '\0';
+		return true;
+	}
+
+	if (strcmp(key, "notify.discord_webhook") == 0) {
+		strncpy(c->notify.discord_webhook, value, sizeof(c->notify.discord_webhook) - 1);
+		c->notify.discord_webhook[sizeof(c->notify.discord_webhook) - 1] = '\0';
+		return true;
+	}
+
+	if (strcmp(key, "notify.on_war") == 0) {
+		c->notify.on_war = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "notify.on_antiscout_report") == 0) {
+		c->notify.on_antiscout_report = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "notify.on_shield_expiring") == 0) {
+		c->notify.on_shield_expiring = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "notify.on_antiscout_expiring") == 0) {
+		c->notify.on_antiscout_expiring = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "notify.on_transfer_done") == 0) {
+		c->notify.on_transfer_done = (strcmp(value, "true") == 0);
 		return true;
 	}
 
@@ -343,12 +427,7 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 
-	if (strcmp(key, "gather.radius") == 0) {
-		c->gather.radius = (uint16_t)strtoul(value, NULL, 10);
-		return true;
-	}
-
-	if (strcmp(key, "protection.enabled") == 0) {
+if (strcmp(key, "protection.enabled") == 0) {
 		c->protection.enabled = (strcmp(value, "true") == 0);
 		return true;
 	}
@@ -371,7 +450,21 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 	if (strcmp(key, "protection.shield_priority") == 0) {
 		return ParseShieldPriority(c, value);
 	}
-	
+
+	if (strcmp(key, "protection.antiscout_always_on") == 0) {
+		c->protection.antiscout_always_on = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "protection.antiscout_on_no_shield") == 0) {
+		c->protection.antiscout_on_no_shield = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "protection.antiscout_priority") == 0) {
+		return ParseAntiScoutPriority(c, value);
+	}
+
 	// data directory
 	if (strcmp(key, "data.path") == 0) {
 		strncpy(c->bot.data_path, value, sizeof(c->bot.data_path) - 1);
@@ -587,8 +680,8 @@ bool LoadConfig(Connection *c, const char *filename)
 	c->reconnect.kicked_delay = 60;
 	c->reconnect.max_attempts = 0;
 	c->migration_scrolls_needed = 1;
-	c->gather.radius      = 30;
 	c->gather.max_marches = 1;
+	c->notify.on_war = true; // preserves the old always-on-when-webhook-set war alert behavior
 	c->bot.command_input_mask = (1u << COMMAND_CHANNEL_GUILD) | (1u << COMMAND_CHANNEL_MAIL);
 	c->bot.command_output     = COMMAND_CHANNEL_MAIL;
 	snprintf(c->bot.data_path, sizeof(c->bot.data_path), "./data/");

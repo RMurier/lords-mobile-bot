@@ -371,18 +371,23 @@ typedef struct {
     time_t last_online_gift_try;
 } ActivitySettings;
 
-/* Automatic resource-tile gathering: scan the zones around the castle
- * (_MSG_REQUEST_OPEN_UI once, then _MSG_REQUEST_MAPDATA, 4 zones at a time - both
- * reverse-engineered from a capture of manually browsing the map and gathering 7
- * tiles), then send a march to the best untargeted tile found while a gather march
- * slot is free, using the game's own "low level first" auto troop selection
- * (troop_type_id = 0 lets the server pick, matching 6 of 7 captured marches; only
- * a level 4 ore tile got a different, unconfirmed non-zero type - most likely the
- * account running out of the default troop, since the wiki does not document any
- * hard tier requirement per tile level). Troop count is computed from a single
- * capacity constant (~23.3 resource/troop) derived from those same 6 marches:
- * experimental, not from an official source, and does not account for running low
- * on troops or escalating tiers - worth calibrating against real results. */
+/* Automatic resource-tile gathering. Tiles are known only from whatever
+ * _MSG_RESP_UPDATE_MAPINFO(_PLUS) arrives on its own - live-tested twice, the
+ * server never answers _MSG_REQUEST_MAPDATA sent by this bot (0 responses to 22,
+ * then 23, correctly zoned and paced requests), unlike direct actions (marches,
+ * resources...) which all work. Same wall the war feature hit; see its own header
+ * comment. So, for now, this only gathers tiles a human happens to have shown the
+ * account by opening the map - not a true hands-off scan.
+ *
+ * Sending a march to the best untargeted tile found (while a slot is free) uses
+ * the game's own "low level first" auto troop selection (troop_type_id = 0 lets
+ * the server pick, matching 6 of 7 captured marches; only a level 4 ore tile got
+ * a different, unconfirmed non-zero type - most likely the account running out of
+ * the default troop, since the wiki does not document any hard tier requirement
+ * per tile level). Troop count is computed from a single capacity constant
+ * (~23.3 resource/troop) derived from those same 6 marches: experimental, not
+ * from an official source, and does not account for running low on troops or
+ * escalating tiers - worth calibrating against real results. */
 #define GATHER_MAX_TILES 256
 #define GATHER_DEFAULT_TROOP_CAPACITY 23.3
 
@@ -407,18 +412,15 @@ typedef struct {
 typedef struct {
     bool     enabled;
     uint8_t  max_marches;   // out of player.max_marches, how many to use for gathering
-    uint16_t radius;        // tiles around the castle to scan
 
-    bool     ui_opened;
-    bool     scan_done;
-    uint16_t scan_cursor;   // index into the zone rectangle being swept
-    uint64_t next_scan_at;  // now_ms() deadline: do not send the next batch of RequestMapData before this
+    bool     scan_done;     // just gates the one-time "no active scan" warning below
 
     uint8_t  active_marches; // gather marches this code has out right now (subset of player.current_marches)
     uint64_t next_march_at;  // now_ms() deadline: do not send another gather march before this
 
     GatherTile tiles[GATHER_MAX_TILES];
     uint16_t   tile_count;
+    time_t     last_status_log; // throttles the periodic "N tiles known" log line
 } GatherSettings;
 
 /* $join <tag> / $leave: at most one alliance operation in flight at a time, its
@@ -462,11 +464,24 @@ typedef struct {
 
 typedef struct {
     bool     enabled;
-    char     discord_webhook[256];
     time_t   last_status_log; // throttles the periodic "N points known" log line
     uint16_t point_count;
     WarPoint points[WAR_MAX_POINTS];
 } WarSettings;
+
+/* Central Discord webhook config, shared by every feature that raises an alert (war watcher,
+ * anti-scout reports, shield/anti-scout about to run out with nothing to renew with, resource
+ * transfer completed). One URL, one on/off switch per event kind - see NotifyDiscord() in
+ * protocol.c. Used to be war-only (war.discord_webhook); config.c still accepts that old key
+ * as an alias into discord_webhook below so existing config files keep working. */
+typedef struct {
+    char discord_webhook[256];
+    bool on_war;                 // point we track loses its shield bubble
+    bool on_antiscout_report;    // someone tried to scout us (_MSG_RESP_ANTISCOUTREPORTINFO)
+    bool on_shield_expiring;     // shield about to run out and no item left to renew it
+    bool on_antiscout_expiring;  // same, for anti-scout
+    bool on_transfer_done;       // a $bank resource delivery finished
+} NotifySettings;
 
 typedef enum
 {
@@ -634,11 +649,16 @@ typedef struct {
     bool active;
     bool loaded; // Have we received the buff list yet?
     bool pending;
+    bool expiring_notified; // "about to run out, nothing to renew with" already sent - reset once active again with time to spare
     uint16_t item_id;
     uint16_t quantity;
     uint64_t begin_time;
     uint32_t duration;
 } ShieldInfo;
+
+/* "Anti-espionnage" (see items.h): same shape as ShieldInfo, its RESP_USEITEM
+ * has the exact same extra fields. */
+typedef ShieldInfo AntiScoutInfo;
 
 typedef enum {
     HYPER_STATE_IDLE = 0,          // Nothing to do.
@@ -712,6 +732,16 @@ typedef struct {
     // Shield item preference.
     uint8_t shield_priority_count;
     uint16_t shield_priority[8];
+
+    /* Anti-scout ("anti-espionnage"): hides from scout reports without blocking
+     * attacks. Either kept active all the time (antiscout_always_on, regardless
+     * of the shield), or only as a fallback whenever no shield is active
+     * (antiscout_on_no_shield: shield always wins if it can be kept up, anti-
+     * scout only kicks in when it can't). always_on wins if both are set. */
+    bool antiscout_always_on;
+    bool antiscout_on_no_shield;
+    uint8_t antiscout_priority_count;
+    uint16_t antiscout_priority[8];
 
     /* Troop recall */
 
@@ -1045,6 +1075,7 @@ typedef struct {
 	SmartUseList smart_use;
 	ActivitySettings activity;
 	WarSettings war;
+	NotifySettings notify;
 	AllianceOp alliance_op;
 	GatherSettings gather;
 	GuildChatLog guild_chat_log;
@@ -1063,6 +1094,7 @@ typedef struct {
 	// ShieldSettings shield;
 	
 	ShieldInfo shield_info;
+	AntiScoutInfo antiscout_info;
 	
 	HyperSettings hyper;
 	

@@ -1325,25 +1325,26 @@ const char *FormatTime(uint32_t totalSecs) {
 
 void RecvIBuffInfo(Connection *c, const uint8_t *data) {
 	uint16_t offset = 0;
-	
+
 	c->shield_info.active = false;
-	
+	c->antiscout_info.active = false;
+
 	uint8_t b = read_u8(data + offset); offset +=1;
-	
+
 	uint64_t end_time = 0;
-	
+
 	uint64_t remaining = 0;
-	
+
 	for (int i = 0; i < b; i++) {
-		// quantity 
+		// quantity
 		uint16_t num    = read_u16(data + offset); offset += 2;
 		// item id
 		uint16_t itemID = read_u16(data + offset);  offset += 2;
 		// use time
 		uint64_t num2 = read_u64(data + offset); offset += 8;
-		// duration 
+		// duration
 		uint32_t num3 = read_u32(data + offset); offset += 4;
-		
+
 		switch (itemID) {
 			case SHIELD_4H:
 			case SHIELD_8H:
@@ -1354,18 +1355,34 @@ void RecvIBuffInfo(Connection *c, const uint8_t *data) {
 			case SHIELD_14D:
 				end_time  = num2 + num3;
 				remaining = (end_time > c->server_time) ? (end_time - c->server_time) : 0;
-				
+
 				c->shield_info.active     = true;
 				c->shield_info.item_id    = itemID;
 				c->shield_info.begin_time = num2;
 				c->shield_info.duration   = num3;
-				
+
 				printf("[INFO] Shield expires in: %s\n", FormatTime(remaining));
+				break;
+			case ANTISCOUT_4H:
+			case ANTISCOUT_8H:
+			case ANTISCOUT_1D:
+			case ANTISCOUT_3D:
+			case ANTISCOUT_7D:
+				end_time  = num2 + num3;
+				remaining = (end_time > c->server_time) ? (end_time - c->server_time) : 0;
+
+				c->antiscout_info.active     = true;
+				c->antiscout_info.item_id    = itemID;
+				c->antiscout_info.begin_time = num2;
+				c->antiscout_info.duration   = num3;
+
+				LOGI("[ANTISCOUT] Expire dans : %s\n", FormatTime(remaining));
 				break;
 		}
 	}
-	
+
 	c->shield_info.loaded = true;
+	c->antiscout_info.loaded = true;
 }
 
 void RecvMarchData(Connection *c, const uint8_t *data) {
@@ -2725,18 +2742,32 @@ void RecvUseItem(Connection *c, const uint8_t *data, uint16_t size) {
 			RecvMigrationScrollResult(c);
 			return;
 		} else if (item_id == SHIELD_4H ||
-				item_id == SHIELD_8H || 
-				item_id == SHIELD_12H || 
-				item_id == SHIELD_1D || 
-				item_id == SHIELD_3D || 
+				item_id == SHIELD_8H ||
+				item_id == SHIELD_12H ||
+				item_id == SHIELD_1D ||
+				item_id == SHIELD_3D ||
 				item_id == SHIELD_7D) {
-			
+
 			c->shield_info.active     =   true;
 			c->shield_info.pending    =   false;
-			c->shield_info.quantity   =   read_u16(data + offset); offset += 2; // quantity 
+			c->shield_info.quantity   =   read_u16(data + offset); offset += 2; // quantity
 			c->shield_info.item_id    =   read_u16(data + offset); offset += 2; // item id
 			c->shield_info.begin_time =   read_u64(data + offset); offset += 8; // begin time
 			c->shield_info.duration   =   read_u32(data + offset); offset += 4; // duration
+			return;
+		} else if (item_id == ANTISCOUT_4H ||
+				item_id == ANTISCOUT_8H ||
+				item_id == ANTISCOUT_1D ||
+				item_id == ANTISCOUT_3D ||
+				item_id == ANTISCOUT_7D) {
+
+			c->antiscout_info.active     = true;
+			c->antiscout_info.pending    = false;
+			c->antiscout_info.quantity   = read_u16(data + offset); offset += 2; // quantity
+			c->antiscout_info.item_id    = read_u16(data + offset); offset += 2; // item id
+			c->antiscout_info.begin_time = read_u64(data + offset); offset += 8; // begin time
+			c->antiscout_info.duration   = read_u32(data + offset); offset += 4; // duration
+			LOGI("[ANTISCOUT] Actif : %s\n", GetShieldName(item_id));
 			return;
 		} else if (item_id == WITHDRAW_SQUAD) {
 			// uint8_t march_index = read_u8(data + offset); offset += 1;
@@ -2836,8 +2867,35 @@ const char *GetShieldName(uint16_t item_id)
 		case SHIELD_3D:  return "3 day shield";
 		case SHIELD_7D:  return "7 day shield";
 		case SHIELD_14D: return "14 day shield";
+		case ANTISCOUT_4H: return "4 hour anti-scout";
+		case ANTISCOUT_8H: return "8 hour anti-scout";
+		case ANTISCOUT_1D: return "1 day anti-scout";
+		case ANTISCOUT_3D: return "3 day anti-scout";
+		case ANTISCOUT_7D: return "7 day anti-scout";
 		default:         return "unknown shield";
 	}
+}
+
+/* Read-only checks used to tell "about to run out, and nothing to renew with" (worth
+ * notifying a human about) apart from "about to run out, a renewal is on its way" (not). */
+bool HasAnyShieldItem(Connection *c)
+{
+	for (uint8_t i = 0; i < c->protection.shield_priority_count; i++) {
+		uint16_t item_id = c->protection.shield_priority[i];
+		if (c->items[item_id].quantity > 0)
+			return true;
+	}
+	return false;
+}
+
+bool HasAnyAntiScoutItem(Connection *c)
+{
+	for (uint8_t i = 0; i < c->protection.antiscout_priority_count; i++) {
+		uint16_t item_id = c->protection.antiscout_priority[i];
+		if (c->items[item_id].quantity > 0)
+			return true;
+	}
+	return false;
 }
 
 void UsePriorityShield(Connection *c)
@@ -2845,7 +2903,7 @@ void UsePriorityShield(Connection *c)
 	// A shield activation request has already been sent.
 	if (c->shield_info.pending)
 		return;
-	
+
 	for (uint8_t i = 0; i < c->protection.shield_priority_count; i++) {
 		uint16_t item_id = c->protection.shield_priority[i];
 		
@@ -2872,6 +2930,37 @@ void UsePriorityShield(Connection *c)
 	
 	printf("[INFO] No shield items available.\n");
 	return; // No shields available
+}
+
+void UsePriorityAntiScout(Connection *c)
+{
+	// An anti-scout activation request has already been sent.
+	if (c->antiscout_info.pending)
+		return;
+
+	for (uint8_t i = 0; i < c->protection.antiscout_priority_count; i++) {
+		uint16_t item_id = c->protection.antiscout_priority[i];
+
+		switch (item_id) {
+			case ANTISCOUT_4H:
+			case ANTISCOUT_8H:
+			case ANTISCOUT_1D:
+			case ANTISCOUT_3D:
+			case ANTISCOUT_7D:
+				break;
+			default:
+				continue;
+		}
+
+		if (c->items[item_id].quantity > 0) {
+			RequestSimpleUseItem(c, item_id, 1);
+			c->antiscout_info.pending = true;
+			LOGI("[ANTISCOUT] Using %s\n", GetShieldName(item_id));
+			return;
+		}
+	}
+
+	LOGD("[ANTISCOUT] No anti-scout items available.\n");
 }
 
 /*
@@ -3090,29 +3179,124 @@ void ShieldTick(Connection *c)
 {
 	if (!c->protection.enabled)
 		return;
-	
+
 	if (!c->protection.shield_always_on)
 		return;
-		
+
 	// Don't make any shield decisions until the server
 	// has told us which buffs are currently active.
 	if (!c->shield_info.loaded)
 		return;
-	
+
 	// Already protected?
 	if (c->shield_info.active) {
 		// Still plenty of time remaining.
 		uint64_t end_time = c->shield_info.begin_time + c->shield_info.duration;
-		
+
 		uint32_t remaining_time = (end_time > c->server_time) ? (uint32_t)(end_time - c->server_time) : 0;
-		
-		if (remaining_time > 300) // 5 minutes
+
+		if (remaining_time > 300) { // 5 minutes
+			c->shield_info.expiring_notified = false; // re-arm for the next time it runs low
 			return;
+		}
 	}
-	
+
 	// printf("[SHIELD] Shield expiring soon, renewing...\n");
-	
+
+	// Nothing left to renew with: this is the one case a human needs to step in for -
+	// notify once, not every tick, until a shield becomes active with time to spare again.
+	if (c->notify.on_shield_expiring && !c->shield_info.expiring_notified && !HasAnyShieldItem(c)) {
+		c->shield_info.expiring_notified = true;
+		NotifyDiscord(c, "Bouclier bientôt expiré et aucun bouclier disponible en stock !");
+	}
+
 	UsePriorityShield(c);
+}
+
+/* "Anti-espionnage" ("hide the territory") as a fallback whenever a shield is
+ * not active: the shield always wins when it can be kept up (a shield also
+ * blocks attacks, not just scouts), this only kicks in when it can't. */
+void AntiScoutTick(Connection *c)
+{
+	if (!c->protection.enabled)
+		return;
+
+	bool always_on = c->protection.antiscout_always_on;
+	bool fallback  = c->protection.antiscout_on_no_shield;
+
+	if (!always_on && !fallback)
+		return;
+
+	if (!c->antiscout_info.loaded)
+		return;
+
+	// Fallback mode only (not always_on): a shield covers scouts too, so there is
+	// nothing to do for anti-scout while it holds. always_on skips this entirely
+	// and keeps anti-scout up regardless of the shield.
+	if (!always_on && fallback) {
+		if (!c->shield_info.loaded)
+			return;
+
+		if (c->shield_info.active) {
+			uint64_t end_time = c->shield_info.begin_time + c->shield_info.duration;
+			uint32_t remaining_time = (end_time > c->server_time) ? (uint32_t)(end_time - c->server_time) : 0;
+
+			if (remaining_time > 300) // 5 minutes
+				return;
+		}
+	}
+
+	// Already protected?
+	if (c->antiscout_info.active) {
+		uint64_t end_time = c->antiscout_info.begin_time + c->antiscout_info.duration;
+		uint32_t remaining_time = (end_time > c->server_time) ? (uint32_t)(end_time - c->server_time) : 0;
+
+		if (remaining_time > 300) { // 5 minutes
+			c->antiscout_info.expiring_notified = false; // re-arm for the next time it runs low
+			return;
+		}
+	}
+
+	if (c->notify.on_antiscout_expiring && !c->antiscout_info.expiring_notified && !HasAnyAntiScoutItem(c)) {
+		c->antiscout_info.expiring_notified = true;
+		NotifyDiscord(c, "Anti-espionnage bientôt expiré et aucun item disponible en stock !");
+	}
+
+	UsePriorityAntiScout(c);
+}
+
+/* _MSG_RESP_ANTISCOUTREPORTINFO (3420) - "someone tried to scout you" report. Decoded from
+ * a 10-sample run found (by luck) sitting in a long, unrelated capture (migration.pcapng):
+ * same envelope shape as RecvGatherReportInfo's (report_id/timestamp header, then
+ * kingdom_id/x/y at the same offsets 13/15/17), which corroborates it rather than being a
+ * coincidence. Layout (offsets are into `data`, i.e. after the 4-byte size+type header):
+ *   report_id(4) pad(1) timestamp(4) pad(4) kingdom_id(2) x(2) y(2) unknown(2) unknown2(1)
+ *   pad(1) scout_name(13) scout_player_id(4) blocked(1) pad(14) = 55 bytes.
+ * "blocked" was 0 or 12 across the sample, never anything else, and tracked cleanly with
+ * whether anti-scout was actually active at that timestamp in the same capture - read as a
+ * bool (nonzero = blocked) here, but the packet name itself ("AntiScoutReportInfo") is the
+ * strongest evidence for that reading, not a large sample size: treat it as reasonably
+ * confident, not proven. */
+void RecvAntiScoutReportInfo(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 55) return;
+
+	uint16_t kingdom_id = read_u16(data + 13);
+	uint16_t x          = read_u16(data + 15);
+	uint16_t y           = read_u16(data + 17);
+	char name[14] = {0};
+	read_raw(name, data + 23, 13);
+	uint32_t player_id  = read_u32(data + 36);
+	bool blocked         = read_u8(data + 40) != 0;
+
+	LOGI("[ANTISCOUT] Tentative d'espionnage par %s (id %u) sur royaume %u (%u,%u) : %s\n",
+		name, player_id, kingdom_id, x, y, blocked ? "bloquée" : "NON bloquée");
+
+	if (c->notify.on_antiscout_report) {
+		char msg[256];
+		snprintf(msg, sizeof(msg), "%s a tenté de vous espionner : %s",
+			name, blocked ? "bloqué par l'anti-espionnage" : "NON bloqué (pas d'anti-espionnage actif ?)");
+		NotifyDiscord(c, msg);
+	}
 }
 
 void AllianceGiftTick(Connection *c) {
@@ -3327,22 +3511,24 @@ static void JsonEscape(const char *in, char *out, size_t out_size) {
 	out[j] = '\0';
 }
 
-/* Writes the message to a local file (data.path/war_alert.json) and shells out to
+/* Writes the message to a local file (data.path/notify_alert.json) and shells out to
  * curl to POST it, so the message content never goes through a shell string: only
- * the file path (ours) and the webhook URL (from the local config) do. */
+ * the file path (ours) and the webhook URL (from the local config) do. Shared by
+ * every feature that raises an alert - each caller checks its own c->notify.on_*
+ * switch before calling this, this function only checks the URL is set. */
 void NotifyDiscord(Connection *c, const char *message) {
-	if (c->war.discord_webhook[0] == '\0')
+	if (c->notify.discord_webhook[0] == '\0')
 		return;
 
 	char escaped[512];
 	JsonEscape(message, escaped, sizeof(escaped));
 
 	char path[300];
-	snprintf(path, sizeof(path), "%swar_alert.json", c->bot.data_path);
+	snprintf(path, sizeof(path), "%snotify_alert.json", c->bot.data_path);
 
 	FILE *f = fopen(path, "w");
 	if (!f) {
-		LOGE("[WAR] Impossible d'écrire le message pour le webhook (%s)\n", path);
+		LOGE("[NOTIFY] Impossible d'écrire le message pour le webhook (%s)\n", path);
 		return;
 	}
 	fprintf(f, "{\"content\":\"%s\"}", escaped);
@@ -3352,15 +3538,15 @@ void NotifyDiscord(Connection *c, const char *message) {
 #ifdef _WIN32
 	snprintf(cmd, sizeof(cmd),
 		"curl -s -f -X POST -H \"Content-Type: application/json\" --data @\"%s\" \"%s\" >NUL 2>&1",
-		path, c->war.discord_webhook);
+		path, c->notify.discord_webhook);
 #else
 	snprintf(cmd, sizeof(cmd),
 		"curl -s -f -X POST -H 'Content-Type: application/json' --data @%s '%s' >/dev/null 2>&1",
-		path, c->war.discord_webhook);
+		path, c->notify.discord_webhook);
 #endif
 	int rc = system(cmd);
 	if (rc != 0)
-		LOGE("[WAR] Échec de l'envoi au webhook Discord (curl absent, réseau bloqué ou webhook invalide ; code %d)\n", rc);
+		LOGE("[NOTIFY] Échec de l'envoi au webhook Discord (curl absent, réseau bloqué ou webhook invalide ; code %d)\n", rc);
 }
 
 void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
@@ -3381,7 +3567,8 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 				char msg[256];
 				snprintf(msg, sizeof(msg), "%s [%s] a débullé à X:%u Y:%u", p->name, p->tag, pos.x, pos.y);
 				LOGI("[WAR] %s\n", msg);
-				NotifyDiscord(c, msg);
+				if (c->notify.on_war)
+					NotifyDiscord(c, msg);
 			}
 		}
 		return;
@@ -3461,36 +3648,11 @@ void WarTick(Connection *c) {
 
 /* ------------------------------------------------------------------------
  * Automatic gathering. See GatherSettings' comment (connection.h) for the
- * whole picture. Reverse-engineered from a capture of manually browsing the
- * map (which does send _MSG_REQUEST_MAPDATA, repeatedly, after one
- * _MSG_REQUEST_OPEN_UI - contrary to what an earlier, different capture for
- * the war feature concluded) and gathering/recalling 7 tiles.
+ * whole picture, including why there is no active map scan here (confirmed
+ * live: the server does not answer _MSG_REQUEST_MAPDATA sent by this bot, so
+ * RequestOpenUI/RequestMapData were removed the same way the war feature
+ * removed its own attempt rather than leave dead/misleading code behind).
  * ------------------------------------------------------------------------ */
-
-void RequestOpenUI(Connection *c, uint32_t kind) {
-	c->size = 2;
-	write_u16(c->data + c->size, _MSG_REQUEST_OPEN_UI); c->size += 2;
-	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
-	write_u32(c->data + c->size, kind); c->size += 4;
-	write_u16(c->data, c->size);
-	send_packet(c, true);
-}
-
-/* Always exactly 4 zone slots on the wire, matching the captured client - pad
- * unused slots with a zone already requested (harmless, never with 0 which is a
- * real zone). */
-void RequestMapData(Connection *c, uint16_t zone[4]) {
-	c->size = 2;
-	write_u16(c->data + c->size, _MSG_REQUEST_MAPDATA); c->size += 2;
-	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
-	write_u8(c->data + c->size, 4); c->size += 1;
-	for (int i = 0; i < 4; i++) {
-		write_u16(c->data + c->size, zone[i]); c->size += 2;
-	}
-	write_zero(c->data + c->size, 32); c->size += 32;
-	write_u16(c->data, c->size);
-	send_packet(c, true);
-}
 
 void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count) {
 	c->size = 2;
@@ -3576,30 +3738,6 @@ void RecvGatherReportInfo(Connection *c, const uint8_t *data, uint16_t size) {
 		amt, kind, level, kingdom_id, zone_id, point_id);
 }
 
-/* Which zone (0..1023) the Nth step of the sweep covers: a rectangle of zones
- * around the castle, gather.radius tiles wide, walked row by row. */
-static bool GatherZoneAt(Connection *c, uint16_t index, uint16_t *zone_out) {
-	map_pos_t castle = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
-	int radius = c->gather.radius > 0 ? c->gather.radius : 30;
-
-	int x_min = castle.x > radius ? castle.x - radius : 0;
-	int x_max = castle.x + radius < 511 ? castle.x + radius : 511;
-	int y_min = castle.y > radius ? castle.y - radius : 0;
-	int y_max = castle.y + radius < 1023 ? castle.y + radius : 1023;
-
-	int xz_min = x_min >> 5, xz_max = x_max >> 5;
-	int yz_min = y_min >> 4, yz_max = y_max >> 4;
-	int width = xz_max - xz_min + 1;
-	int height = yz_max - yz_min + 1;
-
-	if (index >= (uint16_t)(width * height)) return false;
-
-	int xz = xz_min + (index % width);
-	int yz = yz_min + (index / width);
-	*zone_out = (uint16_t)(xz + yz * 16);
-	return true;
-}
-
 /* Highest level first (faster gathering, fewer marches for the same total - see
  * docs.gathering), ties broken by amount. */
 static GatherTile *GatherBestUntargeted(Connection *c) {
@@ -3623,39 +3761,23 @@ void GatherTick(Connection *c) {
 	if (!c->gather.enabled) return;
 	if (c->player.max_marches == 0) return; // march data not loaded yet
 
+	// Confirmed live, twice: the server never answers _MSG_REQUEST_MAPDATA sent by
+	// this bot (0 responses to 22, then 23, paced requests covering the right
+	// zones), unlike direct actions (marches, resources...) which all work. Same
+	// wall the war feature hit - see its own header comment. Tiles are therefore
+	// only ever known from whatever _MSG_RESP_UPDATE_MAPINFO(_PLUS) arrives on its
+	// own (e.g. a human opening the map on this account from time to time); there
+	// is no way, currently, to make this a true "no one has to touch anything" scan.
 	if (!c->gather.scan_done) {
-		// Armed on the first call instead of acting right away, so the very first
-		// action (opening the map) waits its turn too, not just the ones after it.
-		if (c->gather.next_scan_at == 0) {
-			c->gather.next_scan_at = GatherHumanDelay();
-			return;
-		}
-		if (now_ms() < c->gather.next_scan_at)
-			return;
-		c->gather.next_scan_at = GatherHumanDelay();
+		c->gather.scan_done = true;
+		LOGW("[GATHER] Pas de scan actif (le serveur ne répond pas aux demandes du bot) : "
+			"seules les tuiles vues passivement seront récoltées\n");
+	}
 
-		uint16_t zone[4];
-		bool any = false;
-		for (int i = 0; i < 4; i++) {
-			uint16_t z;
-			if (GatherZoneAt(c, c->gather.scan_cursor + (uint16_t)i, &z)) {
-				zone[i] = z;
-				any = true;
-			} else {
-				zone[i] = any ? zone[0] : 0;
-			}
-		}
-
-		if (!any) {
-			c->gather.scan_done = true;
-			LOGI("[GATHER] Scan terminé : %u tuile(s) trouvée(s) dans le rayon\n", c->gather.tile_count);
-			return;
-		}
-
-		LOGD("[GATHER] Demande de données pour les zones %u,%u,%u,%u\n", zone[0], zone[1], zone[2], zone[3]);
-		RequestMapData(c, zone);
-		c->gather.scan_cursor += 4;
-		return;
+	time_t now = time(NULL);
+	if (now - c->gather.last_status_log >= 600) {
+		c->gather.last_status_log = now;
+		LOGI("[GATHER] %u tuile(s) connue(s) (reçues passivement)\n", c->gather.tile_count);
 	}
 
 	uint8_t reserved = c->gather.max_marches < c->player.max_marches ? c->gather.max_marches : c->player.max_marches;
@@ -5140,6 +5262,20 @@ void ResourceTransferTick(Connection *c)
 			
 			break;
 		case TRANSFER_COMPLETE:
+			// remaining == 0 only on a full success; the "insufficient resources" partial
+			// path also lands in TRANSFER_COMPLETE but leaves remaining > 0 - don't notify that one,
+			// BotReply() already told the requester inline.
+			if (c->notify.on_transfer_done && c->transfer.remaining == 0 && c->transfer.amount > 0) {
+				static const char *kind_names[] = {"nourriture", "pierre", "bois", "minerai", "or"};
+				const char *kind = (c->transfer.resource_type >= RESOURCE_FOOD && c->transfer.resource_type <= RESOURCE_GOLD)
+					? kind_names[c->transfer.resource_type] : "?";
+				char amt[20];
+				format_number2(c->transfer.amount, amt, sizeof(amt));
+				char msg[256];
+				snprintf(msg, sizeof(msg), "Livraison terminée : %s de %s envoyé à %s",
+					amt, kind, c->transfer.target_name);
+				NotifyDiscord(c, msg);
+			}
 			c->transfer.state = TRANSFER_IDLE;
 			break;
 		case TRANSFER_FAILED:

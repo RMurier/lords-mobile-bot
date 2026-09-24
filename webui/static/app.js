@@ -27,6 +27,7 @@
     importResult: null,
     importing: false,
     nav: 0,              // bumped on every navigation, so a late answer cannot pull you back
+    tagFilter: "",        // sidebar filter: "" = tous les comptes, sinon un tag exact
   };
 
   // ------------------------------------------------------------------ api
@@ -169,25 +170,41 @@
       <div class="savebar" id="savebar" hidden></div>`;
   }
 
+  function scopedAccounts() {
+    return S.tagFilter ? S.accounts.filter((a) => a.tag === S.tagFilter) : S.accounts;
+  }
+
   function renderSidebar() {
-    const items = S.accounts.map((a) => {
+    const tags = [...new Set(S.accounts.map((a) => a.tag).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    if (S.tagFilter && !tags.includes(S.tagFilter)) S.tagFilter = ""; // tag renamed/removed: drop a stale filter
+    const scope = scopedAccounts();
+    const items = scope.map((a) => {
       const kind = statusKind(a.status);
       const current = S.view === "account" && S.id === a.id;
       const sub = a.igg_id ? `IGG ${a.igg_id}` : (a.has_key ? a.id : "identifiants manquants");
+      const tagBadge = a.tag ? `<span class="tag-badge">${esc(a.tag)}</span>` : "";
       return `<div class="acc-row"><button class="acc" data-act="open-account" data-id="${esc(a.id)}" ${current ? 'aria-current="true"' : ""}>
         <span class="dot ${kind}" title="${esc(statusText(a.status))}"></span>
-        <span class="txt"><div class="name">${esc(displayName(a))}</div><div class="sub">${esc(sub)}</div></span>
+        <span class="txt"><div class="name"><span class="name-text">${esc(displayName(a))}</span>${tagBadge}</div><div class="sub">${esc(sub)}</div></span>
       </button><button class="iconbtn acc-edit" data-act="rename-account" data-id="${esc(a.id)}" title="Renommer" aria-label="Renommer ${esc(displayName(a))}">✎</button></div>`;
     }).join("");
-    const running = S.accounts.filter((a) => a.status.state === "running").length;
+    const running = scope.filter((a) => a.status.state === "running").length;
     const multi = S.accounts.length > 1;
+    const filterHtml = tags.length ? `<div class="side-filter">
+      <select id="tag-filter" aria-label="Filtrer par tag">
+        <option value="" ${S.tagFilter ? "" : "selected"}>Tous les comptes (${S.accounts.length})</option>
+        ${tags.map((t) => `<option value="${esc(t)}" ${S.tagFilter === t ? "selected" : ""}>${esc(t)} (${S.accounts.filter((a) => a.tag === t).length})</option>`).join("")}
+      </select>
+    </div>` : "";
+    const bulkLabel = S.tagFilter ? esc(S.tagFilter) : "Tout";
     const sidebarHtml = `
       <div class="side-title">Comptes</div>
-      ${items || '<p class="help" style="padding:0 8px">Aucun compte pour l\'instant.</p>'}
+      ${filterHtml}
+      ${items || '<p class="help" style="padding:0 8px">Aucun compte pour ce filtre.</p>'}
       <div class="side-actions"><button class="btn wide" data-act="add-view">＋ Ajouter un compte</button></div>
       ${multi ? `<div class="side-foot">
-        <button class="btn wide" data-act="start-all">Tout démarrer</button>
-        <button class="btn wide" data-act="stop-all" ${running ? "" : "disabled"}>Tout arrêter</button>
+        <button class="btn wide" data-act="start-all">Démarrer : ${bulkLabel}</button>
+        <button class="btn wide" data-act="stop-all" ${running ? "" : "disabled"}>Arrêter : ${bulkLabel}</button>
       </div>` : ""}`;
     setSlot("sidebar", sidebarHtml);
   }
@@ -255,7 +272,7 @@
     return `
       <div class="head">
         <div class="title">
-          <h1 id="acc-title">${esc(displayName(summary))} <button class="iconbtn" data-act="rename" title="Renommer le compte" aria-label="Renommer le compte">✎</button></h1>
+          <h1 id="acc-title">${esc(displayName(summary))} ${summary.tag ? `<span class="tag-badge">${esc(summary.tag)}</span>` : ""} <button class="iconbtn" data-act="rename" title="Renommer le compte" aria-label="Renommer le compte">✎</button></h1>
           <div class="subtitle mono">accounts/${esc(a.id)}.cfg</div>
         </div>
         <div class="actions" id="ctrl"><span id="ctrl-chip">${slot("ctrl-chip", chipHtml())}</span><span id="ctrl-btns">${slot("ctrl-btns", btnsHtml())}</span></div>
@@ -374,7 +391,7 @@
       const hint = sizeHint(value);
       control = `<input type="text" id="${id}" class="${invalid}" data-key="${esc(key)}" spellcheck="false" value="${esc(value)}">
         <span class="hint ${hint.bad ? "bad" : ""}" data-hint="${esc(key)}">${esc(hint.text)}</span>`;
-    } else if (f.type === "shields") {
+    } else if (f.type === "shields" || f.type === "antiscout") {
       control = shieldsHtml(f);
     } else if (f.type === "channels") {
       control = channelsHtml(f);
@@ -390,15 +407,17 @@
 
   function shieldsHtml(f) {
     const key = f.key, current = splitShields(S.form[key]);
-    const label = (name) => (S.schema.shields.find(([n]) => n === name) || [name, name])[1];
+    const list = f.type === "antiscout" ? S.schema.antiscout : S.schema.shields;
+    const addLabel = f.type === "antiscout" ? "Ajouter un objet anti-espionnage…" : "Ajouter un bouclier…";
+    const label = (name) => (list.find(([n]) => n === name) || [name, name])[1];
     const rows = current.map((name, i) => `<div class="shield-row">
       <span class="n">${i + 1}.</span><span class="l">${esc(label(name))}</span>
       <button class="iconbtn" data-act="shield-up" data-key="${esc(key)}" data-i="${i}" ${i === 0 ? "disabled" : ""} aria-label="Monter">↑</button>
       <button class="iconbtn" data-act="shield-down" data-key="${esc(key)}" data-i="${i}" ${i === current.length - 1 ? "disabled" : ""} aria-label="Descendre">↓</button>
       <button class="iconbtn" data-act="shield-del" data-key="${esc(key)}" data-i="${i}" aria-label="Retirer">✕</button></div>`).join("");
-    const rest = S.schema.shields.filter(([name]) => !current.includes(name));
-    const add = rest.length ? `<select data-shield-add="${esc(key)}" aria-label="Ajouter un bouclier">
-      <option value="">Ajouter un bouclier…</option>${rest.map(([name, text]) => `<option value="${esc(name)}">${esc(text)}</option>`).join("")}</select>` : "";
+    const rest = list.filter(([name]) => !current.includes(name));
+    const add = rest.length ? `<select data-shield-add="${esc(key)}" aria-label="${esc(addLabel)}">
+      <option value="">${esc(addLabel)}</option>${rest.map(([name, text]) => `<option value="${esc(name)}">${esc(text)}</option>`).join("")}</select>` : "";
     return `<div class="shields" id="${fieldId(key)}" data-shields="${esc(key)}">${rows}${add}</div>`;
   }
 
@@ -987,7 +1006,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
 
   async function startAll() {
     const stagger = Number(S.settings.stagger) || 0;
-    const todo = S.accounts.filter((a) => a.status.state !== "running" && a.has_key && a.igg_id);
+    const todo = scopedAccounts().filter((a) => a.status.state !== "running" && a.has_key && a.igg_id);
     for (let i = 0; i < todo.length; i++) {
       try {
         await api("POST", `/api/accounts/${enc(todo[i].id)}/start`);
@@ -1002,10 +1021,11 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
   }
 
   async function stopAll() {
-    for (const account of S.accounts.filter((a) => a.status.state === "running")) {
+    const todo = scopedAccounts().filter((a) => a.status.state === "running");
+    for (const account of todo) {
       try { await api("POST", `/api/accounts/${enc(account.id)}/stop`); } catch (error) { toast(error.message, "err"); }
     }
-    toast("Tous les bots sont arrêtés");
+    toast(S.tagFilter ? `Comptes "${S.tagFilter}" arrêtés` : "Tous les bots sont arrêtés");
     await refreshState();
   }
 
@@ -1131,6 +1151,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     "rename-save": () => saveRename(),
     "rename-cancel": () => cancelRename(),
     "rename-chip": (el) => { const input = $("#rename-input"); if (input) { input.value = el.dataset.name; input.focus(); } },
+    "tag-chip": (el) => { const input = $("#tag-input"); if (input) { input.value = el.dataset.name; input.focus(); } },
     "capture-start": () => captureStart(),
     "capture-stop": () => captureStop(),
     "capture-cancel": () => captureCancel(),
@@ -1248,6 +1269,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
   // ---------------------------------------------------------------- rename
 
   const NAME_SUGGESTIONS = ["Bank", "Filler", "Farm", "Main"];
+  const TAG_SUGGESTIONS = ["Bank", "Filler", "Prison", "War", "Farm"];
 
   function startRename() {
     const title = $("#acc-title");
@@ -1262,7 +1284,13 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
         <button class="btn small" data-act="rename-cancel">Annuler</button></div>
       <div class="chips"><span class="help">Suggestions :</span>${NAME_SUGGESTIONS.map((n) =>
         `<button class="chip-btn" data-act="rename-chip" data-name="${n}">${n}</button>`).join("")}
-        <span class="help">ou tapez ce que vous voulez. Vide = nom par défaut.</span></div>`;
+        <span class="help">ou tapez ce que vous voulez. Vide = nom par défaut.</span></div>
+      <div class="inline" style="margin-top:10px">
+        <label class="lbl" for="tag-input" style="margin:0">Tag (utilité du compte)</label>
+        <input type="text" id="tag-input" maxlength="20" value="${esc(summary.tag || "")}" placeholder="ex. Bank, Filler, Prison…" aria-label="Tag du compte" spellcheck="false"></div>
+      <div class="chips"><span class="help">Suggestions :</span>${TAG_SUGGESTIONS.map((n) =>
+        `<button class="chip-btn" data-act="tag-chip" data-name="${n}">${n}</button>`).join("")}
+        <span class="help">ou tapez ce que vous voulez. Vide = pas de tag.</span></div>`;
     title.hidden = true;
     title.after(box);
     const input = $("#rename-input");
@@ -1279,9 +1307,11 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
 
   async function saveRename() {
     const input = $("#rename-input");
+    const tagInput = $("#tag-input");
     if (!input) return;
     try {
       await api("PUT", `/api/accounts/${enc(S.id)}/alias`, { alias: input.value });
+      if (tagInput) await api("PUT", `/api/accounts/${enc(S.id)}/tag`, { tag: tagInput.value });
       await refreshState();
       render();
       toast("Compte renommé", "ok");
@@ -1377,6 +1407,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     document.addEventListener("change", (event) => {
       if (event.target.id === "file") importFile(event.target.files[0]);
       if (event.target.id === "data-file") { dataImport(event.target.files[0]); event.target.value = ""; }
+      if (event.target.id === "tag-filter") { S.tagFilter = event.target.value; renderSidebar(); }
     });
     document.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && S.view === "account" && dirtyKeys().length) {

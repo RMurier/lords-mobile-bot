@@ -66,7 +66,7 @@ class ApiError(Exception):
 class Settings:
     def __init__(self):
         self.lock = threading.Lock()
-        self.data = {"client_path": "", "stagger": 5, "aliases": {}, "autostart": [], "remote_url": "", "remote_token": ""}
+        self.data = {"client_path": "", "stagger": 5, "aliases": {}, "tags": {}, "autostart": [], "remote_url": "", "remote_token": ""}
         self.data.update(store.get_settings())
 
     def save(self):
@@ -156,6 +156,7 @@ def account_payload(account_id):
     return {
         "id": account_id,
         "alias": settings.get("aliases").get(account_id, ""),
+        "tag": settings.get("tags").get(account_id, ""),
         "values": values,
         "secrets": secrets_info,
         "defaults_used": defaults_used,
@@ -172,6 +173,7 @@ def account_summary(account_id):
     return {
         "id": account_id,
         "alias": settings.get("aliases").get(account_id, ""),
+        "tag": settings.get("tags").get(account_id, ""),
         "igg_id": present.get("account.igg_id", ""),
         "has_key": bool(present.get("account.access_key")),
         "status": bots.status(account_id),
@@ -241,7 +243,7 @@ def credential_updates(account):
 
 
 BUNDLE_VERSION = 1
-BUNDLE_SETTINGS = ("stagger", "aliases")     # what belongs to the accounts, not to this computer
+BUNDLE_SETTINGS = ("stagger", "aliases", "tags")     # what belongs to the accounts, not to this computer
 
 
 def export_bundle():
@@ -261,6 +263,7 @@ def import_bundle(bundle, overwrite=False):
         raise ApiError(400, f"Version de sauvegarde inconnue : {bundle.get('version')}.")
     imported, skipped = [], []
     aliases = dict(settings.get("aliases"))
+    tags = dict(settings.get("tags"))
     for account_id, entry in bundle["accounts"].items():
         if not ACCOUNT_ID.match(str(account_id)) or not isinstance(entry, dict) or not isinstance(entry.get("cfg"), str):
             skipped.append({"id": str(account_id)[:64], "reason": "entrée invalide"})
@@ -280,8 +283,11 @@ def import_bundle(bundle, overwrite=False):
         alias = (bundle.get("settings", {}).get("aliases") or {}).get(account_id)
         if isinstance(alias, str) and alias:
             aliases[account_id] = alias[:40]
+        tag = (bundle.get("settings", {}).get("tags") or {}).get(account_id)
+        if isinstance(tag, str) and tag:
+            tags[account_id] = tag[:20]
         imported.append(account_id)
-    updates = {"aliases": aliases}
+    updates = {"aliases": aliases, "tags": tags}
     stagger = bundle.get("settings", {}).get("stagger")
     if isinstance(stagger, int) and 0 <= stagger <= 600 and not skipped and imported:
         updates["stagger"] = stagger
@@ -693,6 +699,9 @@ def api_account_delete(h, query, account_id):
     aliases = dict(settings.get("aliases"))
     if aliases.pop(account_id, None) is not None:
         settings.update(aliases=aliases)
+    tags = dict(settings.get("tags"))
+    if tags.pop(account_id, None) is not None:
+        settings.update(tags=tags)
 
 
 @route("POST", "/api/accounts")
@@ -720,6 +729,19 @@ def api_account_alias(h, query, account_id):
         aliases.pop(account_id, None)
     settings.update(aliases=aliases)
     return {"alias": alias}
+
+
+@route("PUT", "/api/accounts/([^/]+)/tag")
+def api_account_tag(h, query, account_id):
+    account_path(account_id)
+    tag = str(h.read_json().get("tag") or "").strip()[:20]
+    tags = dict(settings.get("tags"))
+    if tag:
+        tags[account_id] = tag
+    else:
+        tags.pop(account_id, None)
+    settings.update(tags=tags)
+    return {"tag": tag}
 
 
 @route("POST", "/api/accounts/([^/]+)/(start|stop|restart)")

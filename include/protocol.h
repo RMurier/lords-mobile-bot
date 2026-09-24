@@ -103,7 +103,13 @@ void RecvRefreshResources(Connection *c, const uint8_t *data);
 
 void HeartbeatTick(Connection *c);
 void BlackMarketTick(Connection *c);
+const char *GetShieldName(uint16_t item_id);
+bool HasAnyShieldItem(Connection *c);
+bool HasAnyAntiScoutItem(Connection *c);
+void UsePriorityShield(Connection *c);
+void UsePriorityAntiScout(Connection *c);
 void ShieldTick(Connection *c);
+void AntiScoutTick(Connection *c);
 void AllianceGiftTick(Connection*);
 uint8_t GetVIPLevel(uint32_t vipPoints);
 void RecvAllianceInfo(Connection*, const uint8_t*);
@@ -118,8 +124,6 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size);
 void WarTick(Connection *c);
 void NotifyDiscord(Connection *c, const char *message);
 
-void RequestOpenUI(Connection *c, uint32_t kind);
-void RequestMapData(Connection *c, uint16_t zone[4]);
 void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count);
 void RequestGatherRecall(Connection *c, uint32_t march_id);
 void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size);
@@ -128,6 +132,7 @@ void RecvGatherReturnResp(Connection *c, const uint8_t *data, uint16_t size);
 void RecvGatherTroopHome(Connection *c, const uint8_t *data, uint16_t size);
 void RecvGatherReportInfo(Connection *c, const uint8_t *data, uint16_t size);
 void GatherTick(Connection *c);
+void RecvAntiScoutReportInfo(Connection *c, const uint8_t *data, uint16_t size);
 
 void RequestAllianceQuit(Connection *c);
 void RequestAllianceSearchByTag(Connection *c, const char *tag);
