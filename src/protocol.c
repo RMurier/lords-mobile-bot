@@ -3112,7 +3112,14 @@ void UsePriorityShield(Connection *c)
 		}
 	}
 	
-	printf("[INFO] No shield items available.\n");
+	// Checked on every BotTick while a shield is wanted and none is active: without this,
+	// running out of shields prints this line as fast as the main loop spins (observed: about
+	// once a millisecond) instead of once every few minutes.
+	time_t now = time(NULL);
+	if (now - c->shield_info.no_item_logged_at >= 300) {
+		c->shield_info.no_item_logged_at = now;
+		printf("[INFO] No shield items available.\n");
+	}
 	return; // No shields available
 }
 
@@ -3144,7 +3151,12 @@ void UsePriorityAntiScout(Connection *c)
 		}
 	}
 
-	LOGD("[ANTISCOUT] No anti-scout items available.\n");
+	// Same throttling as UsePriorityShield's "no shield items available", same reason.
+	time_t now = time(NULL);
+	if (now - c->antiscout_info.no_item_logged_at >= 300) {
+		c->antiscout_info.no_item_logged_at = now;
+		LOGD("[ANTISCOUT] No anti-scout items available.\n");
+	}
 }
 
 /*

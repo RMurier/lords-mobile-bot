@@ -665,6 +665,7 @@ typedef struct {
     bool loaded; // Have we received the buff list yet?
     bool pending;
     bool expiring_notified; // "about to run out, nothing to renew with" already sent - reset once active again with time to spare
+    time_t no_item_logged_at; // throttles "no item available" (UsePriorityShield/UsePriorityAntiScout): checked every BotTick, would spam otherwise
     uint16_t item_id;
     uint16_t quantity;
     uint64_t begin_time;
