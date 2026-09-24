@@ -292,6 +292,11 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 	
+	if (strcmp(key, "log.packets") == 0) {
+		g_log_packets = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
+		return true;
+	}
+	
 	// client version 
 	if (strcmp(key, "client.version_major") == 0) {
 		c->app.version_major = (uint8_t)strtoul(value, NULL, 10);
@@ -419,6 +424,16 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 
 	if (strcmp(key, "gather.enabled") == 0) {
 		c->gather.enabled = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "guildbank.enabled") == 0) {
+		c->guildbank.enabled = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "recall.pause_seconds") == 0) {
+		c->recall.pause_seconds = (uint32_t)strtoul(value, NULL, 10);
 		return true;
 	}
 
@@ -681,6 +696,7 @@ bool LoadConfig(Connection *c, const char *filename)
 	c->reconnect.max_attempts = 0;
 	c->migration_scrolls_needed = 1;
 	c->gather.max_marches = 1;
+	c->recall.pause_seconds = 300; // $recall: no march for 5 minutes
 	c->notify.on_war = true; // preserves the old always-on-when-webhook-set war alert behavior
 	c->bot.command_input_mask = (1u << COMMAND_CHANNEL_GUILD) | (1u << COMMAND_CHANNEL_MAIL);
 	c->bot.command_output     = COMMAND_CHANNEL_MAIL;

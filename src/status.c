@@ -98,7 +98,12 @@ void StatusWrite(Connection *c, bool connected)
 	fprintf(f, "\"wounded\":{\"loaded\":%s,\"total\":%u},",
 		c->wounded.loaded ? "true" : "false", c->wounded.troop.total);
 
-	fprintf(f, "\"alliance\":{\"rank\":%d,\"members\":%u},", (int)c->RoleAlliance.Rank, c->alliance_member.count);
+	fprintf(f, "\"alliance\":{\"rank\":%d,\"members\":%u,\"member_names\":[", (int)c->RoleAlliance.Rank, c->alliance_member.count);
+	for (uint32_t i = 0; i < c->alliance_member.count && i < MAX_ALLIANCE_MEMBER; i++) {
+		if (i) fputc(',', f);
+		JsonString(f, c->alliance_member.member[i].name);
+	}
+	fputs("]},", f);
 
 	fputs("\"guild_chat\":[", f);
 	{

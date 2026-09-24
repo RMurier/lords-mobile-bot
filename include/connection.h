@@ -28,6 +28,8 @@
 #include <stdio.h>
 
 #include "des.h"
+#include "research.h"
+#include "buildings.h"
 
 typedef enum {
 	EMS_Null,
@@ -408,6 +410,19 @@ typedef struct {
     uint8_t  level;         // 1-5
     uint32_t amount;
 } GatherTile;
+
+/* $recall (command.c): every march is taken back, then the bot sends none for pause_seconds. The pause deadline
+ * itself is NOT here: Connection is wiped at every reconnection and the pause must hold across one, so it is a
+ * global in protocol.c (MarchesPaused()). */
+typedef struct {
+    uint32_t pause_seconds;   // recall.pause_seconds, default 300, 0 = no pause
+    bool     active;          // still sending the recall requests, one every 1-2 s
+    uint8_t  next_index;      // march index of the next request
+    uint8_t  count;           // how many march indices are tried
+    uint8_t  sent;            // requests sent so far
+    uint64_t next_at;         // now_ms() deadline for the next request
+    char     requester[64];   // who is told when it is done
+} RecallState;
 
 typedef struct {
     bool     enabled;
@@ -827,14 +842,6 @@ typedef struct {
     uint32_t being_rally_count;
 } RallyState;
 
-typedef struct {
-    uint16_t research_tech;
-    uint8_t  unk;
-    int64_t  finish_time;
-    uint32_t total_time;
-    uint8_t  tech_data[200];
-} TechnologyInfo;
-
 
 typedef struct {
 	int64_t data_index;
@@ -979,8 +986,28 @@ typedef struct {
     
     uint64_t not_before; /* now_ms() deadline: do not start before this (bag credit wait, human pacing) */
 
+    /* Guild bank (guildbank.h): the marches of a withdrawal are debited from balance_owner's balance as they leave. */
+    bool     from_balance;
+    char     balance_owner[13];
+    uint32_t in_flight;      /* debited for a march sent but not accepted yet: given back if it is refused */
+
     TransferState state;
 } ResourceTransfer;
+
+/* A request waiting for its turn: with a guild bank several members ask at once, one delivery goes at a time. */
+typedef struct {
+    char         requester[13];  // who asked, told about the result
+    char         target[13];     // who receives
+    ResourceType type;
+    uint32_t     amount;         // GROSS amount to send: the delivery tax is already added
+    bool         from_balance;   // taken from the requester's guild balance, else from the stock
+} TransferRequest;
+
+#define TRANSFER_QUEUE_MAX 16
+
+typedef struct {
+    bool enabled;   // guildbank.enabled: deposits are kept, the resource commands take them back
+} GuildBankSettings;
 
 
 
@@ -1069,6 +1096,7 @@ typedef struct {
 	
 	uint8_t building_count;
 	BuildingInfo building[256];
+	BuildingConstruction construction[BUILDING_QUEUE_SLOTS]; // what is being built, from _MSG_RESP_BUILDINGEVENT
 	
 	AllianceGiftList alliance_gifts;
 	AllianceSettings alliance;
@@ -1078,6 +1106,7 @@ typedef struct {
 	NotifySettings notify;
 	AllianceOp alliance_op;
 	GatherSettings gather;
+	RecallState recall;
 	GuildChatLog guild_chat_log;
 
 	HelpSpam help_spam;
@@ -1110,10 +1139,18 @@ typedef struct {
 	
 	RallyState rally_status;
 	
-	// Research information 
-	TechnologyInfo technology;
+	// Research information (layout and what is known: research.h, docs/research.md)
+	ResearchState research;
 	
 	uint32_t supply_capacity;
+	uint8_t  trading_post_level; // BUILDINGINFO level of the Trading Post (mana part included, buildings.h), 0 = not received
+
+	/* Delivery tax really applied by the game, read from its delivery report
+	 * (RecvResHelpReport). The rate is never sent as such: the report only carries the net
+	 * amount, so it is rebuilt from it. Overrides bank.delivery_tax_percent once known. */
+	double   delivery_tax_seen;
+	bool     delivery_tax_seen_valid;
+	uint32_t last_gross;   /* amount the server counted for the last march sent, until its report arrives */
 	
 	ResourceTracker tracker;
 	
@@ -1125,6 +1162,9 @@ typedef struct {
 	RallyMember rally_members[30];
 	
 	ResourceTransfer transfer;
+	TransferRequest transfer_queue[TRANSFER_QUEUE_MAX];
+	uint8_t transfer_queue_count;
+	GuildBankSettings guildbank;
 	RelocationReport relocation;
 	Migration migration;
 	
@@ -1138,4 +1178,4 @@ bool send_packet(Connection *conn, bool enc);
 int set_nonblocking(Connection *conn);
 void reset_connection(Connection *c);
 
-#endif
+#endif

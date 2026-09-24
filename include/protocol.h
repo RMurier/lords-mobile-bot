@@ -126,6 +126,31 @@ void NotifyDiscord(Connection *c, const char *message);
 
 void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count);
 void RequestGatherRecall(Connection *c, uint32_t march_id);
+
+/* $recall: take every march back, then send none for recall.pause_seconds (5 minutes by default). The pause
+ * lives outside Connection so it holds across a reconnection. */
+typedef enum {
+	RECALL_STARTED,      // requests are going out, one every 1-2 s
+	RECALL_RUNNING,      // a recall is already under way: only the pause was renewed
+	RECALL_NO_MARCHES,   // no march out: nothing to take back
+	RECALL_NO_DATA       // the march counts have not been received yet
+} RecallResult;
+
+bool     MarchesPaused(void);
+uint32_t MarchesPauseSecondsLeft(void);
+void     MarchesPauseStart(uint32_t seconds);
+void     MarchesPauseEnd(void);
+void     FormatDurationFr(uint32_t seconds, char *out, size_t size);
+RecallResult StartRecall(Connection *c, const char *requester);
+void     RecallTick(Connection *c);
+
+/* Deliveries (resource commands and the guild bank). */
+const char *TransferRequester(const Connection *c);
+void     AbortTransfer(Connection *c);
+bool     TransferQueuePush(Connection *c, const TransferRequest *request);
+int      TransferQueuePosition(const Connection *c, const char *requester);
+bool     TransferQueueRemove(Connection *c, const char *requester);
+uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balance);
 void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size);
 void RecvGatheringEvent(Connection *c, const uint8_t *data, uint16_t size);
 void RecvGatherReturnResp(Connection *c, const uint8_t *data, uint16_t size);
@@ -142,7 +167,7 @@ void RecvAllianceSearchResult(Connection *c, const uint8_t *data, uint16_t size)
 void RecvAllianceApplyResp(Connection *c, const uint8_t *data, uint16_t size);
 void AllianceOpTick(Connection *c);
 
-void RecvBuildingQueue(Connection*, const uint8_t*);
+void RecvBuildingQueue(Connection*, const uint8_t*, uint16_t);
 
 void RecvUpdateWatchTowerAddLineInfo(Connection*, const uint8_t*);
 void RecvWatchTowerLineDetail(Connection *c, const uint8_t *data);
@@ -185,6 +210,16 @@ void RequestSendMailFmt(Connection *c, const char *player_name, const char *subj
 
 void RecvSHelp(Connection *c, const uint8_t *data);
 void RecvHelp_Home(Connection *c, const uint8_t *data);
+void RequestResearchStart(Connection *c, uint16_t tech_id, uint8_t level, const ResearchItemUse *items, uint16_t item_count);
+void RequestResearchCancel(Connection *c, uint16_t tech_id, uint8_t level);
+uint16_t ResearchSnapshotDiff(Connection *c);
+void RecomputeSupplyCapacity(Connection *c);
+uint16_t BuildingSnapshotDiff(Connection *c);
+void RecvResearchStart(Connection *c, const uint8_t *data, uint16_t size);
+void RecvResearchCancel(Connection *c, const uint8_t *data, uint16_t size);
+void RecvResearchComplete(Connection *c, const uint8_t *data, uint16_t size);
+void RecvResHelpReport(Connection *c, const uint8_t *data, uint16_t size);
+double DeliveryTaxPercent(const Connection *c);
 
 
 void format_number2(uint64_t num, char *out, size_t size);

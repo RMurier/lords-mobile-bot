@@ -31,7 +31,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -42,6 +42,7 @@ sys.path.insert(0, str(REPO / "tools"))
 
 import config_file as cf  # noqa: E402
 import extract_credentials as ec  # noqa: E402
+import guild_bank as gb  # noqa: E402
 import schema  # noqa: E402
 import store as storage  # noqa: E402
 
@@ -250,7 +251,9 @@ def export_bundle():
     """Everything needed to rebuild the accounts elsewhere: configurations, in-game administrators, names."""
     accounts = {}
     for account_id in list_account_ids():
-        accounts[account_id] = {"cfg": store.get_cfg(account_id), "admins": store.get_admins(account_id)}
+        bank = store.get_bank(account_id)
+        accounts[account_id] = {"cfg": store.get_cfg(account_id), "admins": store.get_admins(account_id),
+                                "bank": gb.serialize(bank) if bank is not None else None}
     return {"format": "lmbot-export", "version": BUNDLE_VERSION, "exported_at": int(time.time()),
             "settings": {key: settings.get(key) for key in BUNDLE_SETTINGS}, "accounts": accounts}
 
@@ -280,6 +283,8 @@ def import_bundle(bundle, overwrite=False):
         store.put_cfg(account_id, text, keep_backup=exists)
         if isinstance(entry.get("admins"), str):
             store.put_admins(account_id, entry["admins"])
+        if isinstance(entry.get("bank"), str):
+            store.put_bank(account_id, gb.parse(entry["bank"]))
         alias = (bundle.get("settings", {}).get("aliases") or {}).get(account_id)
         if isinstance(alias, str) and alias:
             aliases[account_id] = alias[:40]
@@ -455,6 +460,7 @@ class Bots:
                 proc.wait()
             entry["pump"].join(timeout=2)
             store.append_log(account_id, f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} arrêté depuis l'interface ---\n")
+            self._final_sync(account_id)
         with self.lock:
             self._alive(account_id)
             self.exited.pop(account_id, None)
@@ -479,6 +485,16 @@ class Bots:
                 proc.stdout.close()
             except OSError:
                 pass
+            proc.wait()
+            Bots._final_sync(account_id)
+
+    @staticmethod
+    def _final_sync(account_id):
+        """The bot is gone: keep what it wrote last (the guild bank above all) in the database."""
+        try:
+            sync_bot_files(account_id)
+        except Exception as e:  # noqa: BLE001 - never let the database stop a bot from stopping
+            print(f"[webui] dernière synchronisation de {account_id} : {type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
 
 def client_path():
@@ -510,8 +526,28 @@ def remember_autostart(account_id, wanted):
     settings.update(autostart=current)
 
 
+def sync_bot_files(account_id, only=None):
+    """Copies what the bot keeps in its data folder into the database (no-op with the files: they are the source)."""
+    folder = ROOT / "data" / account_id
+    for name, persist, put in (("status.json", store.persists_game, store.put_game),
+                               ("admins.txt", store.persists_admins, store.put_admins),
+                               ("guild_bank.txt", store.persists_bank,
+                                lambda a, text: store.put_bank(a, gb.parse(text)))):
+        if not persist or (only and name not in only):
+            continue
+        try:
+            text = (folder / name).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            put(account_id, json.loads(text) if name.endswith(".json") else text)
+        except ValueError:
+            pass    # the bot was writing the file: next time
+
+
 def sync_loop():
-    """Every second, group the bot output into the database; every 5 s, save what the bots keep in their folder."""
+    """Every second, group the bot output into the database and follow the guild bank (money: the shortest
+    possible window); every 5 s, save the rest of what the bots keep in their folder."""
     tick = 0
     while True:
         time.sleep(1)
@@ -520,21 +556,12 @@ def sync_loop():
             flush = getattr(store, "flush_logs", None)
             if flush:
                 flush()
+            if store.persists_bank:
+                for account_id in list(bots.procs):
+                    sync_bot_files(account_id, ("guild_bank.txt",))
             if tick % 5 == 0 and (store.persists_game or store.persists_admins):
                 for account_id in list(bots.procs):
-                    folder = ROOT / "data" / account_id
-                    for name, persist, put in (("status.json", store.persists_game, store.put_game),
-                                               ("admins.txt", store.persists_admins, store.put_admins)):
-                        if not persist:
-                            continue
-                        try:
-                            text = (folder / name).read_text(encoding="utf-8")
-                        except OSError:
-                            continue
-                        try:
-                            put(account_id, json.loads(text) if name.endswith(".json") else text)
-                        except ValueError:
-                            pass    # the bot was writing the file: next time
+                    sync_bot_files(account_id, ("status.json", "admins.txt"))
         except Exception as e:  # noqa: BLE001 - a database hiccup must not stop the loop
             print(f"[webui] synchronisation : {type(e).__name__}: {e}", file=sys.stderr, flush=True)
 
@@ -796,6 +823,124 @@ def api_account_chat_send(h, query, account_id):
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "chat_outbox.txt").write_text(message, encoding="utf-8")
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Guild bank: the balances of the players, kept by the bot (docs/commands.md "The guild bank")
+# --------------------------------------------------------------------------
+
+BANK_EDIT_WAIT = 8.0            # seconds the console waits for a running bot to apply a change
+bank_lock = threading.Lock()    # one change at a time per console
+
+
+def bank_folder(account_id):
+    return ROOT / "data" / account_id
+
+
+def bank_enabled(account_id):
+    return cf.read_values(store.get_cfg(account_id)).get("guildbank.enabled", "false").strip().lower() == "true"
+
+
+def bank_state(account_id):
+    """The freshest balances: the bot's own file while it runs (the database follows), the store otherwise."""
+    running = bots.status(account_id)["state"] == "running"
+    if running:
+        try:
+            state = gb.parse((bank_folder(account_id) / "guild_bank.txt").read_text(encoding="utf-8"))
+        except OSError:
+            state = None
+        if state is not None:
+            if store.persists_bank:
+                store.put_bank(account_id, state)
+            return state, running
+    return store.get_bank(account_id) or gb.empty_state(time.time()), running
+
+
+def bank_members(account_id):
+    """The guild's members as the bot last saw them (its status.json, in the database too), or None."""
+    game = store.get_game(account_id) or {}
+    names = (game.get("alliance") or {}).get("member_names")
+    return [n for n in names if isinstance(n, str) and n] if isinstance(names, list) else None
+
+
+def bank_payload(account_id):
+    state, running = bank_state(account_id)
+    members = bank_members(account_id)
+    in_guild = set(members or [])
+    names = sorted(in_guild | set(state["accounts"]), key=lambda n: (n.lower(), n))
+    players = []
+    for name in names:
+        amounts = state["accounts"].get(name, [0] * len(gb.RESOURCES))
+        players.append({"name": name, "in_guild": name in in_guild, **dict(zip(gb.RESOURCES, amounts))})
+    return {"enabled": bank_enabled(account_id), "running": running, "storage": store.name,
+            "members_known": members is not None, "players": players, "totals": gb.totals(state),
+            "activated": state.get("activated", 0), "resources": [{"key": k, "label": gb.LABELS[k]} for k in gb.RESOURCES]}
+
+
+def bank_change(account_id, lines, apply_to_state):
+    """Applies a change to the balances.
+
+    Bot running: it owns guild_bank.txt, so the change is queued for it (guild_bank_edits.txt) and the console waits
+    for it to be applied. Bot stopped: the store is changed directly, and reaches the bot when it starts."""
+    with bank_lock:
+        if bots.status(account_id)["state"] != "running":
+            state = store.get_bank(account_id) or gb.empty_state(time.time())
+            apply_to_state(state)
+            store.put_bank(account_id, state)
+            return {"applied": True, "running": False}
+        if not bank_enabled(account_id):
+            raise ApiError(409, "La banque de guilde n'est pas activée pour ce compte : le bot ignorerait la "
+                                "modification. Activez-la dans les réglages puis redémarrez le bot.")
+        folder = bank_folder(account_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        with open(folder / "guild_bank_edits.txt", "a", encoding="utf-8", newline="") as f:
+            f.write("".join(lines))
+        # the bot moves the file aside, applies it, deletes the copy: both gone = done
+        deadline = time.time() + BANK_EDIT_WAIT
+        while time.time() < deadline:
+            if not (folder / "guild_bank_edits.txt").exists() and not (folder / "guild_bank_edits.applying").exists():
+                bank_state(account_id)   # brings the database up to date at once
+                return {"applied": True, "running": True}
+            time.sleep(0.2)
+        return {"applied": False, "running": True, "pending": True}
+
+
+@route("GET", "/api/accounts/([^/]+)/bank")
+def api_bank_get(h, query, account_id):
+    account_path(account_id)
+    return bank_payload(account_id)
+
+
+@route("PUT", "/api/accounts/([^/]+)/bank/(.+)")
+def api_bank_put(h, query, account_id, player):
+    """Sets the balances of one player: {"food": 1000000, "gold": 0, ...}, only the resources given change."""
+    account_path(account_id)
+    player = unquote(player)
+    values = h.read_json()
+    changes = [(key, values[key]) for key in gb.RESOURCES if key in values]
+    if not changes:
+        raise ApiError(400, "Aucun montant à modifier.")
+    try:
+        lines = [gb.edit_line("set", player, key, amount) for key, amount in changes]
+    except gb.BankError as e:
+        raise ApiError(400, str(e))
+
+    def apply(state):
+        for key, amount in changes:
+            gb.set_balance(state, player, key, amount)
+
+    result = bank_change(account_id, lines, apply)
+    return {**result, **bank_payload(account_id)}
+
+
+@route("POST", "/api/accounts/([^/]+)/bank/reset")
+def api_bank_reset(h, query, account_id):
+    """Every balance back to zero. Refused unless the request says it was confirmed."""
+    account_path(account_id)
+    if h.read_json().get("confirm") is not True:
+        raise ApiError(400, "Confirmation requise : envoyez {\"confirm\": true}.")
+    result = bank_change(account_id, [gb.edit_line("reset")], lambda state: gb.reset(state, time.time()))
+    return {**result, **bank_payload(account_id)}
 
 
 @route("POST", "/api/import")

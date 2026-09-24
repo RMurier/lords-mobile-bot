@@ -340,3 +340,20 @@ code { font-family: var(--mono); background: var(--surface-2); padding: 1px 6px;
 .tab-technical { margin-left: auto; font-weight: 500; font-size: 13px; }
 h2.subhead { font-size: 16px; margin: 26px 0 6px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 h2.subhead:first-of-type { margin-top: 18px; }
+
+/* guild bank */
+.bank-card { padding: 16px; }
+.bank-tools { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; }
+.bank-tools input[type="search"] { flex: 1 1 220px; max-width: 360px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; }
+.bank-scroll { overflow-x: auto; }
+.bank-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.bank-table th, .bank-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.bank-table th.num, .bank-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.bank-table td.zero { color: var(--muted); }
+.bank-table tfoot td { font-weight: 600; border-top: 2px solid var(--border); border-bottom: 0; }
+.bank-table tr.editing { background: var(--accent-soft); }
+.bank-table .bank-input { width: 110px; padding: 5px 6px; border: 1px solid var(--accent); border-radius: 6px; background: var(--surface); color: var(--text); text-align: right; font: inherit; }
+.bank-table .bank-act { text-align: right; }
+.badge-out { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--warn-soft); color: var(--warn); margin-left: 6px; }
+.note { padding: 10px 12px; border-radius: 8px; background: var(--surface-2); margin-bottom: 10px; font-size: 14px; }
+.note.warn { background: var(--warn-soft); color: var(--warn); }

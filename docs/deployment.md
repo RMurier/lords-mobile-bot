@@ -13,10 +13,11 @@ containers.
 | Bot journal | `logs/<id>.log` | table `bot_logs` (last 30000 lines per account) |
 | Game status (Statut tab) | `data/<id>/status.json` | table `game_status` |
 | Administrators added in game (`$admin add`) | `data/<id>/admins.txt` | table `account_admins` |
+| Guild bank balances ([commands.md](commands.md#the-guild-bank)) | `data/<id>/guild_bank.txt` | tables `guild_bank` (one row per account and player) and `guild_bank_state` |
 
 The bot program itself does not change: it still reads a `.cfg` file. With SQL Server, the console writes that file
 into a scratch folder (`/var/lib/lmbot`, an `emptyDir`) from the database just before starting the bot, and copies the
-bot's status and administrators back into the database while it runs. The scratch folder can therefore be lost at any
+bot's status, administrators and guild bank back into the database while it runs. The scratch folder can therefore be lost at any
 time without losing anything.
 
 The tables are created by the console at startup (`webui/store.py`), and the database `lordsbot` too.

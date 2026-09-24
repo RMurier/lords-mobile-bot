@@ -21,10 +21,12 @@ jobs:
       - name: Bot logic tests
         run: |
           gcc -std=gnu11 -Iinclude -o bot_logic_test tests/bot_logic_test.c \
-            src/log.c src/protocol.c src/des.c src/map_point.c src/command.c src/config.c
+            src/log.c src/protocol.c src/des.c src/map_point.c src/command.c src/config.c src/guildbank.c
           ./bot_logic_test
       - name: Console compiles
-        run: python3 -m py_compile webui/server.py webui/store.py webui/schema.py webui/config_file.py
+        run: python3 -m py_compile webui/server.py webui/store.py webui/schema.py webui/config_file.py webui/guild_bank.py
+      - name: Console guild bank tests
+        run: python3 tests/webui_bank_test.py
 
   image:
     needs: test

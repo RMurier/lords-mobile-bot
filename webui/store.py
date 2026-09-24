@@ -7,6 +7,7 @@ Both stores answer the same questions, so server.py does not care which one it t
     logs       the lines the bots print
     game       the last status.json a bot wrote (shield, resources...)
     admins     the administrators added in game with $admin add (admins.txt of the bot)
+    bank       the guild bank's balances (guild_bank.txt of the bot), see guild_bank.py
 
 The bot itself is unchanged: it still reads a .cfg file and writes status.json / admins.txt in its data folder.
 With SQL Server the console writes that file from the database just before starting the bot, and copies what the
@@ -22,6 +23,7 @@ import time
 from pathlib import Path
 
 import config_file as cf
+import guild_bank as gb
 
 LOG_KEEP_LINES = 30000         # per account, older lines are deleted
 LOG_TAIL_LINES = 300           # what a first read of the journal returns
@@ -40,6 +42,7 @@ class FileStore:
     name = "files"
     persists_game = False       # status.json is read where the bot writes it
     persists_admins = False
+    persists_bank = False       # guild_bank.txt is the bank: the bot writes it, the console reads and edits it
 
     ROTATE_BYTES = 5 << 20
 
@@ -143,6 +146,20 @@ class FileStore:
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "admins.txt").write_text(content, encoding="utf-8")
 
+    def get_bank(self, account_id):
+        try:
+            return gb.parse((self.root / "data" / account_id / "guild_bank.txt").read_text(encoding="utf-8"))
+        except OSError:
+            return None
+
+    def put_bank(self, account_id, state):
+        """Only used while the bot is stopped (it owns the file when it runs): written whole, then moved in place."""
+        folder = self.root / "data" / account_id
+        folder.mkdir(parents=True, exist_ok=True)
+        temp = folder / "guild_bank.txt.tmp"
+        temp.write_text(gb.serialize(state), encoding="utf-8")
+        os.replace(temp, folder / "guild_bank.txt")
+
     def prepare_start(self, account_id):
         pass
 
@@ -184,6 +201,27 @@ SCHEMA = [
            account_id  NVARCHAR(64)  NOT NULL PRIMARY KEY,
            content     NVARCHAR(MAX) NOT NULL
        )""",
+    # one row per player and account. Binary collation: the bot compares names exactly, and a case-insensitive
+    # key would merge "Bob" and "bob" into one balance.
+    """IF OBJECT_ID(N'dbo.guild_bank', N'U') IS NULL
+       CREATE TABLE dbo.guild_bank (
+           account_id  NVARCHAR(64)  NOT NULL,
+           player      NVARCHAR(64)  COLLATE Latin1_General_100_BIN2 NOT NULL,
+           food        BIGINT        NOT NULL DEFAULT 0,
+           stone       BIGINT        NOT NULL DEFAULT 0,
+           wood        BIGINT        NOT NULL DEFAULT 0,
+           ore         BIGINT        NOT NULL DEFAULT 0,
+           gold        BIGINT        NOT NULL DEFAULT 0,
+           updated_at  DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+           PRIMARY KEY (account_id, player)
+       )""",
+    # what the bot needs besides the balances: when counting started, and the reports already counted
+    """IF OBJECT_ID(N'dbo.guild_bank_state', N'U') IS NULL
+       CREATE TABLE dbo.guild_bank_state (
+           account_id  NVARCHAR(64)  NOT NULL PRIMARY KEY,
+           activated   BIGINT        NOT NULL,
+           seen        NVARCHAR(MAX) NOT NULL DEFAULT N''
+       )""",
 ]
 
 
@@ -191,6 +229,7 @@ class SqlStore:
     name = "sqlserver"
     persists_game = True
     persists_admins = True
+    persists_bank = True
 
     def __init__(self, host, port, user, password, database, runtime_dir, wait=120):
         try:
@@ -203,6 +242,7 @@ class SqlStore:
         self.host, self.port = host, port
         self.lock = threading.RLock()
         self.conn = None
+        self.bank_seen = {}           # account id -> what was last written, to skip identical writes
         self.log_buffer = {}          # account id -> [lines]
         self.log_lock = threading.Lock()
         self._connect_retry(wait)
@@ -323,8 +363,10 @@ class SqlStore:
             self._execute("INSERT INTO dbo.accounts (id, cfg) VALUES (%s, %s)", (account_id, text))
 
     def delete_account(self, account_id):
+        self.bank_seen.pop(account_id, None)
         for table, column in (("accounts", "id"), ("bot_logs", "account_id"), ("game_status", "account_id"),
-                              ("account_admins", "account_id")):
+                              ("account_admins", "account_id"), ("guild_bank", "account_id"),
+                              ("guild_bank_state", "account_id")):
             self._execute(f"DELETE FROM dbo.{table} WHERE {column} = %s", (account_id,))
 
     def cfg_path(self, account_id):
@@ -417,14 +459,52 @@ class SqlStore:
             self._execute("INSERT INTO dbo.account_admins (account_id, content) VALUES (%s, %s)",
                           (account_id, content))
 
-    def prepare_start(self, account_id):
-        """Give the bot back what it kept in its data folder (administrators added in game)."""
-        content = self.get_admins(account_id)
-        if content is None:
+    def get_bank(self, account_id):
+        state = self._one("SELECT activated, seen FROM dbo.guild_bank_state WHERE account_id = %s", (account_id,))
+        rows = self._all("SELECT player, food, stone, wood, ore, gold FROM dbo.guild_bank WHERE account_id = %s",
+                         (account_id,))
+        if state is None and not rows:
+            return None
+        return {"activated": int(state[0]) if state else 0,
+                "seen": [int(n) for n in (state[1] or "").split(",") if n.strip()] if state else [],
+                "accounts": {r[0]: [int(v) for v in r[1:6]] for r in rows}}
+
+    def put_bank(self, account_id, state):
+        """Replaces the balances of the account in ONE batch: a lost connection rolls the whole change back and the
+        retry of _run runs it again whole, never half of it."""
+        key = json.dumps(state, sort_keys=True)
+        if self.bank_seen.get(account_id) == key:
             return
+        rows = [(name, *amounts) for name, amounts in state.get("accounts", {}).items() if any(amounts)]
+        seen = ",".join(str(int(n)) for n in state.get("seen", [])[-gb.SEEN_MAX:])
+        statements, params = ["SET XACT_ABORT ON", "BEGIN TRANSACTION",
+                              "DELETE FROM dbo.guild_bank WHERE account_id = %s"], [account_id]
+        for start in range(0, len(rows), 200):
+            chunk = rows[start:start + 200]
+            statements.append("INSERT INTO dbo.guild_bank (account_id, player, food, stone, wood, ore, gold) VALUES "
+                              + ", ".join(["(%s, %s, %s, %s, %s, %s, %s)"] * len(chunk)))
+            for row in chunk:
+                params += [account_id, *row]
+        statements.append("MERGE dbo.guild_bank_state AS t USING (SELECT %s AS account_id) AS s "
+                          "ON t.account_id = s.account_id "
+                          "WHEN MATCHED THEN UPDATE SET activated = %s, seen = %s "
+                          "WHEN NOT MATCHED THEN INSERT (account_id, activated, seen) VALUES (%s, %s, %s);")
+        params += [account_id, int(state.get("activated") or 0), seen, account_id, int(state.get("activated") or 0), seen]
+        statements.append("COMMIT")
+        self._execute("; ".join(statements), tuple(params))
+        self.bank_seen[account_id] = key
+
+    def prepare_start(self, account_id):
+        """Give the bot back what it kept in its data folder (administrators added in game, the guild bank)."""
         folder = Path("data") / account_id
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "admins.txt").write_text(content, encoding="utf-8")
+        content = self.get_admins(account_id)
+        if content is not None:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "admins.txt").write_text(content, encoding="utf-8")
+        bank = self.get_bank(account_id)
+        if bank is not None:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "guild_bank.txt").write_text(gb.serialize(bank), encoding="utf-8")
 
     # -- first start: bring the files of a local installation into the database
     def import_files(self, root, valid):
@@ -438,6 +518,9 @@ class SqlStore:
             admins = Path(root) / "data" / account_id / "admins.txt"
             if admins.is_file():
                 self.put_admins(account_id, admins.read_text(encoding="utf-8"))
+            bank = files.get_bank(account_id)
+            if bank is not None:
+                self.put_bank(account_id, bank)
             count += 1
         if not self.get_settings():
             saved = files.get_settings()

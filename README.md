@@ -204,6 +204,8 @@ webui.bat       Start the web console (Windows)
 - [Deployment: SQL Server, Docker, k3s](docs/deployment.md)
 - [Configuration reference](docs/configuration.md)
 - [In-game commands](docs/commands.md)
+- [Research (technologies): protocol and what is known](docs/research.md)
+- [Buildings: levels (Mana upgrade), ids, Trading Post capacity and tax](docs/buildings.md)
 
 ## License
 

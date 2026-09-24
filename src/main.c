@@ -23,6 +23,7 @@
 #include "items.h"
 
 #include "config.h"
+#include "guildbank.h"
 #include "status.h"
 
 #include "version.h"
@@ -86,6 +87,11 @@ void BotTick(Connection *c)
 	// 
 	// DarknestRallyTick(c);
 	
+	RecallTick(c);
+
+	if (c->guildbank.enabled)
+		GuildBankTick(c);
+
 	ResourceTransferTick(c);
 
 	AllianceOpTick(c);
@@ -183,6 +189,9 @@ static SessionResult ProcessConnection(Connection *c)
 				break;
 			}
 			
+			log_packet(c->bot.data_path, "<-", s->packet_type, get_packet_name(s->packet_type),
+				s->buffer + s->parse_pos + 4, s->packet_size - 4);
+
 			if (g_log_debug) {
 				LOGD("<- %s (%u) size=%u\n", get_packet_name(s->packet_type), s->packet_type, s->packet_size);
 				log_hexdump("payload", s->buffer + s->parse_pos + 4, s->packet_size - 4 > 256 ? 256 : s->packet_size - 4);
@@ -395,7 +404,7 @@ static SessionResult ProcessConnection(Connection *c)
 					RecvAllianceInfo(c, s->buffer + s->parse_pos + 4);
 					break;
 				case _MSG_RESP_BUILDINGEVENT: 
-					RecvBuildingQueue(c, s->buffer + s->parse_pos + 4);
+					RecvBuildingQueue(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_UPDATEWATCHTOWER_ADDLINE:
 					RecvUpdateWatchTowerAddLineInfo(c, s->buffer + s->parse_pos + 4);
@@ -450,7 +459,7 @@ static SessionResult ProcessConnection(Connection *c)
 					// dump_data("_MSG_RESP_JOINED_RALLYDATA", "", s->buffer + s->parse_pos + 4, s->packet_size + 4);
 					break;
 				case _MSG_RESP_RESEARCHINFO:
-					RecvTechnologyInfo(c, s->buffer + s->parse_pos + 4, s->packet_size + 4);
+					RecvTechnologyInfo(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					// dump_data("_MSG_RESP_RESEARCHINFO", "", s->buffer + s->parse_pos + 4, s->packet_size + 4);
 					break;
 				case _MSG_RESP_ADDCONFLICT_LINE: 
@@ -472,6 +481,18 @@ static SessionResult ProcessConnection(Connection *c)
 					break;
 				case _MSG_RESP_SEND_RESHELP: 
 					RecvSHelp(c, s->buffer + s->parse_pos + 4);
+					break;
+				case _MSG_RESP_RESEARCH_EVENT_START:
+					RecvResearchStart(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_RESEARCH_EVENT_CANCEL:
+					RecvResearchCancel(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_RESEARCH_EVENT_COMPLETE:
+					RecvResearchComplete(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_RESHELPREPORTINFO:
+					RecvResHelpReport(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_RESHELP_HOME: 
 					RecvHelp_Home(c, s->buffer + s->parse_pos + 4);
@@ -674,6 +695,8 @@ void Configuration(Connection *client)
 	client->bank.reserve.ore  = 0;
 	client->bank.reserve.gold = 0;
 	
+	client->recall.pause_seconds = 300; // $recall: no march for 5 minutes
+
 	client->bank.max_delivery_distance = 100;
 	client->bank.delivery_tax_percent = 0;
 
@@ -804,6 +827,15 @@ bool CreateDefaultConfig(const char *filename)
 		
 		"# Maximum map distance (tiles) for resource delivery.\n"
 		"bank.max_delivery_distance = 100\n\n"
+
+		"# Guild bank: members send resources to the bot, the bot keeps a balance per player\n"
+		"# (guild_bank.txt in data.path) and the resource commands (food, stone...) take it back;\n"
+		"# bal shows a balance. Off: the bank.* settings above decide who may take what.\n"
+		"guildbank.enabled = false\n\n"
+
+		"# After the $recall command (administrators) has taken every march back, the bot sends\n"
+		"# no march (gathering, deliveries) for this many seconds. 0 = no pause.\n"
+		"recall.pause_seconds = 300\n\n"
 
 		"# The game deducts this percentage of a resource march on arrival (not shown anywhere\n"
 		"# in game, only noticeable in the recipient's stock afterwards - it varies per account,\n"

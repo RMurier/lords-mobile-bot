@@ -22,4 +22,14 @@ void log_warn(const char *fmt, ...);
 void log_debug(const char *fmt, ...);
 void log_hexdump(const char *label, const uint8_t *data, size_t size);
 
+/* Full capture of every packet, both directions, appended to <data_path>packets.log
+ * (config: log.packets). Unlike log.debug it is never truncated and goes to a file, so a
+ * whole session can be searched afterwards for a value the bot does not decode yet.
+ * dir is "<-" (received) or "->" (sent, before encryption). The file holds session
+ * data (login packets): never share it as is. */
+extern int g_log_packets;
+void ensure_directory(const char *path);
+void log_packet(const char *data_path, const char *dir, uint16_t id, const char *name,
+                const uint8_t *payload, size_t size);
+
 #endif

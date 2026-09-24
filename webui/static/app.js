@@ -219,6 +219,7 @@
       applyDerived();
       if (S.tab === "logs") startLogs();
       if (S.tab === "status" || S.tab === "chat") startGame();
+      if (S.tab === "bank") startBank();
     } else if (S.view === "add") {
       main.innerHTML = addView();
       S.capTimer = setInterval(() => {
@@ -267,6 +268,7 @@
     const technicalTab = `<button class="tab tab-technical" role="tab" data-act="tab" data-tab="technical" aria-selected="${S.tab === "technical"}" title="Identifiants, serveur, version : rarement utile">⚙ Technique${badgeFor(technical)}</button>`;
     const statusTab = `<button class="tab" role="tab" data-act="tab" data-tab="status" aria-selected="${S.tab === "status"}">Statut</button>`;
     const chatTab = `<button class="tab" role="tab" data-act="tab" data-tab="chat" aria-selected="${S.tab === "chat"}">Chat de guilde</button>`;
+    const bankTab = `<button class="tab" role="tab" data-act="tab" data-tab="bank" aria-selected="${S.tab === "bank"}">Banque de guilde</button>`;
     const logsTab = `<button class="tab" role="tab" data-act="tab" data-tab="logs" aria-selected="${S.tab === "logs"}">Journal</button>`;
     const category = S.schema.categories.find((c) => c.id === S.tab);
     return `
@@ -278,9 +280,10 @@
         <div class="actions" id="ctrl"><span id="ctrl-chip">${slot("ctrl-chip", chipHtml())}</span><span id="ctrl-btns">${slot("ctrl-btns", btnsHtml())}</span></div>
       </div>
       <div id="notes">${slot("notes", notesHtml())}</div>
-      <div class="tabs" role="tablist">${statusTab}${chatTab}${tabs}${logsTab}${technicalTab}</div>
+      <div class="tabs" role="tablist">${statusTab}${chatTab}${bankTab}${tabs}${logsTab}${technicalTab}</div>
       ${S.tab === "logs" ? logsView() : S.tab === "status" ? `<div id="game">${gameHtml(S.game)}</div>`
-        : S.tab === "chat" ? chatView() : S.tab === "technical" ? technicalView(technical) : categoryView(category)}`;
+        : S.tab === "chat" ? chatView() : S.tab === "bank" ? bankView()
+        : S.tab === "technical" ? technicalView(technical) : categoryView(category)}`;
   }
 
   function chipHtml() {
@@ -682,7 +685,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
 
   // ------------------------------------------------------------------ logs
 
-  function stopLogs() { clearTimeout(S.logTimer); S.logTimer = null; clearTimeout(S.gameTimer); clearInterval(S.gameTick); S.gameTimer = S.gameTick = null; }
+  function stopLogs() { clearTimeout(S.logTimer); S.logTimer = null; clearTimeout(S.gameTimer); clearInterval(S.gameTick); S.gameTimer = S.gameTick = null; clearTimeout(S.bankTimer); S.bankTimer = null; }
 
   function startLogs() {
     S.logOffset = -1;
@@ -896,6 +899,145 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     } finally {
       input.disabled = false;
       input.focus();
+    }
+  }
+
+  // ------------------------------------------------------------ guild bank
+
+  const BANK_RES = ["food", "stone", "wood", "ore", "gold"];
+
+  function bankView() {
+    return `<div class="card bank-card">
+      <div class="bank-tools">
+        <input type="search" id="bank-filter" placeholder="Filtrer les joueurs…" autocomplete="off" value="${esc(S.bankFilter || "")}">
+        <button class="btn danger" data-act="bank-reset">Tout remettre à zéro</button>
+      </div>
+      <div id="bank-body">${bankBodyHtml(S.bank)}</div>
+    </div>`;
+  }
+
+  function bankBodyHtml(bank) {
+    if (!bank) return `<p class="help">Chargement…</p>`;
+    const notes = [];
+    if (!bank.enabled) {
+      notes.push(`<div class="note warn">La banque de guilde n'est pas activée pour ce compte (réglage « Banque de guilde »). Les soldes s'affichent, mais le bot ne les utilise pas et, tant qu'il tourne, ignorerait une modification : activez-la puis redémarrez le bot.</div>`);
+    }
+    if (!bank.members_known) {
+      notes.push(`<div class="note">La liste des membres de la guilde n'est pas encore connue (le bot ne l'a pas reçue) : seuls les joueurs qui ont un solde sont listés.</div>`);
+    }
+    const where = bank.storage === "sqlserver" ? "base de données SQL Server" : "fichiers (data/…/guild_bank.txt)";
+    const how = bank.running
+      ? "Le bot tourne : il applique vos modifications dans la seconde qui suit."
+      : "Le bot est arrêté : les modifications sont enregistrées et prises en compte à son démarrage.";
+    const filter = (S.bankFilter || "").trim().toLowerCase();
+    const players = bank.players.filter((p) => !filter || p.name.toLowerCase().includes(filter));
+    const heads = bank.resources.map((r) => `<th class="num">${esc(r.label)}</th>`).join("");
+    const rows = players.map((p) => {
+      const out = p.in_guild ? "" : ` <span class="badge-out" title="Ce joueur a un solde mais n'est plus dans la guilde du bot">hors guilde</span>`;
+      if (S.bankEdit === p.name) {
+        const inputs = BANK_RES.map((k) => `<td class="num"><input class="bank-input" type="text" inputmode="numeric" data-res="${k}" value="${p[k]}" aria-label="${esc(p.name)} : ${k}"></td>`).join("");
+        return `<tr class="editing"><td class="bank-name">${esc(p.name)}${out}</td>${inputs}
+          <td class="bank-act"><button class="btn primary small" data-act="bank-save">Enregistrer</button> <button class="btn small" data-act="bank-cancel">Annuler</button></td></tr>`;
+      }
+      const cells = BANK_RES.map((k) => `<td class="num${p[k] ? "" : " zero"}">${num(p[k])}</td>`).join("");
+      return `<tr><td class="bank-name">${esc(p.name)}${out}</td>${cells}
+        <td class="bank-act"><button class="btn small" data-act="bank-edit" data-name="${esc(p.name)}">Modifier</button></td></tr>`;
+    }).join("");
+    const totals = BANK_RES.map((k) => `<td class="num">${num(bank.totals[k] || 0)}</td>`).join("");
+    const table = players.length
+      ? `<div class="bank-scroll"><table class="bank-table">
+          <thead><tr><th>Joueur</th>${heads}<th></th></tr></thead>
+          <tbody>${rows}</tbody>
+          <tfoot><tr><td>Total (${bank.players.length} joueur${bank.players.length > 1 ? "s" : ""})</td>${totals}<td></td></tr></tfoot>
+        </table></div>`
+      : `<p class="help">${bank.players.length ? "Aucun joueur ne correspond au filtre." : "Aucun joueur pour l'instant : les membres apparaissent dès que le bot connaît la guilde, et les soldes dès le premier dépôt."}</p>`;
+    return `${notes.join("")}<p class="help">Stockage : ${where}. ${how} Un dépôt se fait en envoyant des ressources au bot ; le solde est le montant net reçu.</p>${table}`;
+  }
+
+  function renderBank() {
+    const body = $("#bank-body");
+    if (body) body.innerHTML = bankBodyHtml(S.bank);
+  }
+
+  function startBank() {
+    S.bank = null;
+    S.bankEdit = null;
+    const filter = $("#bank-filter");
+    if (filter) filter.addEventListener("input", () => { S.bankFilter = filter.value; if (!S.bankEdit) renderBank(); });
+    const body = $("#bank-body");
+    if (body) body.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && event.target.classList.contains("bank-input")) { event.preventDefault(); bankSave(); }
+      if (event.key === "Escape" && S.bankEdit) { S.bankEdit = null; renderBank(); }
+    });
+    pollBank();
+  }
+
+  async function pollBank() {
+    clearTimeout(S.bankTimer);
+    if (S.view !== "account" || S.tab !== "bank" || !S.acc) return;
+    const id = S.id;
+    try {
+      const bank = await api("GET", `/api/accounts/${enc(id)}/bank`);
+      if (id === S.id && S.view === "account" && S.tab === "bank") {
+        S.bank = bank;
+        if (!S.bankEdit) renderBank();   // never under the fingers of somebody typing an amount
+      }
+    } catch (error) {
+      if (error.status === 401) return authProblem();
+    }
+    S.bankTimer = setTimeout(pollBank, 5000);
+  }
+
+  // "5M", "1,5m", "500 000", "2b" -> a whole number, or null
+  function parseAmount(text) {
+    const t = String(text).trim().toLowerCase().replace(/[\s\u00a0\u202f_]/g, "").replace(",", ".");
+    if (t === "") return 0;
+    const m = /^(\d+(?:\.\d+)?)([kmb]?)$/.exec(t);
+    if (!m) return null;
+    const value = Math.round(parseFloat(m[1]) * { "": 1, k: 1e3, m: 1e6, b: 1e9 }[m[2]]);
+    return value <= 1e15 ? value : null;
+  }
+
+  async function bankSave() {
+    const name = S.bankEdit;
+    const player = S.bank && S.bank.players.find((p) => p.name === name);
+    if (!player) return;
+    const changes = {};
+    for (const input of $$(".bank-input")) {
+      const amount = parseAmount(input.value);
+      if (amount === null) { toast(`Montant invalide : « ${input.value} » (exemples : 500000, 2,5M, 1B).`, "err"); input.focus(); return; }
+      if (amount !== player[input.dataset.res]) changes[input.dataset.res] = amount;
+    }
+    if (!Object.keys(changes).length) { S.bankEdit = null; renderBank(); return; }
+    const id = S.id;
+    try {
+      const result = await api("PUT", `/api/accounts/${enc(id)}/bank/${enc(name)}`, changes);
+      if (id !== S.id) return;
+      S.bank = result;
+      S.bankEdit = null;
+      renderBank();
+      toast(result.pending ? "Modification envoyée : le bot ne l'a pas encore appliquée, elle le sera dès qu'il le pourra." : "Solde modifié", result.pending ? "" : "ok");
+    } catch (error) {
+      toast(error.message, "err");
+    }
+  }
+
+  async function bankReset() {
+    const bank = S.bank;
+    const holders = bank ? bank.players.filter((p) => BANK_RES.some((k) => p[k] > 0)).length : 0;
+    if (!confirm(`Remettre à zéro TOUS les soldes de la banque de guilde ?\n\n${holders} joueur${holders > 1 ? "s ont" : " a"} un solde. `
+        + "Ils perdent ce qu'ils avaient déposé : cette action est définitive."
+        + (bank && bank.running ? "" : "\n\n(Le bot est arrêté : elle sera prise en compte à son démarrage.)"))) return;
+    const id = S.id;
+    try {
+      const result = await api("POST", `/api/accounts/${enc(id)}/bank/reset`, { confirm: true });
+      if (id !== S.id) return;
+      S.bank = result;
+      S.bankEdit = null;
+      renderBank();
+      toast(result.pending ? "Remise à zéro envoyée : le bot ne l'a pas encore appliquée." : "Tous les soldes sont remis à zéro", result.pending ? "" : "ok");
+    } catch (error) {
+      toast(error.message, "err");
     }
   }
 
@@ -1156,6 +1298,10 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     "capture-stop": () => captureStop(),
     "capture-cancel": () => captureCancel(),
     "chat-send": () => chatSend(),
+    "bank-edit": (el) => { S.bankEdit = el.dataset.name; renderBank(); const input = $(".bank-input"); if (input) { input.focus(); input.select(); } },
+    "bank-save": () => bankSave(),
+    "bank-cancel": () => { S.bankEdit = null; renderBank(); },
+    "bank-reset": () => bankReset(),
     "delete-account": async () => {
       if (!confirm(`Supprimer définitivement le compte « ${S.id} » et ses identifiants ?`)) return;
       const ticket = ++S.nav;   // we are leaving this account: anything slower than the user must not navigate for them

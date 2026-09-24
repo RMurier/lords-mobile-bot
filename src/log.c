@@ -1,5 +1,11 @@
 #include "log.h"
 #include <stdarg.h>
+#include <string.h>
+#include <time.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+  #include <direct.h>
+#endif
 
 #ifdef _WIN32
   #include <windows.h>
@@ -90,4 +96,78 @@ void log_hexdump(const char *label, const uint8_t *data, size_t size)
 
         fputc('\n', stderr);
     }
+}
+
+
+int g_log_packets = 0;
+
+/* Creates every folder of the path that does not exist yet (mkdir -p). Best effort, no error. */
+void ensure_directory(const char *path)
+{
+    char dir[300];
+    snprintf(dir, sizeof(dir), "%s", path);
+    for (char *p = dir + 1; *p; p++) {
+        if (*p != '/' && *p != '\\')
+            continue;
+        char saved = *p;
+        *p = '\0';
+#ifdef _WIN32
+        _mkdir(dir);
+#else
+        mkdir(dir, 0700);
+#endif
+        *p = saved;
+    }
+#ifdef _WIN32
+    _mkdir(dir);
+#else
+    mkdir(dir, 0700);
+#endif
+}
+
+void log_packet(const char *data_path, const char *dir, uint16_t id, const char *name,
+                const uint8_t *payload, size_t size)
+{
+    if (!g_log_packets)
+        return;
+
+    char path[320];
+    size_t len = strlen(data_path);
+    snprintf(path, sizeof(path), "%s%spackets.log", data_path,
+             (len > 0 && (data_path[len - 1] == '/' || data_path[len - 1] == '\\')) ? "" : "/");
+
+    FILE *f = fopen(path, "a");
+    if (!f) {
+        /* the data folder is only created on demand elsewhere: make it, then retry once */
+        ensure_directory(data_path);
+        f = fopen(path, "a");
+        if (!f)
+            return;
+    }
+
+    time_t now = time(NULL);
+    struct tm tmv;
+#ifdef _WIN32
+    localtime_s(&tmv, &now);
+#else
+    localtime_r(&now, &tmv);
+#endif
+    fprintf(f, "%02d:%02d:%02d %s %s (%u) %zu bytes\n",
+            tmv.tm_hour, tmv.tm_min, tmv.tm_sec, dir, name, id, size);
+
+    for (size_t i = 0; i < size; i += 16) {
+        fprintf(f, "  %04zx: ", i);
+        for (size_t j = 0; j < 16; j++) {
+            if (i + j < size)
+                fprintf(f, "%02x ", payload[i + j]);
+            else
+                fprintf(f, "   ");
+        }
+        for (size_t j = 0; j < 16 && i + j < size; j++) {
+            uint8_t ch = payload[i + j];
+            fputc((ch >= 32 && ch < 127) ? ch : '.', f);
+        }
+        fputc('\n', f);
+    }
+    fclose(f);
 }

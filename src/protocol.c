@@ -5,6 +5,7 @@
 #include "map_point.h"
 #include "items.h"
 #include "log.h"
+#include "guildbank.h"
 #include <stdlib.h>
 #include <time.h>
 
@@ -331,6 +332,11 @@ typedef struct {
 
 
 bool SendResource(Connection *c, Resources resource, uint16_t zoneId, uint8_t pointId) {
+	if (MarchesPaused()) {
+		LOGW("[RECALL] Livraison non envoyée : marches suspendues\n");
+		return false;
+	}
+
 	c->size = 2;
 	
 	write_u16(c->data + c->size, _MSG_REQUEST_SEND_RESHELP);   c->size += 2;
@@ -951,8 +957,107 @@ void RequestTroopRecall(Connection *c, uint8_t Index) {
 }
 
 
+/* ------------------------------------------------------------------------
+ * $recall: take every march back, then no march for a while.
+ *
+ * The pause is a global on purpose: Connection is wiped at every reconnection, and a network drop
+ * must not give the marches back before the time is up. Everything that sends a march checks
+ * MarchesPaused() - gathering (GatherTick), deliveries (SendResourceMarch), rallies - and the
+ * request builders check it once more, so no caller can get one out during the pause.
+ * ------------------------------------------------------------------------ */
+
+#define RECALL_MAX_MARCHES 8   // march indices go from 0 to 7
+
+static uint64_t g_marches_paused_until;   // now_ms() deadline, 0 = not paused
+
+bool MarchesPaused(void) {
+	return now_ms() < g_marches_paused_until;
+}
+
+uint32_t MarchesPauseSecondsLeft(void) {
+	uint64_t now = now_ms();
+	return now >= g_marches_paused_until ? 0 : (uint32_t)((g_marches_paused_until - now + 999) / 1000);
+}
+
+/* (Re)starts the pause from now. 0 seconds = no pause configured: nothing changes. */
+void MarchesPauseStart(uint32_t seconds) {
+	if (seconds > 0)
+		g_marches_paused_until = now_ms() + (uint64_t)seconds * 1000;
+}
+
+void MarchesPauseEnd(void) {
+	g_marches_paused_until = 0;
+}
+
+/* "5 min", "4 min 30 s", "45 s" */
+void FormatDurationFr(uint32_t seconds, char *out, size_t size) {
+	if (seconds < 60)
+		snprintf(out, size, "%u s", seconds);
+	else if (seconds % 60 == 0)
+		snprintf(out, size, "%u min", seconds / 60);
+	else
+		snprintf(out, size, "%u min %u s", seconds / 60, seconds % 60);
+}
+
+/* Starts the pause and, if there is a march out, the recall itself. The march list is not known to the bot
+ * (only how many are out), so a take-back is asked for every march index of the account; an index with no
+ * march is answered by the server, not harmful as far as known. It uses the free "return" request, never a
+ * Withdraw Squad item. */
+RecallResult StartRecall(Connection *c, const char *requester) {
+	MarchesPauseStart(c->recall.pause_seconds);
+
+	if (c->recall.active)
+		return RECALL_RUNNING;
+	if (c->player.max_marches == 0)
+		return RECALL_NO_DATA;
+	if (c->player.current_marches == 0)
+		return RECALL_NO_MARCHES;
+
+	c->recall.active     = true;
+	c->recall.next_index = 0;
+	c->recall.count      = c->player.max_marches < RECALL_MAX_MARCHES ? c->player.max_marches : RECALL_MAX_MARCHES;
+	c->recall.sent       = 0;
+	c->recall.next_at    = 0;
+	snprintf(c->recall.requester, sizeof(c->recall.requester), "%s", requester);
+
+	LOGI("[RECALL] Rappel de toutes les troupes demandé par %s (%u marche(s) sortie(s), %u index à essayer)\n",
+		requester, c->player.current_marches, c->recall.count);
+	return RECALL_STARTED;
+}
+
+/* One take-back request every 1-2 s, like the deliveries: nothing is sent faster than a player would. */
+void RecallTick(Connection *c) {
+	if (!c->recall.active)
+		return;
+	if (now_ms() < c->recall.next_at)
+		return;
+
+	RequestTroopTakeBack(c, c->recall.next_index);
+	c->recall.next_index++;
+	c->recall.sent++;
+
+	if (c->recall.next_index >= c->recall.count) {
+		c->recall.active = false;
+
+		char left[32];
+		FormatDurationFr(MarchesPauseSecondsLeft(), left, sizeof(left));
+		LOGI("[RECALL] %u demande(s) de rappel envoyée(s)\n", c->recall.sent);
+		BotReply(c, c->recall.requester, "Rappel",
+			"Rappel terminé : %u demande(s) envoyée(s). Aucune marche ne sera envoyée pendant encore %s.",
+			c->recall.sent, left);
+		return;
+	}
+
+	c->recall.next_at = now_ms() + 1000 + (uint64_t)(rand() % 1000);
+}
+
 void RequestJoinRally(Connection *c, const char *ally_name, const uint32_t troop_array[16])
 {
+	if (MarchesPaused()) {
+		LOGW("[RECALL] Ralliement non envoyé : marches suspendues\n");
+		return;
+	}
+
     c->size = 2;
 
     // Packet type.
@@ -2241,39 +2346,9 @@ const char *GetBuildingName(uint16_t build_id)
     }
 }
 
-static const uint32_t trading_post_supply_capacity[] = {
-	0,      // Level 0 (unused)
-	5000,   // Level 1
-	15000,  // Level 2
-	30000,  // Level 3
-	50000,  // Level 4
-	75000,  // Level 5
-	105000,  // Level 6
-	140000,  // Level 7
-	180000,  // Level 8
-	225000,  // Level 9
-	275000,  // Level 10
-	330000,  // Level 11
-	400000,  // Level 12
-	490000,  // Level 13
-	600000,  // Level 14
-	730000,  // Level 15
-	880000,  // Level 16
-	1050000,  // Level 17
-	1250000,  // Level 18
-	1450000,  // Level 19
-	1650000,  // Level 20
-	1850000,  // Level 21
-	2050000,  // Level 22
-	2250000,  // Level 23
-	2500000,  // Level 24
-	3000000,  // Level 25
-};
-
+/* Supply capacity of the Trading Post alone for the level BUILDINGINFO gives (mana part included): buildings.h. */
 uint32_t GetTradingPostSupplyCapacity(uint8_t level) {
-	if (level > 25) return 0;
-
-	return trading_post_supply_capacity[level];
+	return TradingPostCapacity(level);
 }
 
 uint8_t GetVIPLevel(uint32_t vipPoints)
@@ -2296,6 +2371,104 @@ uint8_t GetVIPLevel(uint32_t vipPoints)
 	return 1;
 }
 
+/* "niveau 32 (25 + mana 1, 2/5 vers mana 2)" - the way the player reads a building's level (buildings.h). */
+static void FormatBuildingLevel(uint8_t level, char *out, size_t size)
+{
+	if (level <= BUILDING_NORMAL_MAX_LEVEL)
+		snprintf(out, size, "niveau %u", level);
+	else if (BuildingManaLevel(level) >= BUILDING_MANA_MAX)
+		snprintf(out, size, "niveau %u (25 + mana %u, maximum)", level, BuildingManaLevel(level));
+	else
+		snprintf(out, size, "niveau %u (25 + mana %u, %u/%u vers mana %u)", level, BuildingManaLevel(level),
+			BuildingManaSteps(level), BUILDING_MANA_STEPS, BuildingManaLevel(level) + 1);
+}
+
+/* Compares the buildings just received with the ones saved at the previous login (<data.path>/
+ * building_levels.bin) and logs each one that was built, upgraded or removed:
+ *     [BUILD] #24 (emplacement 62716) : niveau 30 (25 + mana 1, 0/5 ...) -> niveau 31 (...)
+ * The game never shows its numbers for the buildings, they only show when one changes, so each line
+ * is a building identified by its build_id: the player can name it and extend game_id in gamedata
+ * (docs/buildings.md). A building is told apart by its slot. Returns how many differ; 0 on the first
+ * login. The snapshot is rewritten every time. */
+uint16_t BuildingSnapshotDiff(Connection *c) {
+	char path[320];
+	size_t length = strlen(c->bot.data_path);
+	snprintf(path, sizeof(path), "%s%sbuilding_levels.bin", c->bot.data_path,
+		(length > 0 && (c->bot.data_path[length - 1] == '/' || c->bot.data_path[length - 1] == '\\')) ? "" : "/");
+
+	BuildingInfo before[256];
+	uint8_t before_count = 0;
+	bool have_before = false;
+	FILE *f = fopen(path, "rb");
+	if (f) {
+		uint8_t record[5];
+		if (fread(&before_count, 1, 1, f) == 1) {
+			have_before = true;
+			for (uint8_t i = 0; i < before_count; i++) {
+				if (fread(record, 1, sizeof(record), f) != sizeof(record)) {
+					have_before = false;
+					break;
+				}
+				before[i].position_id = read_u16(record);
+				before[i].build_id    = read_u16(record + 2);
+				before[i].level       = record[4];
+			}
+		}
+		fclose(f);
+	}
+
+	uint16_t changed = 0;
+	if (have_before) {
+		char was[64], now[64];
+		for (uint8_t i = 0; i < c->building_count; i++) {
+			const BuildingInfo *b = &c->building[i];
+			const BuildingInfo *old = NULL;
+			for (uint8_t j = 0; j < before_count; j++)
+				if (before[j].position_id == b->position_id && before[j].build_id == b->build_id) { old = &before[j]; break; }
+
+			FormatBuildingLevel(b->level, now, sizeof(now));
+			if (!old) {
+				LOGI("[BUILD] #%u (emplacement %u) : construit, %s\n", b->build_id, b->position_id, now);
+				changed++;
+			} else if (old->level != b->level) {
+				FormatBuildingLevel(old->level, was, sizeof(was));
+				LOGI("[BUILD] #%u %s(emplacement %u) : %s -> %s depuis la dernière connexion\n", b->build_id,
+					IsBuilding(b->build_id) ? GetBuildingName(b->build_id) : "", b->position_id, was, now);
+				changed++;
+			}
+		}
+		for (uint8_t j = 0; j < before_count; j++) {
+			bool still = false;
+			for (uint8_t i = 0; i < c->building_count && !still; i++)
+				still = c->building[i].position_id == before[j].position_id && c->building[i].build_id == before[j].build_id;
+			if (!still) {
+				LOGI("[BUILD] #%u (emplacement %u) : n'existe plus\n", before[j].build_id, before[j].position_id);
+				changed++;
+			}
+		}
+	}
+
+	f = fopen(path, "wb");
+	if (!f) {
+		ensure_directory(c->bot.data_path);
+		f = fopen(path, "wb");
+	}
+	if (f) {
+		fwrite(&c->building_count, 1, 1, f);
+		for (uint8_t i = 0; i < c->building_count; i++) {
+			uint8_t record[5];
+			record[0] = (uint8_t)(c->building[i].position_id & 0xFF);
+			record[1] = (uint8_t)(c->building[i].position_id >> 8);
+			record[2] = (uint8_t)(c->building[i].build_id & 0xFF);
+			record[3] = (uint8_t)(c->building[i].build_id >> 8);
+			record[4] = c->building[i].level;
+			fwrite(record, 1, sizeof(record), f);
+		}
+		fclose(f);
+	}
+	return changed;
+}
+
 void RecvAllBuildData(Connection *c, const uint8_t *data)
 {
 	uint16_t offset = 0;
@@ -2310,7 +2483,7 @@ void RecvAllBuildData(Connection *c, const uint8_t *data)
 		c->building[i].build_id    = read_u16(data + offset); offset += 2;
 		c->building[i].level       = read_u8(data + offset);  offset += 1;
 		
-		if (c->building[i].build_id == 17) {
+		if (c->building[i].build_id == BUILDING_TRADING_POST) {
 			trading_post_lv = c->building[i].level;
 		}
 		
@@ -2330,8 +2503,12 @@ void RecvAllBuildData(Connection *c, const uint8_t *data)
 		
 	}
 	
-	c->supply_capacity = GetTradingPostSupplyCapacity(trading_post_lv);
-	LOGD("[BUILD] Poste de Commerce niveau %u : capacité de transport %u\n", trading_post_lv, c->supply_capacity);
+	c->trading_post_level = trading_post_lv;
+	RecomputeSupplyCapacity(c);
+	BuildingSnapshotDiff(c);
+	LOGD("[BUILD] Poste de Commerce niveau %u (mana %u, %u/%u) : capacité de transport %u\n",
+		trading_post_lv, BuildingManaLevel(trading_post_lv), BuildingManaSteps(trading_post_lv),
+		BUILDING_MANA_STEPS, c->supply_capacity);
 	
 }
 
@@ -2438,7 +2615,7 @@ void RecvAllyPoint(Connection *c, const uint8_t *data)
 					uint64_t limit = c->bank.max_delivery_distance;
 					
 					if (MapDistanceSq(self, pos) > limit * limit) {
-						BotReply(c, c->transfer.target_name, "Trop loin",
+						BotReply(c, TransferRequester(c), "Trop loin",
 							"Votre château est à %u cases, la limite de livraison est de %u cases.",
 							MapDistance(self, pos), c->bank.max_delivery_distance);
 						
@@ -2465,7 +2642,7 @@ void RecvAllyPoint(Connection *c, const uint8_t *data)
 			printf("Target is in another kingdom\n");
 
 			if (c->transfer.state == TRANSFER_WAIT_TARGET) {
-				BotReply(c, c->transfer.target_name, "Livraison impossible",
+				BotReply(c, TransferRequester(c), "Livraison impossible",
 					"Vous êtes dans un autre royaume, livraison annulée.");
 				c->transfer.state = TRANSFER_FAILED;
 			}
@@ -2474,7 +2651,7 @@ void RecvAllyPoint(Connection *c, const uint8_t *data)
 		default:
 			printf("AllyPoint failed: %u\n", status);
 			if (c->transfer.state == TRANSFER_WAIT_TARGET) {
-				BotReply(c, c->transfer.target_name, "Livraison impossible",
+				BotReply(c, TransferRequester(c), "Livraison impossible",
 					"Vous n'avez pas été retrouvé dans le jeu (code %u), livraison annulée.", status);
 				c->transfer.state = TRANSFER_FAILED;
 			}
@@ -2798,28 +2975,35 @@ void RecvAllianceInfo(Connection *c, const uint8_t *data) {
 	return;
 }
 
-void RecvBuildingQueue(Connection *c, const uint8_t *data)
+/* _MSG_RESP_BUILDINGEVENT: what is under construction, layout in buildings.h. The game builds at most
+ * BUILDING_QUEUE_SLOTS things at once. The build_id shows the building's number: it is how the Mana Lode was
+ * identified (docs/buildings.md). */
+void RecvBuildingQueue(Connection *c, const uint8_t *data, uint16_t size)
 {
-	uint16_t offset = 0;
-	
-	
-	uint8_t queue_build_type = read_u8(data + offset); offset += 1;
-	uint16_t position = read_u16(data + offset); offset += 2;
-	uint16_t build_id = read_u16(data + offset); offset += 2;
-	uint8_t level = read_u8(data + offset); offset += 1;
-	uint64_t start_time = read_u64(data + offset); offset += 8;
-	uint32_t total_time = read_u32(data + offset); offset += 4;
-	
-	
-	return;
-	
-	printf("queue_build_type: %u\n", queue_build_type);
-	printf("position: %u\n", position);
-	printf("build_id: %u\n", build_id);
-	printf("level: %u\n", level);
-	printf("start_time: %lu\n", start_time);
-	printf("total_time: %u\n", total_time);
-	
+	if (size < BUILDING_QUEUE_INFO_SIZE)
+		return;
+
+	for (int i = 0; i < BUILDING_QUEUE_SLOTS; i++) {
+		const uint8_t *entry = data + i * BUILDING_QUEUE_ENTRY_SIZE;
+		BuildingConstruction *b = &c->construction[i];
+
+		b->used       = read_u8(entry) != 0;
+		b->slot       = read_u16(entry + 1);
+		b->build_id   = read_u16(entry + 3);
+		b->level      = read_u8(entry + 5);
+		b->start_time = (int64_t)read_u64(entry + 6);
+		b->duration   = read_u32(entry + 14);
+
+		if (!b->used)
+			continue;
+
+		char level[64];
+		FormatBuildingLevel(b->level, level, sizeof(level));
+		int64_t now = c->server_time ? (int64_t)c->server_time : (int64_t)time(NULL);
+		LOGI("[BUILD] En construction : #%u %s(emplacement %u) vers %s, durée %.1f h, reste %.1f h\n",
+			b->build_id, IsBuilding(b->build_id) ? GetBuildingName(b->build_id) : "", b->slot, level,
+			b->duration / 3600.0, BuildingConstructionSecondsLeft(b, now) / 3600.0);
+	}
 }
 
 typedef enum
@@ -3655,6 +3839,11 @@ void WarTick(Connection *c) {
  * ------------------------------------------------------------------------ */
 
 void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count) {
+	if (MarchesPaused()) {
+		LOGW("[RECALL] Marche de récolte non envoyée : marches suspendues\n");
+		return;
+	}
+
 	c->size = 2;
 	write_u16(c->data + c->size, _MSG_REQUEST_TROOPMARCH_NOTATK); c->size += 2;
 	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;      // payload offset 0
@@ -3700,8 +3889,10 @@ void RecvGatheringEvent(Connection *c, const uint8_t *data, uint16_t size) {
 }
 
 void RecvGatherReturnResp(Connection *c, const uint8_t *data, uint16_t size) {
-	(void)c; (void)data; (void)size;
-	LOGD("[GATHER] Rappel confirmé\n");
+	(void)c;
+	// The layout of this answer is not decoded: say what came back instead of claiming a success.
+	LOGI("[RECALL] Réponse du serveur à une demande de rappel : %u octet(s), premier octet %u\n",
+		size, size > 0 ? read_u8(data) : 0);
 }
 
 /* Only march kind this bot sends is gather, so any troop coming home is a gather
@@ -3760,6 +3951,7 @@ static uint64_t GatherHumanDelay(void) {
 void GatherTick(Connection *c) {
 	if (!c->gather.enabled) return;
 	if (c->player.max_marches == 0) return; // march data not loaded yet
+	if (MarchesPaused()) return;            // $recall: no march for a while
 
 	// Confirmed live, twice: the server never answers _MSG_REQUEST_MAPDATA sent by
 	// this bot (0 responses to 22, then 23, paced requests covering the right
@@ -4927,16 +5119,109 @@ void RecvNPCWallHallData(Connection *c, const uint8_t *data)
 
 #include "tech_research.h"
 
+/* What one delivery march can carry: the Trading Post (its level, mana steps included) plus the three
+ * "Bigger Bags" researches. Exactly the 4,380,000 the game showed for the account at Trading Post 30
+ * (3,030,000) with Bigger Bags at 5, 0 and 10 (350,000 + 0 + 1,000,000). Called when either arrives. */
+void RecomputeSupplyCapacity(Connection *c) {
+	uint32_t capacity = TradingPostCapacity(c->trading_post_level);
+
+	if (capacity > 0 && c->research.loaded) {
+		static const uint16_t bags[3] = { TECH_BIGGER_BAGS_I, TECH_BIGGER_BAGS_II, TECH_BIGGER_BAGS_III };
+		for (int i = 0; i < 3; i++) {
+			const TechInfo *info = GetTechInfo(bags[i]);
+			uint8_t level = ResearchLevel(&c->research, bags[i]);
+			if (info && level <= 10)
+				capacity += (uint32_t)info->value[level];
+		}
+	}
+
+	c->supply_capacity = capacity;
+}
+
+/* Compares the levels just received with the ones saved at the previous login (<data.path>/
+ * research_levels.bin) and logs every research whose level changed: "#57 : 2 -> 5". The game does
+ * not show its numbers for the researches, they only show when one changes level, so each line is
+ * a research identified by its protocol id: the player can name it and extend game_id in
+ * gamedata (docs/research.md). Returns how many changed; 0 on the first login (nothing to
+ * compare with). The snapshot is rewritten every time. */
+uint16_t ResearchSnapshotDiff(Connection *c) {
+	char path[320];
+	size_t length = strlen(c->bot.data_path);
+	snprintf(path, sizeof(path), "%s%sresearch_levels.bin", c->bot.data_path,
+		(length > 0 && (c->bot.data_path[length - 1] == '/' || c->bot.data_path[length - 1] == '\\')) ? "" : "/");
+
+	uint8_t before[RESEARCH_LEVEL_BYTES];
+	bool have_before = false;
+	FILE *f = fopen(path, "rb");
+	if (f) {
+		have_before = fread(before, 1, sizeof(before), f) == sizeof(before);
+		fclose(f);
+	}
+
+	uint16_t changed = 0;
+	if (have_before) {
+		ResearchState old = {0};
+		memcpy(old.levels, before, sizeof(before));
+		for (uint16_t id = 1; id <= RESEARCH_ID_MAX; id++) {
+			uint8_t was = ResearchLevel(&old, id), now = ResearchLevel(&c->research, id);
+			if (was == now)
+				continue;
+			const char *name = ResearchKnownName(id);
+			LOGI("[RESEARCH] #%u%s%s : niveau %u -> %u depuis la dernière connexion\n",
+				id, name ? " " : "", name ? name : "", was, now);
+			changed++;
+		}
+	}
+
+	f = fopen(path, "wb");
+	if (!f) {
+		ensure_directory(c->bot.data_path);
+		f = fopen(path, "wb");
+	}
+	if (f) {
+		fwrite(c->research.levels, 1, RESEARCH_LEVEL_BYTES, f);
+		fclose(f);
+	}
+	return changed;
+}
+
+/* _MSG_RESP_RESEARCHINFO: the whole research state, layout in research.h. */
 void RecvTechnologyInfo(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < RESEARCH_INFO_SIZE) {
+		LOGW("[RESEARCH] Paquet trop court (%u octets, %u attendus), ignoré\n", size, RESEARCH_INFO_SIZE);
+		return;
+	}
+
 	uint16_t offset = 0;
 	
 	uint16_t researchTech = read_u16(data + offset); offset += 2;
 	
-	read_u8(data + offset); offset += 1;
+	uint8_t unk = read_u8(data + offset); offset += 1;
 	
 	int64_t num = read_u64(data + offset); offset += 8;
 	
 	uint32_t totalTime = read_u32(data + offset); offset += 4;
+
+	c->research.in_progress = researchTech;
+	c->research.unk         = unk;
+	c->research.start_time  = num;
+	c->research.total_time  = totalTime;
+	memcpy(c->research.levels, data + offset, RESEARCH_LEVEL_BYTES);
+	c->research.loaded = true;
+	RecomputeSupplyCapacity(c);
+
+	LOGI("[RESEARCH] %u recherche(s) commencée(s) sur %u\n", ResearchStartedCount(&c->research), RESEARCH_ID_MAX);
+	ResearchSnapshotDiff(c);
+	if (ResearchInProgress(&c->research)) {
+		int64_t now = c->server_time ? (int64_t)c->server_time : (int64_t)time(NULL);
+		const char *name = ResearchKnownName(researchTech);
+		uint8_t level = ResearchLevel(&c->research, researchTech);
+		LOGI("[RESEARCH] En cours : #%u%s%s (niveau actuel %u), durée %.1f h, reste %.1f h\n",
+			researchTech, name ? " " : "", name ? name : "", level,
+			totalTime / 3600.0, ResearchSecondsLeft(&c->research, now) / 3600.0);
+	} else {
+		LOGI("[RESEARCH] Aucune recherche en cours\n");
+	}
 	
 	/*
 	printf("\n\nRecvTechnologyInfo\n");
@@ -4950,7 +5235,7 @@ void RecvTechnologyInfo(Connection *c, const uint8_t *data, uint16_t size) {
 	
 	
 	uint8_t AllTechData[1024];
-	read_raw(AllTechData, data + offset, 200); offset += 150;
+	read_raw(AllTechData, data + offset, 200);
 	
 	// uint8_t level = GetTechLevel(c->technology.data, TECH_BIGGER_BAGS_I);
 	
@@ -5023,6 +5308,100 @@ void RecvTechnologyInfo(Connection *c, const uint8_t *data, uint16_t size) {
 	printf("%u\n", GetTechLevel(AllTechData, 280));
 	*/
 	//printf("\n\n");
+}
+
+/* ---- Research lifecycle (layouts and what is confirmed: research.h) ---- */
+
+/* level is the TARGET level: the research's current level + 1. Items are resource items from the
+ * bag used to cover what the cost lacks (none captured yet for a start that needs no item). */
+void RequestResearchStart(Connection *c, uint16_t tech_id, uint8_t level, const ResearchItemUse *items, uint16_t item_count) {
+	if (!items)
+		item_count = 0;
+	if (item_count > RESEARCH_START_MAX_ITEMS)
+		item_count = RESEARCH_START_MAX_ITEMS;
+
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_SMARTUSE_FOR_RESEARCH); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);               c->size += 4;
+	write_u16(c->data + c->size, tech_id);                             c->size += 2;
+	write_u8 (c->data + c->size, level);                               c->size += 1;
+	write_u16(c->data + c->size, item_count);                          c->size += 2;
+	for (uint16_t i = 0; i < item_count; i++) {
+		write_u16(c->data + c->size, items[i].item_id);  c->size += 2;
+		write_u16(c->data + c->size, items[i].quantity); c->size += 2;
+	}
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+void RequestResearchCancel(Connection *c, uint16_t tech_id, uint8_t level) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_RESEARCH_EVENT_CANCEL); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);               c->size += 4;
+	write_u16(c->data + c->size, tech_id);                             c->size += 2;
+	write_u8 (c->data + c->size, level);                               c->size += 1;
+	write_zero(c->data + c->size, 3);                                  c->size += 3;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+void RecvResearchStart(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 16) return;
+
+	uint8_t status = read_u8(data);
+	if (status != 0) {
+		LOGW("[RESEARCH] Lancement refusé (code %u)\n", status);
+		return;
+	}
+
+	uint16_t tech  = read_u16(data + 1);
+	uint8_t  level = read_u8(data + 3);
+
+	c->research.in_progress = tech;
+	c->research.start_time  = (int64_t)read_u64(data + 4);
+	c->research.total_time  = read_u32(data + 12);
+	c->research.loaded      = true;
+
+	const char *name = ResearchKnownName(tech);
+	LOGI("[RESEARCH] Lancée : #%u%s%s niveau %u, durée %.1f h\n",
+		tech, name ? " " : "", name ? name : "", level, c->research.total_time / 3600.0);
+}
+
+void RecvResearchCancel(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 4) return;
+
+	uint8_t status = read_u8(data);
+	if (status != 0) {
+		LOGW("[RESEARCH] Annulation refusée (code %u)\n", status);
+		return;
+	}
+
+	uint16_t tech = read_u16(data + 1);
+	if (c->research.in_progress == tech)
+		c->research.in_progress = 0;
+
+	LOGI("[RESEARCH] Annulée : #%u niveau %u\n", tech, read_u8(data + 3));
+}
+
+void RecvResearchComplete(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 3) return;
+
+	uint16_t tech  = read_u16(data);
+	uint8_t  level = read_u8(data + 2);
+
+	ResearchSetLevel(&c->research, tech, level);
+	if (c->research.in_progress == tech)
+		c->research.in_progress = 0;
+
+	// The rate read from the last delivery is out of date once Tax Break goes up, and the capacity
+	// once a "Bigger Bags" does.
+	if (tech == RESEARCH_TAX_BREAK_ID)
+		c->delivery_tax_seen_valid = false;
+	if (tech == TECH_BIGGER_BAGS_I || tech == TECH_BIGGER_BAGS_II || tech == TECH_BIGGER_BAGS_III)
+		RecomputeSupplyCapacity(c);
+
+	const char *name = ResearchKnownName(tech);
+	LOGI("[RESEARCH] Terminée : #%u%s%s niveau %u\n", tech, name ? " " : "", name ? name : "", level);
 }
 
 /*
@@ -5107,6 +5486,128 @@ void point_kind_str(int pk, char *buf) {
 }
 
 
+/* Who a delivery's messages go to: whoever asked for it. That is the receiver, except for the administrators'
+ * $adminfood <player> <amount>, where the receiver is another player. */
+const char *TransferRequester(const Connection *c)
+{
+	return c->transfer.issued_name[0] ? c->transfer.issued_name : c->transfer.target_name;
+}
+
+/* Cancels the delivery in progress, giving back what was debited for a march that never got accepted. */
+void AbortTransfer(Connection *c)
+{
+	if (c->transfer.from_balance && c->transfer.in_flight > 0)
+		GuildBankCredit(c, c->transfer.balance_owner, c->transfer.resource_type, c->transfer.in_flight);
+	memset(&c->transfer, 0, sizeof(c->transfer));
+	c->transfer.state = TRANSFER_IDLE;
+}
+
+/* --- the queue of requests waiting for the delivery in progress (guild bank) --- */
+
+/* One request per player: a new one replaces the one still waiting. false when the queue is full. */
+bool TransferQueuePush(Connection *c, const TransferRequest *request)
+{
+	for (uint8_t i = 0; i < c->transfer_queue_count; i++) {
+		if (strcmp(c->transfer_queue[i].requester, request->requester) == 0) {
+			c->transfer_queue[i] = *request;
+			return true;
+		}
+	}
+	if (c->transfer_queue_count >= TRANSFER_QUEUE_MAX)
+		return false;
+	c->transfer_queue[c->transfer_queue_count++] = *request;
+	return true;
+}
+
+/* Place in the queue, 1 = next; 0 when the player has no request waiting. */
+int TransferQueuePosition(const Connection *c, const char *requester)
+{
+	for (uint8_t i = 0; i < c->transfer_queue_count; i++)
+		if (strcmp(c->transfer_queue[i].requester, requester) == 0)
+			return i + 1;
+	return 0;
+}
+
+bool TransferQueueRemove(Connection *c, const char *requester)
+{
+	for (uint8_t i = 0; i < c->transfer_queue_count; i++) {
+		if (strcmp(c->transfer_queue[i].requester, requester) != 0)
+			continue;
+		memmove(&c->transfer_queue[i], &c->transfer_queue[i + 1],
+			(size_t)(c->transfer_queue_count - i - 1) * sizeof(c->transfer_queue[0]));
+		c->transfer_queue_count--;
+		return true;
+	}
+	return false;
+}
+
+/* Amount of a resource the bot may give away from its stock: what is above the reserve and, with a guild bank,
+ * above what the members have deposited. */
+uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balance)
+{
+	uint32_t current = 0, reserve = 0;
+
+	switch (type) {
+		case RESOURCE_FOOD: current = c->resources.food; reserve = c->bank.reserve.food; break;
+		case RESOURCE_ROCK: current = c->resources.rock; reserve = c->bank.reserve.rock; break;
+		case RESOURCE_WOOD: current = c->resources.wood; reserve = c->bank.reserve.wood; break;
+		case RESOURCE_ORE:  current = c->resources.ore;  reserve = c->bank.reserve.ore;  break;
+		case RESOURCE_GOLD: current = c->resources.gold; reserve = c->bank.reserve.gold; break;
+		default: return 0;
+	}
+
+	uint64_t kept;
+	if (from_balance)
+		kept = 0;                                    // a member takes their own money back: the reserve is not theirs to respect
+	else
+		kept = (uint64_t)reserve + (c->guildbank.enabled ? GuildBankTotal(type) : 0);   // the deposits are not the bot's to give
+
+	return current > kept ? (uint32_t)(current - kept) : 0;
+}
+
+/* Starts the next waiting request once the delivery in progress is over. */
+static void StartNextTransfer(Connection *c)
+{
+	while (c->transfer_queue_count > 0) {
+		TransferRequest r = c->transfer_queue[0];
+		memmove(&c->transfer_queue[0], &c->transfer_queue[1],
+			(size_t)(c->transfer_queue_count - 1) * sizeof(c->transfer_queue[0]));
+		c->transfer_queue_count--;
+
+		uint32_t available = StockAvailable(c, r.type, r.from_balance);
+		if (r.from_balance) {
+			uint64_t balance = GuildBankBalance(r.requester, r.type);
+			if (balance < available)
+				available = (uint32_t)balance;
+		}
+
+		uint64_t not_before = 0;
+		if (r.amount > available) {
+			// the stock or the balance changed while it waited: tell them instead of sending less in silence
+			char have[20];
+			format_number2(available, have, sizeof(have));
+			BotReply(c, r.requester, "Livraison impossible",
+				"Votre demande ne peut plus être honorée (%s disponible), elle est annulée.", have);
+			continue;
+		}
+
+		memset(&c->transfer, 0, sizeof(c->transfer));
+		c->transfer.amount = r.amount;
+		c->transfer.remaining = r.amount;
+		c->transfer.resource_type = r.type;
+		c->transfer.not_before = not_before;
+		c->transfer.from_balance = r.from_balance;
+		snprintf(c->transfer.target_name, sizeof(c->transfer.target_name), "%s", r.target);
+		snprintf(c->transfer.issued_name, sizeof(c->transfer.issued_name), "%s", r.requester);
+		if (r.from_balance)
+			snprintf(c->transfer.balance_owner, sizeof(c->transfer.balance_owner), "%s", r.requester);
+		c->transfer.state = TRANSFER_FIND_TARGET;
+		LOGI("[BANK] Livraison de %u pour %s (destinataire %s), %u demande(s) encore en file\n",
+			r.amount, r.requester, r.target, c->transfer_queue_count);
+		return;
+	}
+}
+
 uint32_t CalculateTransferAmount(Connection *c)
 {
 	uint32_t current = 0;
@@ -5137,11 +5638,18 @@ uint32_t CalculateTransferAmount(Connection *c)
 			return 0;
 	}
 	
-	/* Keep reserved resources. */
-	if (current <= reserve)
+	/* Keep reserved resources (and, with a guild bank, the members' deposits). */
+	(void)reserve;
+	uint32_t available = StockAvailable(c, c->transfer.resource_type, c->transfer.from_balance);
+	if (available == 0 || current == 0)
 		return 0;
-	
-	uint32_t available = current - reserve;
+
+	/* A withdrawal never sends more than the balance holds. */
+	if (c->transfer.from_balance) {
+		uint64_t balance = GuildBankBalance(c->transfer.balance_owner, c->transfer.resource_type);
+		if (available > balance)
+			available = (uint32_t)balance;
+	}
 	
 	/* Don't send more than requested. */
 	if (available > c->transfer.remaining)
@@ -5157,6 +5665,7 @@ uint32_t CalculateTransferAmount(Connection *c)
 // currently food sending available for testing purpose 
 void SendResourceMarch(Connection *c) {
 	if (c->player.current_marches >= c->player.max_marches) return;
+	if (MarchesPaused()) return; // $recall: no march for a while
 	
 	if (c->transfer.remaining == 0) {
 		c->transfer.state = TRANSFER_COMPLETE;
@@ -5175,13 +5684,13 @@ void SendResourceMarch(Connection *c) {
 		uint32_t sent = c->transfer.amount - c->transfer.remaining;
 
 		if (sent == 0) {
-			BotReply(c, c->transfer.target_name, "Livraison impossible",
+			BotReply(c, TransferRequester(c), "Livraison impossible",
 				"Ressources insuffisantes pour commencer la livraison.");
 		} else {
 			char sent_str[20], total_str[20];
 			format_number2(sent, sent_str, sizeof(sent_str));
 			format_number2(c->transfer.amount, total_str, sizeof(total_str));
-			BotReply(c, c->transfer.target_name, "Livraison incomplète",
+			BotReply(c, TransferRequester(c), "Livraison incomplète",
 				"%s envoyé sur %s demandé : ressources insuffisantes pour continuer.",
 				sent_str, total_str);
 		}
@@ -5212,6 +5721,12 @@ void SendResourceMarch(Connection *c) {
 	
 	SendResource(c, resource, c->transfer.zone_id, c->transfer.point_id);
 
+	// guild bank: the gross amount that leaves is debited now, given back if the server refuses the march
+	if (c->transfer.from_balance) {
+		GuildBankDebit(c, c->transfer.balance_owner, c->transfer.resource_type, amount);
+		c->transfer.in_flight = amount;
+	}
+
 	c->transfer.remaining -= amount;
 	c->transfer.state = TRANSFER_WAIT_MARCH;
 
@@ -5225,7 +5740,13 @@ void SendResourceMarch(Connection *c) {
 
 void ResourceTransferTick(Connection *c)
 {
-	if (c->transfer.state == TRANSFER_IDLE) return;
+	// nothing in progress: the next request waiting takes its turn (not while the marches are suspended)
+	if (c->transfer.state == TRANSFER_IDLE) {
+		if (c->transfer_queue_count > 0 && c->supply_capacity > 0 && !MarchesPaused())
+			StartNextTransfer(c);
+		if (c->transfer.state == TRANSFER_IDLE)
+			return;
+	}
 	
 	// Bot doesn't have trading post yet
 	if (c->supply_capacity == 0) return;
@@ -5244,7 +5765,7 @@ void ResourceTransferTick(Connection *c)
 			break;
 		case TRANSFER_WAIT_TARGET:
 			if (time(NULL) >= c->transfer.timeout) {
-				BotReply(c, c->transfer.target_name, "Livraison impossible",
+				BotReply(c, TransferRequester(c), "Livraison impossible",
 					"Vous n'avez pas été retrouvé dans le jeu (délai dépassé), livraison annulée.");
 				c->transfer.state = TRANSFER_FAILED;
 			}
@@ -5276,6 +5797,25 @@ void ResourceTransferTick(Connection *c)
 					amt, kind, c->transfer.target_name);
 				NotifyDiscord(c, msg);
 			}
+
+			// a delivery asked through the guild bank commands: tell whoever asked what went out
+			if (c->transfer.issued_name[0] && c->transfer.remaining == 0 && c->transfer.amount > 0) {
+				static const char *labels[5] = { "nourriture", "pierre", "bois", "minerai", "or" };
+				ResourceType t = c->transfer.resource_type;
+				const char *label = (t >= RESOURCE_FOOD && t <= RESOURCE_GOLD) ? labels[t] : "?";
+				double tax = DeliveryTaxPercent(c);
+				uint64_t net = tax > 0.0 && tax < 100.0
+					? (uint64_t)((double)c->transfer.amount * (100.0 - tax) / 100.0) : c->transfer.amount;
+				if (c->transfer.from_balance)
+					BotReply(c, c->transfer.issued_name, "Retrait",
+						"Retrait terminé : %u de %s envoyés, environ %llu reçus après la taxe de %.1f%%. Solde restant : %llu.",
+						c->transfer.amount, label, (unsigned long long)net, tax,
+						(unsigned long long)GuildBankBalance(c->transfer.balance_owner, t));
+				else
+					BotReply(c, c->transfer.issued_name, "Envoi",
+						"Envoi terminé : %u de %s envoyés à %s, environ %llu reçus après la taxe de %.1f%%.",
+						c->transfer.amount, label, c->transfer.target_name, (unsigned long long)net, tax);
+			}
 			c->transfer.state = TRANSFER_IDLE;
 			break;
 		case TRANSFER_FAILED:
@@ -5293,25 +5833,31 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 
 	// b == 1 means max march reached; other non-zero codes seen (e.g. 14 with marches free) are
 	// refusals for a different, unidentified reason - report the code, don't guess the cause.
+	if (b != 0 && c->transfer.from_balance && c->transfer.in_flight > 0) {
+		// the march did not leave: what was debited for it goes back to the balance
+		GuildBankCredit(c, c->transfer.balance_owner, c->transfer.resource_type, c->transfer.in_flight);
+		c->transfer.in_flight = 0;
+	}
 	if (b == 1) {
-		BotReply(c, c->transfer.target_name, "Livraison impossible",
+		BotReply(c, TransferRequester(c), "Livraison impossible",
 			"Nombre maximum de marches atteint, livraison annulée.");
 		c->transfer.state = TRANSFER_FAILED;
 		return;
 	}
 	if (b != 0) {
-		BotReply(c, c->transfer.target_name, "Livraison impossible",
+		BotReply(c, TransferRequester(c), "Livraison impossible",
 			"La marche a été refusée par le serveur (code %u), livraison annulée.", b);
 		c->transfer.state = TRANSFER_FAILED;
 		return;
 	}
+	c->transfer.in_flight = 0;   // accepted: the debit stands
 
 	// marches counts
 	uint8_t b2 = read_u8(data + offset); offset += 1;
 
 	if (b2 >= 8)
 	{
-		BotReply(c, c->transfer.target_name, "Livraison impossible",
+		BotReply(c, TransferRequester(c), "Livraison impossible",
 			"Réponse de marche invalide (code %u), livraison annulée.", b2);
 		c->transfer.state = TRANSFER_FAILED;
 		return;
@@ -5342,6 +5888,16 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 	char DesPlayerName[13];
 	read_raw(DesPlayerName, data + offset, 13); offset += 13;
 	
+	// Gross amount the server counted for this march: the delivery report that follows
+	// carries only the net one, the tax rate is rebuilt from the two (RecvResHelpReport).
+	{
+		uint32_t echoed[5] = { food_send, rock_send, wood_send, ore_send, gold_send };
+		uint32_t gross = 0;
+		for (int i = 0; i < 5; i++)
+			gross += echoed[i];
+		c->last_gross = gross;
+	}
+
 	// c->transfer.cur_marches++;
 	c->player.current_marches++;
 
@@ -5357,13 +5913,107 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 	c->transfer.state = TRANSFER_SEND_MARCH;
 }
 
+/* _MSG_RESP_RESHELPREPORTINFO (47 bytes), sent right after a delivery leaves. Confirmed on
+ * two accounts with different taxes, 1M stone each (7.5% -> 925000, 7.6% -> 924000):
+ *   0   u32  report id
+ *   5   u32  time
+ *   13  u8   0 = we sent it, 1 = we received it
+ *   14  char[13] the other player's name
+ *   27  u32 x5  NET amount per resource: food, rock, wood, ore, gold (what the target gets)
+ * The tax percentage itself is not a field anywhere in the session (searched as int, float,
+ * per-mille and text in every packet of both captures), but the gross amount is known
+ * (RecvSHelp echoes it), so the rate the game really applied is gross vs net. */
+/* A delivery this bot received is a deposit into the guild bank (guildbank.h): the report names the sender and
+ * gives the net amounts. Credits them once per report and tells the sender. */
+static void HandleDeposit(Connection *c, const uint8_t *data) {
+	if (!c->guildbank.enabled)
+		return;
+
+	uint32_t id   = read_u32(data);
+	uint32_t when = read_u32(data + 5);
+	char sender[14] = {0};
+	memcpy(sender, data + 14, 13);
+	sender[12] = '\0';
+
+	uint32_t net[5];
+	for (int i = 0; i < 5; i++)
+		net[i] = read_u32(data + 27 + 4 * i);
+
+	if (!GuildBankDeposit(c, id, when, sender, net))
+		return;
+
+	static const char *labels[5] = { "nourriture", "pierre", "bois", "minerai", "or" };
+	char text[400];
+	size_t n = (size_t)snprintf(text, sizeof(text), "Dépôt reçu :");
+	for (int i = 0; i < 5; i++) {
+		if (net[i] == 0)
+			continue;
+		n += (size_t)snprintf(text + n, sizeof(text) - n, " %u de %s (solde %llu),", net[i], labels[i],
+			(unsigned long long)GuildBankBalance(sender, (ResourceType)i));
+	}
+	if (n > 0 && text[n - 1] == ',')
+		text[n - 1] = '.';
+	BotReply(c, sender, "Dépôt", "%s", text);
+}
+
+void RecvResHelpReport(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 47) return;
+	uint8_t received = read_u8(data + 13);
+	if (received == 1) { HandleDeposit(c, data); return; }   // a delivery we received: a deposit
+	if (received != 0) return;                               // 0 = one we sent, the rate below is read from it
+
+	uint32_t gross = c->last_gross;
+	c->last_gross = 0; // one report per march sent
+	if (gross < 1000) return; // too small to read a 0.1% step from
+
+	uint32_t net = 0;
+	int used = 0;
+	for (int i = 0; i < 5; i++) {
+		uint32_t v = read_u32(data + 27 + 4 * i);
+		if (v > 0) { net = v; used++; }
+	}
+	if (used != 1 || net > gross) return; // not a single-resource delivery: do not guess
+
+	double percent = (double)(gross - net) * 100.0 / (double)gross;
+	percent = (double)(long)(percent * 10.0 + 0.5) / 10.0; // the game works in 0.1% steps
+
+	// The rate is also implied by the Tax Break level sent at login (research.h): say so when the
+	// two disagree, that means the guess about which research it is, or its base rate, is wrong.
+	if (c->research.loaded && c->trading_post_level > 0) {
+		double implied = ResearchDeliveryTaxPercent(&c->research, TradingPostSupplyTaxPercent(c->trading_post_level));
+		if (implied - percent > 0.05 || percent - implied > 0.05)
+			LOGW("[TAX] Taux lu dans le jeu %.1f%% mais la recherche #%u niveau %u en donne %.1f%% : "
+				"le calcul par la recherche est faux pour ce compte\n",
+				percent, RESEARCH_TAX_BREAK_ID, ResearchLevel(&c->research, RESEARCH_TAX_BREAK_ID), implied);
+	}
+
+	if (!c->delivery_tax_seen_valid || c->delivery_tax_seen != percent) {
+		LOGI("[TAX] Taxe de livraison lue dans le jeu : %.1f%% (%u envoyé, %u reçu)%s\n",
+			percent, gross, net,
+			c->delivery_tax_seen_valid ? " - elle a changé" : "");
+	}
+	c->delivery_tax_seen = percent;
+	c->delivery_tax_seen_valid = true;
+}
+
+/* Rate to gross requests up with, best source first: what the game really applied on the last delivery,
+ * then what the Trading Post level and the Tax Break level sent at login imply (research.h), then the
+ * configured bank.delivery_tax_percent. */
+double DeliveryTaxPercent(const Connection *c) {
+	if (c->delivery_tax_seen_valid)
+		return c->delivery_tax_seen;
+	if (c->research.loaded && c->trading_post_level > 0)
+		return ResearchDeliveryTaxPercent(&c->research, TradingPostSupplyTaxPercent(c->trading_post_level));
+	return c->bank.delivery_tax_percent;
+}
+
 void RecvHelp_Home(Connection *c, const uint8_t *data) {
 	uint16_t offset = 0;
 	
 	uint8_t b = read_u8(data + offset); offset += 1;
 
 	if (b >= 8) {
-		BotReply(c, c->transfer.target_name, "Livraison impossible",
+		BotReply(c, TransferRequester(c), "Livraison impossible",
 			"La marche a échoué au retour (code %u), livraison annulée.", b);
 		c->transfer.state = TRANSFER_FAILED;
 		return;
@@ -5382,14 +6032,22 @@ void RecvHelp_Home(Connection *c, const uint8_t *data) {
 			c->player.current_marches--;
 		}
 		
+		// Only a delivery still in flight reacts to a march coming home. A finished/failed
+		// one (IDLE) must stay so: every returning march used to set TRANSFER_COMPLETE again,
+		// which re-sent the "Livraison terminée" webhook once per march, and could even
+		// resume a cancelled delivery that still had remaining > 0.
+		if (c->transfer.state != TRANSFER_WAIT_MARCH && c->transfer.state != TRANSFER_SEND_MARCH)
+			return;
+
+		// remaining == 0: nothing to do here, the tick completes it (SendResourceMarch() in
+		// TRANSFER_SEND_MARCH, once the last march is accepted) - completing here as well is
+		// what notified twice.
 		if (c->transfer.remaining > 0) {
 			// Same pacing as after RecvSHelp: refresh "looking at the target" and wait
 			// before the next march.
 			RequestMapAdvance(c, c->transfer.zone_id, c->transfer.point_id);
 			c->transfer.not_before = now_ms() + 1000 + (rand() % 1000);
 			c->transfer.state = TRANSFER_SEND_MARCH;
-		} else {
-			c->transfer.state = TRANSFER_COMPLETE;
 		}
 
 		return;

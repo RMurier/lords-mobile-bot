@@ -1,4 +1,6 @@
 #include "connection.h"
+#include "log.h"
+#include "packet_map.h"
 
 int set_nonblocking(Connection *conn)
 {
@@ -44,6 +46,11 @@ int connect_server(const char *ip, unsigned short port)
 
 bool send_packet(Connection *conn, bool enc)
 {
+	if (g_log_packets && conn->size >= 4) {
+		uint16_t id = (uint16_t)(conn->data[2] | (conn->data[3] << 8));
+		log_packet(conn->bot.data_path, "->", id, get_packet_name(id), conn->data + 4, conn->size - 4);
+	}
+
 	if (enc) {
 		EncryptData(conn->data + 4, conn->size - 4, conn->data + 4, ENCRYPTION_KEY);
 	}

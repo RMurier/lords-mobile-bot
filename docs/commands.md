@@ -21,12 +21,16 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$wood <amount>` | same, for wood | |
 | `$ore <amount>` | same, for ore | |
 | `$gold <amount>` | same, for gold | |
+| `$bal` | every guild member (guild bank on) | Shows your balance: what you deposited by sending resources to the bot |
+| `$bal <player>` | administrators (guild bank on) | Shows another player's balance |
+| `$adminfood <player> <amount>` | administrators | Sends food from the bot's stock to that player; same with `adminstone`, `adminwood`, `adminore`, `admingold` |
 | `$bank bal` | administrators | Sends the bank, bag and total balance of each resource, in `command.output`'s channel |
 | `$bank bal chat` | administrators | Same, forced into alliance chat regardless of `command.output` |
 | `$bank bal mail` | administrators | Same, forced into mail regardless of `command.output` |
 | `$admin list` | administrators | Lists the administrators, marking those from the configuration file |
 | `$admin add <player>` | administrators | Adds an administrator |
 | `$admin remove <player>` | administrators | Removes an administrator added in game |
+| `$recall` | administrators | Takes every march back, then the bot sends no march for 5 minutes (`recall.pause_seconds`) |
 | `$relocate random` | administrators | Moves the castle to a place chosen by the game (uses a random relocator) |
 | `$relocate <x> <y>` | administrators | Moves the castle to these coordinates in the current kingdom (uses an advanced relocator) |
 | `$migrate <kingdom> <x> <y>` | administrators | Migrates the castle to another kingdom at these coordinates |
@@ -69,6 +73,25 @@ may not use is ignored without an answer.
 - Administrators added in game are written to `<data.path>/admins.txt`, so they survive a
   reconnection or a restart. `$admin remove` deletes them from that file.
 - At most 16 administrators, names of at most 12 characters.
+
+## Recalling the troops
+
+`$recall` (administrators) takes every march of the account back and stops the bot from sending any for
+`recall.pause_seconds` (300, i.e. 5 minutes, by default; `0` = recall without any pause).
+
+- **The recall** sends one "return" request per march slot of the account, one every 1 to 2 seconds. It is the free
+  return, never a Withdraw Squad item. The bot only knows how many marches are out, not which ones, so every slot is tried;
+  nothing is sent when the bot knows there is no march out. The server's answers are logged (`[RECALL]`), their layout is
+  not decoded yet.
+- **The pause** starts when the command is received and covers everything that sends a march: automatic gathering, resource
+  deliveries and rally joins. They start again by themselves when it is over. Sending `$recall` again restarts the 5 minutes.
+- **A delivery in progress** is cancelled (its requester is told); marches already on their way are recalled with the others.
+  A resource command received during the pause is refused, with the time left.
+- **The pause survives a reconnection** of the bot.
+- Not verified on the live game yet: that a return request also brings back troops still marching outward (the bot never sends
+  the Withdraw Squad item for this), and what the server answers for a slot without a march.
+
+---
 
 ## Relocation and migration
 
@@ -154,8 +177,9 @@ still running is refused: *"Une opération de guilde est déjà en cours"*).
 A resource command sends resources to the player who wrote it, subject to:
 
 - **Reserve**: the bot never goes below `bank.reserve_*` of each resource.
-- **Delivery tax**: the game deducts a percentage on arrival that never shows up in any message.
-  Set `bank.delivery_tax_percent` (varies per account) so `$food 1M` still delivers exactly 1M net.
+- **Delivery tax**: the game deducts a percentage on arrival. The bot reads the real rate from the
+  delivery report after each march and grosses requests up with it, so `$food 1M` still delivers
+  exactly 1M net. `bank.delivery_tax_percent` only covers the first delivery of a session.
 - **Distance**: a player farther than `bank.max_delivery_distance` tiles (straight line) is refused
   and told how far they are. `0` = no limit.
 - **Bag items**: with `bank.use_bag_rss` and `bank.use_bag_<resource>` on, when the resource is
@@ -177,6 +201,46 @@ A resource command sends resources to the player who wrote it, subject to:
   one instead of sending them back to back.
 
 `$stop` cancels the transfer, but marches that have already left still arrive.
+
+## The guild bank
+
+Off by default (`guildbank.enabled = false`, see [configuration.md](configuration.md#guild-bank)). When on, the bot keeps **a balance
+per player** instead of giving resources away:
+
+- **Depositing**: a guild member sends resources to the bot with the game's own supply. The delivery report the game gives the bot
+  names the sender and the **net** amount received, after the sender's own tax: 1M sent and 950k arrived is a balance of 950k. A
+  message tells the sender what was credited.
+- **Taking them back**: the resource commands (`$food 1M`, `$gold 500K`, `$stone all`...) take resources from **your own** balance,
+  for every member, administrators included. `1M` is what you receive; the bot sends more, the tax of the bot's own deliveries (the
+  player pays it, once), and the balance goes down by that gross amount. `all` takes the whole balance. Asking for more than the
+  balance is refused with what is left, and what that is worth after the tax.
+- **Checking**: `$bal` shows your balance per resource, and what each would give after the tax. An administrator can add a player:
+  `$bal Bob`.
+- **Giving from the stock**: `$adminfood <player> <amount>` (and the other resources) sends from the bot's own stock, above the reserve
+  (`bank.reserve_*`) **and above what the members have deposited**, never touching either. The name may hold spaces, the amount is the last
+  word (`$adminstone Little Zyco 5M`). Errors go to the administrator. The bag's resource items are not used.
+- **One delivery at a time**: the others wait in a queue of 16, in order, and are told their place. `$stop` also removes a request that
+  is still waiting. Only one request per player: asking again replaces the one waiting; while one of yours is running, another is refused.
+- **Only guild members**: the check uses the member list the bot received (refreshed when somebody is not in it, at most every 30 s).
+  Somebody else is told the commands are for the guild.
+- **Not lost**: the balances are written to `<data.path>/guild_bank.txt` after every change, and each delivery report is counted once, so
+  restarts, reconnections and the reports the game sends again at every login never lose or duplicate a deposit. Only deliveries dated after
+  the file was created count.
+- **A withdrawal is debited as its marches leave**, and given back if the server refuses one or you `$stop` before it was accepted.
+  `$recall` cancels the delivery in progress and the queue, and says so.
+- `bank.max_delivery_distance` still applies to every delivery. `bank.enabled` and `bank.send_*` no longer matter while the guild bank
+  is on: being in the guild and having a balance is what counts.
+- **In the web console** the *Guild bank* tab lists every guild member with their balance, lets an administrator set a balance, and has a
+  reset-everything button with a confirmation ([web-interface.md](web-interface.md#guild-bank-tab)). With SQL Server the balances are kept in
+  the database. The console's changes reach a running bot through `guild_bank_edits.txt`, which it reads every second.
+- **Verified live** on an ordinary account that was online: five deliveries (1M food, 2M ore, 3M wood, 500k stone, 200k gold) each
+  reached it as a delivery report, "received" flag, pushed the moment the resources arrived, with the sender's name and the exact
+  net amount (928,000, 1,856,000, 2,784,000, 464,000, 185,600: the sender's tax, 7.2% every time, whatever the resource). The reports are
+  numbered one after the other, which is what makes counting each once possible; the tests use those five real packets. What is not
+  verified: the bot's own account as the receiver (it is an ordinary account, the same message is expected), and the server's answers
+  to a withdrawal. The bot logs `[BANK]` for every deposit, so one small test send shows it at once.
+
+---
 
 ## Channels
 

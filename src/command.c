@@ -9,6 +9,7 @@
 #endif
 #include "items.h"
 #include "protocol.h"
+#include "guildbank.h"
 #include "map_point.h"
 #include "log.h"
 
@@ -45,6 +46,8 @@ static void ResourceCommandHandler(
     ResourceType type,
     const char *name
 );
+static void BalanceCommand(Connection *c, const char *player_name, bool is_admin, const char *args);
+static void AdminResourceCommand(Connection *c, const char *player_name, bool is_admin, const char *args, ResourceType type);
 
 /* ------------------------------------------------------------------------
  * Replies: mail, alliance chat or world chat, depending on command.output
@@ -628,7 +631,7 @@ static bool IsCommand(const char *message, const char *name, const char **args)
 
 static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 {
-	char text[1100];
+	char text[1400];
 	char names[64] = {0};
 	char p = c->bot.command_prefix;
 	const char *first = "";
@@ -651,12 +654,18 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "%c<%s> <montant> - recevoir des ressources, ex. %c%s 5M\n",
 			p, names, p, first);
 
+	if (c->guildbank.enabled) {
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "%c<ressource> <montant>|all - retirer votre solde, ex. %cfood 1M\n", p, p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "%cbal - votre solde (les dépôts se font en envoyant des ressources au bot)\n", p);
+	}
 	n += (size_t)snprintf(text + n, sizeof(text) - n, "%cstop - annuler votre livraison en cours\n", p);
 	n += (size_t)snprintf(text + n, sizeof(text) - n, "%chelp - cette liste", p);
 
 	if (is_admin) {
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cbank bal [chat|mail] - solde de la banque, du sac et total", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <joueur>|remove <joueur> - gérer les administrateurs", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin<ressource> <joueur> <montant> - envoyer depuis le stock, ex. %cadminfood Bob 5M", p, p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crecall - rappeler toutes les troupes, aucune marche ensuite pendant un moment", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate <royaume> <x> <y> - migrer vers un autre royaume", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cjoin <tag> - rejoindre une guilde (tag sur 3 caractères)", p);
@@ -668,20 +677,83 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 	BotReply(c, player_name, "Commandes", "%s", text);
 }
 
+/* $recall: take every march back, then no march for recall.pause_seconds. */
+static void RecallCommand(Connection *c, const char *player_name, bool is_admin)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent rappeler les troupes.");
+		return;
+	}
+
+	char pause[32], extra[128] = "";
+	FormatDurationFr(c->recall.pause_seconds, pause, sizeof(pause));
+
+	// a delivery in progress cannot go on: its next marches would leave during the pause
+	if (c->transfer.state != TRANSFER_IDLE) {
+		char target[sizeof(c->transfer.target_name)], asker[sizeof(c->transfer.target_name)];
+		snprintf(target, sizeof(target), "%s", c->transfer.target_name);
+		snprintf(asker, sizeof(asker), "%s", TransferRequester(c));
+		if (asker[0] != '\0' && strcmp(asker, player_name) != 0)
+			BotReply(c, asker, "Livraison interrompue",
+				"Les troupes du bot sont rappelées, votre livraison est annulée. Les marches déjà parties arriveront quand même.");
+		snprintf(extra, sizeof(extra), " La livraison en cours%s%s est annulée.", target[0] ? " à " : "", target);
+		AbortTransfer(c);
+	}
+
+	// the requests waiting behind it would start when the pause ends: cancel them too, and say so
+	while (c->transfer_queue_count > 0) {
+		if (strcmp(c->transfer_queue[0].requester, player_name) != 0)
+			BotReply(c, c->transfer_queue[0].requester, "Livraison interrompue",
+				"Les troupes du bot sont rappelées, votre demande en attente est annulée. Renouvelez-la après la pause.");
+		TransferQueueRemove(c, c->transfer_queue[0].requester);
+	}
+
+	switch (StartRecall(c, player_name)) {
+		case RECALL_STARTED:
+			if (c->recall.pause_seconds)
+				BotReply(c, player_name, "Rappel",
+					"Rappel des troupes lancé (%u marche(s) sortie(s)). Aucune marche ne sera envoyée pendant %s.%s",
+					c->player.current_marches, pause, extra);
+			else
+				BotReply(c, player_name, "Rappel",
+					"Rappel des troupes lancé (%u marche(s) sortie(s)). Pause désactivée (recall.pause_seconds = 0).%s",
+					c->player.current_marches, extra);
+			break;
+		case RECALL_RUNNING:
+			BotReply(c, player_name, "Rappel", "Un rappel est déjà en cours. Aucune marche pendant %s à partir de maintenant.%s", pause, extra);
+			break;
+		case RECALL_NO_MARCHES:
+			BotReply(c, player_name, "Rappel", "Aucune marche sortie, rien à rappeler. Aucune marche ne sera envoyée pendant %s.%s", pause, extra);
+			break;
+		case RECALL_NO_DATA:
+			BotReply(c, player_name, "Rappel",
+				"Le nombre de marches n'est pas encore reçu du serveur, aucun rappel envoyé. Aucune marche ne sera envoyée pendant %s.%s",
+				pause, extra);
+			break;
+	}
+}
+
 static void StopTransfer(Connection *c, const char *player_name, bool is_admin)
 {
+	// a request that is still waiting its turn is cancelled first: nothing was sent, nothing was debited
+	if (c->transfer.state == TRANSFER_IDLE || (!is_admin && strcmp(TransferRequester(c), player_name) != 0)) {
+		if (TransferQueueRemove(c, player_name)) {
+			BotReply(c, player_name, "Livraison", "Votre demande en attente est annulée.");
+			return;
+		}
+	}
+
 	if (c->transfer.state == TRANSFER_IDLE) {
 		BotReply(c, player_name, "Livraison", "Aucune livraison en cours.");
 		return;
 	}
 
-	if (!is_admin && strcmp(c->transfer.target_name, player_name) != 0) {
+	if (!is_admin && strcmp(TransferRequester(c), player_name) != 0) {
 		BotReply(c, player_name, "Livraison", "Cette livraison n'est pas la vôtre.");
 		return;
 	}
 
-	memset(&c->transfer, 0, sizeof(c->transfer));
-	c->transfer.state = TRANSFER_IDLE;
+	AbortTransfer(c);
 
 	BotReply(c, player_name, "Livraison annulée", "Livraison annulée. Les marches déjà parties arriveront quand même.");
 }
@@ -708,6 +780,25 @@ void command_handler(Connection *c, const char *player_name, const char *message
 	if (IsCommand(message, "stop", &args)) {
 		StopTransfer(c, player_name, is_admin);
 		return;
+	}
+
+	if (IsCommand(message, "recall", &args)) {
+		RecallCommand(c, player_name, is_admin);
+		return;
+	}
+
+	if (IsCommand(message, "bal", &args)) {
+		BalanceCommand(c, player_name, is_admin, args);
+		return;
+	}
+
+	for (size_t i = 0; i < RESOURCE_COMMAND_COUNT; i++) {
+		char admin_name[16];
+		snprintf(admin_name, sizeof(admin_name), "admin%s", RESOURCE_COMMANDS[i].name);
+		if (IsCommand(message, admin_name, &args)) {
+			AdminResourceCommand(c, player_name, is_admin, args, RESOURCE_COMMANDS[i].type);
+			return;
+		}
 	}
 
 	for (size_t i = 0; i < RESOURCE_COMMAND_COUNT; i++) {
@@ -793,17 +884,17 @@ uint64_t parse_number_u64(const char *str) {
 }
 
 
-static void ResourceCommandHandler(
-    Connection *c,
-    const char *player_name,
-    const char *message,
-    ResourceType type,
-    const char *name
-)
+/* What every delivery needs before it can even be queued; the refusal goes to `player_name`. */
+static bool DeliveryReady(Connection *c, const char *player_name)
 {
-	
-	if (!BankAllows(c, player_name, type))
-		return;
+	/* after $recall the bot sends no march for a while: a delivery would need some */
+	if (MarchesPaused()) {
+		char left[32];
+		FormatDurationFr(MarchesPauseSecondsLeft(), left, sizeof(left));
+		BotReply(c, player_name, "Indisponible",
+			"Les marches du bot sont suspendues (troupes rappelées), réessayez dans %s.", left);
+		return false;
+	}
 
 	/* c->resources is zeroed by the reconnect memset until the server sends fresh values
 	 * (resource_loaded). Without this, a command arriving right after a reconnect sees 0
@@ -811,7 +902,7 @@ static void ResourceCommandHandler(
 	if (!c->resource_loaded) {
 		BotReply(c, player_name, "Indisponible",
 			"Le solde n'est pas encore reçu du serveur (reconnexion en cours ?). Réessayez dans un instant.");
-		return;
+		return false;
 	}
 
 	/* ResourceTransferTick() waits forever for supply_capacity > 0 with no
@@ -820,7 +911,7 @@ static void ResourceCommandHandler(
 	if (c->supply_capacity == 0) {
 		BotReply(c, player_name, "Indisponible",
 			"Le Poste de Commerce n'a pas de capacité de livraison disponible (bâtiment absent, niveau trop bas, ou pas encore chargé). Réessayez plus tard.");
-		return;
+		return false;
 	}
 
 	/* max_marches is 0 on a real account only before the server has sent it (SendResourceMarch()
@@ -828,8 +919,285 @@ static void ResourceCommandHandler(
 	if (c->player.max_marches == 0) {
 		BotReply(c, player_name, "Indisponible",
 			"Nombre de marches disponibles pas encore reçu du serveur. Réessayez plus tard.");
+		return false;
+	}
+
+	return true;
+}
+
+/* "1 234 567" - a balance is read digit by digit, unlike the 1.23M the rest of the bot prints. */
+static void FormatExact(uint64_t value, char *out, size_t size)
+{
+	char digits[32];
+	snprintf(digits, sizeof(digits), "%llu", (unsigned long long)value);
+	size_t len = strlen(digits), o = 0;
+	for (size_t i = 0; i < len && o + 2 < size; i++) {
+		if (i > 0 && (len - i) % 3 == 0)
+			out[o++] = ' ';
+		out[o++] = digits[i];
+	}
+	out[o] = '\0';
+}
+
+static const char *ResourceLabel(ResourceType type)
+{
+	for (size_t i = 0; i < RESOURCE_COMMAND_COUNT; i++)
+		if (RESOURCE_COMMANDS[i].type == type)
+			return RESOURCE_COMMANDS[i].label;
+	return "?";
+}
+
+/* Gross amount to send so that `net` arrives once the delivery tax is taken off. */
+static uint64_t GrossUp(const Connection *c, uint64_t net)
+{
+	double tax = DeliveryTaxPercent(c);
+	if (tax > 0.0 && tax < 100.0)
+		return (uint64_t)((double)net * 100.0 / (100.0 - tax) + 0.5);
+	return net;
+}
+
+/* What arrives of a gross amount once the tax is taken off. */
+static uint64_t NetOf(const Connection *c, uint64_t gross)
+{
+	double tax = DeliveryTaxPercent(c);
+	if (tax > 0.0 && tax < 100.0)
+		return (uint64_t)((double)gross * (100.0 - tax) / 100.0);
+	return gross;
+}
+
+/* ---- guild bank (guildbank.h): a player's balance, taken back with the resource commands ---- */
+
+/* True when `name` is in the bot's guild. The list comes from the server at login and is refreshed, at most every
+ * 30 seconds, when somebody is not in it (a player who joined after). The refusal goes to `reply_to`. */
+static bool GuildMemberOrReply(Connection *c, const char *name, const char *reply_to, bool is_self)
+{
+	static time_t last_refresh;
+
+	if (c->alliance_member.count == 0) {
+		BotReply(c, reply_to, "Guilde", "La liste des membres de la guilde n'est pas encore reçue, réessayez dans un instant.");
+		return false;
+	}
+
+	for (uint32_t i = 0; i < c->alliance_member.count && i < MAX_ALLIANCE_MEMBER; i++)
+		if (strcmp(c->alliance_member.member[i].name, name) == 0)
+			return true;
+
+	time_t now = time(NULL);
+	if (now - last_refresh >= 30) {
+		last_refresh = now;
+		RequestAllianceMemberInfo(c);
+	}
+
+	if (is_self)
+		BotReply(c, reply_to, "Guilde", "Cette commande est réservée aux membres de la guilde. Si vous venez d'y entrer, réessayez dans un instant.");
+	else
+		BotReply(c, reply_to, "Guilde", "%s n'est pas dans la guilde (ou la liste des membres n'est pas à jour, réessayez dans un instant).", name);
+	return false;
+}
+
+/* Puts a request in the queue and tells the requester where they are. */
+static void QueueDelivery(Connection *c, const TransferRequest *request, const char *what)
+{
+	bool busy = c->transfer.state != TRANSFER_IDLE || c->transfer_queue_count > 0;
+
+	if (c->transfer.state != TRANSFER_IDLE && strcmp(TransferRequester(c), request->requester) == 0) {
+		BotReply(c, request->requester, "Occupé",
+			"Votre livraison précédente est encore en cours. Attendez sa fin ou utilisez %cstop.", c->bot.command_prefix);
 		return;
 	}
+
+	if (!TransferQueuePush(c, request)) {
+		BotReply(c, request->requester, "Occupé", "La file d'attente est pleine (%u demandes), réessayez plus tard.", TRANSFER_QUEUE_MAX);
+		return;
+	}
+
+	if (busy)
+		BotReply(c, request->requester, "En file", "%s : demande enregistrée, position %d dans la file.", what,
+			TransferQueuePosition(c, request->requester));
+}
+
+/* $food 1M / $food all: takes resources back from the player's own balance. */
+static void GuildWithdrawCommand(Connection *c, const char *player_name, const char *args, ResourceType type)
+{
+	GuildBankLoad(c);
+
+	if (!GuildMemberOrReply(c, player_name, player_name, true))
+		return;
+	if (!DeliveryReady(c, player_name))
+		return;
+
+	const char *label = ResourceLabel(type);
+	char amount_str[32] = {0};
+	if (sscanf(args, "%31s", amount_str) != 1) {
+		BotReply(c, player_name, "Retrait", "Usage : %c<ressource> <montant>|all, ex. %cfood 1M. %cbal montre votre solde.",
+			c->bot.command_prefix, c->bot.command_prefix, c->bot.command_prefix);
+		return;
+	}
+
+	uint64_t balance = GuildBankBalance(player_name, type);
+	uint64_t gross, net;
+	if (strcmp(amount_str, "all") == 0) {
+		gross = balance;
+		net = NetOf(c, gross);
+	} else {
+		net = parse_number_u64(amount_str);
+		gross = GrossUp(c, net);
+	}
+
+	char have[32], have_net[32];
+	FormatExact(balance, have, sizeof(have));
+	FormatExact(NetOf(c, balance), have_net, sizeof(have_net));
+
+	if (balance == 0) {
+		BotReply(c, player_name, "Solde", "Votre solde de %s est vide.", label);
+		return;
+	}
+	if (net == 0 || gross == 0 || gross > UINT32_MAX) {
+		BotReply(c, player_name, "Retrait", "Montant invalide. Votre solde de %s : %s (%s reçus après la taxe).", label, have, have_net);
+		return;
+	}
+	if (gross > balance) {
+		BotReply(c, player_name, "Solde insuffisant",
+			"Solde de %s insuffisant : %s, soit %s reçus après la taxe de %.1f%%. Demandez au plus %s, ou %call.",
+			label, have, have_net, DeliveryTaxPercent(c), have_net, c->bot.command_prefix);
+		return;
+	}
+
+	uint32_t stock = StockAvailable(c, type, true);
+	if (gross > stock) {
+		char in_stock[32];
+		FormatExact(stock, in_stock, sizeof(in_stock));
+		BotReply(c, player_name, "Indisponible",
+			"La banque n'a actuellement que %s de %s en stock, moins que votre demande. Prévenez un administrateur.", in_stock, label);
+		return;
+	}
+
+	TransferRequest request = { .type = type, .amount = (uint32_t)gross, .from_balance = true };
+	snprintf(request.requester, sizeof(request.requester), "%s", player_name);
+	snprintf(request.target, sizeof(request.target), "%s", player_name);
+	QueueDelivery(c, &request, "Retrait");
+}
+
+/* $bal [player]: the balance of the requester, or of another player for an administrator. */
+static void BalanceCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
+{
+	if (!c->guildbank.enabled)
+		return;
+
+	char who[13];
+	snprintf(who, sizeof(who), "%s", player_name);
+	if (*args != '\0') {
+		if (!is_admin) {
+			BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent voir le solde d'un autre joueur.");
+			return;
+		}
+		if (strlen(args) >= sizeof(who)) {
+			BotReply(c, player_name, "Solde", "Pseudo trop long (12 caractères au plus).");
+			return;
+		}
+		snprintf(who, sizeof(who), "%s", args);
+	}
+
+	GuildBankLoad(c);
+
+	char text[600];
+	size_t n = (size_t)snprintf(text, sizeof(text), "Solde de %s :", who);
+	bool any = false;
+	for (size_t i = 0; i < RESOURCE_COMMAND_COUNT; i++) {
+		uint64_t balance = GuildBankBalance(who, RESOURCE_COMMANDS[i].type);
+		if (balance == 0)
+			continue;
+		char exact[32], net[32];
+		FormatExact(balance, exact, sizeof(exact));
+		FormatExact(NetOf(c, balance), net, sizeof(net));
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%s : %s (%s reçus après la taxe de %.1f%%)",
+			RESOURCE_COMMANDS[i].label, exact, net, DeliveryTaxPercent(c));
+		any = true;
+	}
+	if (!any)
+		snprintf(text + n, sizeof(text) - n, " vide.");
+
+	BotReply(c, player_name, "Solde", "%s", text);
+}
+
+/* $adminfood <player> <amount> and the same for the other resources: gives from the bot's stock, never from the members' deposits. */
+static void AdminResourceCommand(Connection *c, const char *player_name, bool is_admin, const char *args, ResourceType type)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent envoyer des ressources à un autre joueur.");
+		return;
+	}
+	if (!DeliveryReady(c, player_name))
+		return;
+
+	// "Little Zyco 5M": the amount is the last word, the rest is the name (names can hold spaces)
+	char line[64];
+	snprintf(line, sizeof(line), "%s", args);
+	char *end = line + strlen(line);
+	while (end > line && end[-1] == ' ')
+		*--end = '\0';
+	char *amount_str = strrchr(line, ' ');
+	if (!amount_str) {
+		BotReply(c, player_name, "Envoi", "Usage : %cadmin<ressource> <pseudo> <montant>, ex. %cadminfood Bob 5M",
+			c->bot.command_prefix, c->bot.command_prefix);
+		return;
+	}
+	*amount_str++ = '\0';
+	while (end > line && line[strlen(line) - 1] == ' ')
+		line[strlen(line) - 1] = '\0';
+
+	if (strlen(line) == 0 || strlen(line) >= 13) {
+		BotReply(c, player_name, "Envoi", "Pseudo invalide (12 caractères au plus).");
+		return;
+	}
+
+	uint64_t net = parse_number_u64(amount_str);
+	uint64_t gross = GrossUp(c, net);
+	if (net == 0 || gross > UINT32_MAX) {
+		BotReply(c, player_name, "Envoi", "Montant invalide.");
+		return;
+	}
+
+	if (c->guildbank.enabled) {
+		GuildBankLoad(c);
+		if (!GuildMemberOrReply(c, line, player_name, false))
+			return;
+	}
+
+	uint32_t available = StockAvailable(c, type, false);
+	if (gross > available) {
+		char have[32];
+		FormatExact(available, have, sizeof(have));
+		BotReply(c, player_name, "Ressources insuffisantes",
+			"Ressources insuffisantes (%s) : %s disponible, sans toucher à la réserve ni aux dépôts des membres.", ResourceLabel(type), have);
+		return;
+	}
+
+	TransferRequest request = { .type = type, .amount = (uint32_t)gross, .from_balance = false };
+	snprintf(request.requester, sizeof(request.requester), "%s", player_name);
+	snprintf(request.target, sizeof(request.target), "%s", line);
+	QueueDelivery(c, &request, "Envoi");
+}
+
+static void ResourceCommandHandler(
+    Connection *c,
+    const char *player_name,
+    const char *message,
+    ResourceType type,
+    const char *name
+)
+{
+	// guild bank: everybody takes back their own balance
+	if (c->guildbank.enabled) {
+		GuildWithdrawCommand(c, player_name, message, type);
+		return;
+	}
+
+	if (!BankAllows(c, player_name, type))
+		return;
+
+	if (!DeliveryReady(c, player_name))
+		return;
 
 	if (c->transfer.state != TRANSFER_IDLE) {
 		// Same player -> replace current pending request 
@@ -865,10 +1233,11 @@ static void ResourceCommandHandler(
 	/* The game deducts bank.delivery_tax_percent on arrival (not visible anywhere in the
 	 * march packets themselves - observed only in the recipient's actual stock change).
 	 * Gross the request up so what arrives matches what was asked for. */
-	if (c->bank.delivery_tax_percent > 0.0 && c->bank.delivery_tax_percent < 100.0) {
-		uint64_t gross = (uint64_t)((double)amount * 100.0 / (100.0 - c->bank.delivery_tax_percent) + 0.5);
+	double tax = DeliveryTaxPercent(c);
+	if (tax > 0.0 && tax < 100.0) {
+		uint64_t gross = (uint64_t)((double)amount * 100.0 / (100.0 - tax) + 0.5);
 		LOGD("[TRANSFER] Taxe %.2f%% : %llu demandé -> %llu envoyé\n",
-			c->bank.delivery_tax_percent, (unsigned long long)amount, (unsigned long long)gross);
+			tax, (unsigned long long)amount, (unsigned long long)gross);
 		amount = gross > UINT32_MAX ? UINT32_MAX : gross;
 	}
 

@@ -286,6 +286,32 @@ CATEGORIES = [
         ],
     },
     {
+        "id": "guildbank",
+        "label": "Banque de guilde",
+        "description": "Chaque membre dépose des ressources en les envoyant au bot ; le bot note ce qu'il a réellement reçu "
+                      "(après la taxe de l'expéditeur) dans le solde du joueur. Les commandes de ressources (food, stone...) "
+                      "servent alors à reprendre son propre solde, et bal l'affiche. Pour donner depuis le stock du bot, les "
+                      "administrateurs utilisent adminfood <pseudo> <montant> (et les autres ressources). Les soldes sont dans "
+                      "guild_bank.txt (dossier de données). Désactivée, le réglage « Banque » ci-dessus décide qui peut quoi.",
+        "fields": [
+            _bool("guildbank.enabled", "Activer la banque de guilde",
+                  "Réservée aux membres de la guilde du bot. Un seul retrait à la fois, les autres membres attendent dans une "
+                  "file (leur place leur est annoncée). Au retrait, le joueur paie la taxe de livraison du bot ; le solde baisse "
+                  "du montant brut envoyé. La réserve du bot n'est jamais entamée par un envoi administrateur, ni les dépôts."),
+        ],
+    },
+    {
+        "id": "recall",
+        "label": "Rappel des troupes",
+        "description": "La commande $recall (administrateurs) rappelle toutes les troupes. Ensuite le bot n'envoie plus "
+                      "aucune marche (récolte, livraisons, ralliements) pendant la durée ci-dessous.",
+        "fields": [
+            {"key": "recall.pause_seconds", "label": "Pause après un rappel", "type": "int",
+             "min": 0, "max": 86400, "default": "300", "unit": "secondes",
+             "help": "Temps pendant lequel le bot n'envoie aucune marche après $recall. 300 = 5 minutes. 0 = pas de pause."},
+        ],
+    },
+    {
         "id": "advanced",
         "technical": True,      # not for everyday use: grouped in the "Technique" tab
         "label": "Avancé",
@@ -296,6 +322,10 @@ CATEGORIES = [
             _bool("log.debug", "Mode debug",
                   "Affiche chaque paquet reçu (activé par défaut : c'est ce qui permet de comprendre un refus de connexion). "
                   "Les journaux contiennent alors des données de session : ne les partagez pas.", default=True),
+            _bool("log.packets", "Capture complète des paquets",
+                  "Écrit TOUS les paquets reçus et envoyés, en entier, dans packets.log (dossier de données). "
+                  "Sert à retrouver une valeur que le bot ne décode pas encore. Le fichier grossit vite et contient "
+                  "des données de session : ne le partagez pas tel quel.", default=False),
         ],
     },
 ]
@@ -337,15 +367,32 @@ COMMANDS = [
     {"group": "Pour tous", "name": "stop", "usage": "stop", "who": "Le joueur qui a demandé la livraison, ou un administrateur",
      "summary": "Annule la livraison de ressources en cours. Les marches déjà parties arrivent quand même.",
      "example": "stop"},
-    {"group": "Banque", "name": "resources", "usage": "<food|stone|wood|ore|gold> <montant>",
+    {"group": "Banque", "name": "resources", "usage": "<food|stone|wood|ore|gold> <montant>|all",
      "who": "Les administrateurs ; les autres seulement si la banque est activée et la ressource autorisée",
      "summary": "Le bot envoie la ressource au joueur qui écrit la commande. Le montant accepte K, M et B.",
      "details": ["Le bot ne descend jamais sous la réserve de la ressource.",
                  "Un joueur plus loin que la distance maximale de livraison est refusé, avec la distance indiquée.",
                  "Si la ressource manque, le bot peut compléter avec les objets du sac (si activé), sinon il répond "
                  "ce qui est disponible.",
-                 "Une seule livraison à la fois : un autre joueur reçoit « Transfer Busy » jusqu'à la fin ou à un stop."],
+                 "Une seule livraison à la fois : un autre joueur reçoit « Transfer Busy » jusqu'à la fin ou à un stop.",
+                 "Avec la banque de guilde activée : la commande reprend votre propre solde (all = tout), pour tous les membres "
+                 "administrateurs compris, en file d'attente, et la taxe de livraison est payée par le joueur."],
      "example": "gold 5M"},
+    {"group": "Banque de guilde", "name": "bal", "usage": "bal [pseudo]",
+     "who": "Tous les membres (le pseudo : les administrateurs)",
+     "summary": "Affiche votre solde de la banque de guilde : ce que vous avez déposé en envoyant des ressources au bot.",
+     "details": ["Pour chaque ressource, le solde et ce que vous recevriez après la taxe de livraison du bot.",
+                 "Un administrateur peut ajouter un pseudo pour voir le solde d'un autre joueur.",
+                 "Sans banque de guilde activée, la commande est ignorée."],
+     "example": "bal"},
+    {"group": "Banque de guilde", "name": "adminresources", "usage": "admin<food|stone|wood|ore|gold> <pseudo> <montant>",
+     "who": "Administrateurs",
+     "summary": "Envoie des ressources depuis le stock du bot au joueur indiqué (adminfood, adminstone, adminwood, adminore, admingold).",
+     "details": ["Le bot ne touche jamais à sa réserve ni aux dépôts des membres : seul le stock au-dessus des deux est donnable.",
+                 "Le pseudo peut contenir des espaces ; le montant est le dernier mot.",
+                 "Avec la banque de guilde, le joueur doit être dans la guilde. Les messages d'erreur vont à l'administrateur.",
+                 "Passe par la même file d'attente que les retraits. Les objets du sac ne sont pas utilisés."],
+     "example": "adminfood Bob 5M"},
     {"group": "Administration", "name": "bank bal", "usage": "bank bal [chat|mail]", "who": "Administrateurs",
      "summary": "Répond avec le solde de la banque, du sac et le total de chaque ressource, dans le canal choisi par "
                 "« Sortie des commandes » (command.output).",
@@ -361,6 +408,16 @@ COMMANDS = [
     {"group": "Administration", "name": "admin remove", "usage": "admin remove <pseudo>", "who": "Administrateurs",
      "summary": "Retire un administrateur ajouté en jeu. Ceux du fichier de configuration se retirent dans la console.",
      "example": "admin remove Bob"},
+    {"group": "Administration", "name": "recall", "usage": "recall", "who": "Administrateurs",
+     "summary": "Rappelle toutes les troupes, puis le bot n'envoie plus aucune marche pendant un moment (5 minutes par défaut).",
+     "details": ["Récolte automatique, livraisons de ressources et ralliements sont suspendus pendant la pause ; ils "
+                 "reprennent tout seuls ensuite. La durée se règle dans « Rappel des troupes » (recall.pause_seconds, 0 = pas de pause).",
+                 "Une livraison en cours est annulée et son demandeur prévenu ; une nouvelle commande de ressources pendant la "
+                 "pause est refusée, avec le temps restant.",
+                 "Le rappel envoie une demande par marche possible du compte, une toutes les 1 à 2 secondes. Il utilise le retour "
+                 "gratuit, jamais un objet « Withdraw Squad ». Refaire la commande relance les 5 minutes.",
+                 "La pause survit à une reconnexion du bot."],
+     "example": "recall"},
     {"group": "Administration", "name": "relocate random", "usage": "relocate random", "who": "Administrateurs",
      "summary": "Déplace le château à un endroit choisi par le jeu, avec un relocalisateur aléatoire du sac. Aucune confirmation : la commande agit tout de suite.",
      "details": ["Le bot ne répond que s'il y a un problème (pas de relocalisateur dans le sac, sac pas encore chargé…) ou pour dire où le château a atterri.",

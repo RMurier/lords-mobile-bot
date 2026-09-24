@@ -95,6 +95,18 @@ reconnection or a restart. The directory is created when needed.
 data.path = ./data/
 ```
 
+### Packet capture
+
+`log.packets = true` writes **every** packet, received (`<-`) and sent (`->`, before encryption),
+in full, to `<data.path>/packets.log`. Unlike `log.debug` it is neither truncated (256 bytes) nor
+lost with the console, so a whole session can be searched afterwards for a value the bot does
+not decode yet (e.g. the delivery tax). Off by default: the file grows quickly and contains
+session data from the login, so never share it as is.
+
+```cfg
+log.packets = false
+```
+
 ---
 
 ## Administrators
@@ -279,11 +291,18 @@ bank.max_delivery_distance = 100
 
 ### Delivery Tax
 
-The game silently deducts a percentage of a resource march on arrival — it never appears in any
-in-game message, only as a smaller-than-expected increase in the recipient's stock. The rate isn't
-universal: it depends on the account, so check yours with a small test send and set it here.
-Requests are grossed up by this percentage before sending, so `$food 1M` still delivers exactly
-1M net. `0` (default) sends the amount as requested, no adjustment.
+The game deducts a percentage of a resource march on arrival. The rate depends on the account and
+changes from time to time. The game never sends it as a number, but the delivery report it sends
+after each march carries the net amount, so **the bot reads the real rate from it** (e.g. 1M sent,
+925000 arrived = 7.5%) and logs it (`[TAX]`). From then on requests are grossed up with that rate,
+so `$food 1M` still delivers exactly 1M net, and it follows the rate when it changes.
+
+Before the first delivery of a session, the bot uses the rate the game itself works out: what your **Trading Post**
+sets (8% from its level 25, mana levels included) minus 0.1% per level of your **Tax Break** research, both taken from the levels
+the game sends at login ([research.md](research.md#the-delivery-tax-the-trading-post-minus-tax-break); the Tax Break research
+number is inferred from two accounts). `bank.delivery_tax_percent` is only used if those levels have not been
+received yet; the value read from a delivery always wins over both, and is dropped when Tax Break is completed.
+`0` (default) sends the amount as requested, no adjustment, until one of them is known.
 
 ```cfg
 bank.delivery_tax_percent = 0
@@ -374,6 +393,35 @@ Future options:
 # protection.shelter_on_incoming_attack = true
 # protection.shelter_on_incoming_scout = true
 ```
+
+---
+
+## Guild Bank
+
+Members deposit resources by sending them to the bot, the bot keeps a balance per player, and the resource commands take them back
+(`$food 1M`, `$stone all`); `$bal` shows a balance and administrators give from the stock with `$adminfood <player> <amount>`.
+Everything about how it behaves is in [commands.md](commands.md#the-guild-bank).
+
+```cfg
+guildbank.enabled = false
+```
+
+Off by default. On, it replaces who-may-take-what of the bank (`bank.enabled`, `bank.send_*`): every guild member takes their own
+balance. `bank.reserve_*` and `bank.max_delivery_distance` still apply (the reserve to what administrators give from the stock, the distance
+to every delivery). The balances are in `<data.path>/guild_bank.txt`: back it up with the rest of the data folder.
+
+---
+
+## Recall
+
+After the `$recall` command ([commands.md](commands.md#recalling-the-troops), administrators only) has taken every march back, the
+bot sends no march at all (automatic gathering, resource deliveries, rally joins) for this many seconds. A new `$recall` restarts the time.
+
+```cfg
+recall.pause_seconds = 300
+```
+
+`300` (default) is 5 minutes; `0` recalls the troops without any pause. The pause is kept across a reconnection.
 
 ---
 

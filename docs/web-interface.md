@@ -91,6 +91,30 @@ counting down live), player name, power, kills, gems, VIP, kingdom, position, ma
 the page reads it every 4 seconds. The values are the last ones the server sent; the page says how old they are.
 If the bot is stopped, the page shows the last known values marked as offline.
 
+## Guild bank tab
+
+Shows the [guild bank](commands.md#the-guild-bank) of the account: **every member of the guild with their balance** of food,
+stone, wood, ore and gold, and the totals. The members are the list the bot last received (`alliance.member_names` of its
+`status.json`, kept in the database too, so the list is there when the bot is stopped); a player with a balance who is no longer in
+the guild stays listed, marked *hors guilde*. A filter narrows the list.
+
+- **Change a balance**: *Modifier* on a row turns its five amounts into fields (`500000`, `2,5M`, `1B` are understood), *Enregistrer*
+  sets them exactly. A player who is not listed can be given a balance by name through the API (below).
+- **Reset everything**: *Tout remettre à zéro* asks for a confirmation that says how many players hold a balance and that it cannot be
+  undone; the API refuses it unless the request says it was confirmed. Deliveries the game reports as older than the reset are not
+  counted afterwards.
+- **Where it is stored**: with SQL Server, in the tables `guild_bank` (one row per account and player, names compared exactly) and
+  `guild_bank_state`, written in one transaction; without it, in the bot's own `data/<account>/guild_bank.txt`. The page says which.
+- **While the bot runs it owns the balances**, so the console does not write them: it queues the change in
+  `guild_bank_edits.txt` and the bot applies it within a second, then the page shows the result. If the bot cannot (disconnected, off)
+  the answer is *pending* and the change is applied when it can. **While the bot is stopped** the change goes straight to the store and
+  reaches the bot when it starts. A running bot whose account has `guildbank.enabled = false` would ignore the change: the console
+  refuses it and says so.
+- The backup file (*Paramètres → Télécharger une sauvegarde*) carries the balances.
+
+API: `GET /api/accounts/<id>/bank`, `PUT /api/accounts/<id>/bank/<player>` with `{"food": 1000000, "gold": 0}` (only the resources
+given change), `POST /api/accounts/<id>/bank/reset` with `{"confirm": true}`. Tests: `python3 tests/webui_bank_test.py`.
+
 ## Logs
 
 The **Log** tab follows the bot's output live. When a bot has stopped, the console shows
