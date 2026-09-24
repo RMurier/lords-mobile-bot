@@ -371,6 +371,56 @@ typedef struct {
     time_t last_online_gift_try;
 } ActivitySettings;
 
+/* Automatic resource-tile gathering: scan the zones around the castle
+ * (_MSG_REQUEST_OPEN_UI once, then _MSG_REQUEST_MAPDATA, 4 zones at a time - both
+ * reverse-engineered from a capture of manually browsing the map and gathering 7
+ * tiles), then send a march to the best untargeted tile found while a gather march
+ * slot is free, using the game's own "low level first" auto troop selection
+ * (troop_type_id = 0 lets the server pick, matching 6 of 7 captured marches; only
+ * a level 4 ore tile got a different, unconfirmed non-zero type - most likely the
+ * account running out of the default troop, since the wiki does not document any
+ * hard tier requirement per tile level). Troop count is computed from a single
+ * capacity constant (~23.3 resource/troop) derived from those same 6 marches:
+ * experimental, not from an official source, and does not account for running low
+ * on troops or escalating tiers - worth calibrating against real results. */
+#define GATHER_MAX_TILES 256
+#define GATHER_DEFAULT_TROOP_CAPACITY 23.3
+
+typedef enum {
+    RESOURCE_KIND_FOOD  = 1,
+    RESOURCE_KIND_STONE = 2,
+    RESOURCE_KIND_ORE   = 3,
+    RESOURCE_KIND_WOOD  = 4,
+    RESOURCE_KIND_GOLD  = 5
+} GatherResourceKind;
+
+typedef struct {
+    bool     used;
+    bool     targeted;     // a march is already out (or was) for this tile
+    uint16_t zone_id;
+    uint8_t  point_id;
+    uint8_t  resource_kind; // GatherResourceKind
+    uint8_t  level;         // 1-5
+    uint32_t amount;
+} GatherTile;
+
+typedef struct {
+    bool     enabled;
+    uint8_t  max_marches;   // out of player.max_marches, how many to use for gathering
+    uint16_t radius;        // tiles around the castle to scan
+
+    bool     ui_opened;
+    bool     scan_done;
+    uint16_t scan_cursor;   // index into the zone rectangle being swept
+    uint64_t next_scan_at;  // now_ms() deadline: do not send the next batch of RequestMapData before this
+
+    uint8_t  active_marches; // gather marches this code has out right now (subset of player.current_marches)
+    uint64_t next_march_at;  // now_ms() deadline: do not send another gather march before this
+
+    GatherTile tiles[GATHER_MAX_TILES];
+    uint16_t   tile_count;
+} GatherSettings;
+
 /* $join <tag> / $leave: at most one alliance operation in flight at a time, its
  * outcome reported back to whoever asked for it. Reverse-engineered from a capture
  * of leaving a guild, searching by tag text, and applying (which is either an
@@ -996,6 +1046,7 @@ typedef struct {
 	ActivitySettings activity;
 	WarSettings war;
 	AllianceOp alliance_op;
+	GatherSettings gather;
 	GuildChatLog guild_chat_log;
 
 	HelpSpam help_spam;

@@ -3289,6 +3289,27 @@ static WarPoint *WarTrackPoint(Connection *c, uint16_t zone_id, uint8_t point_id
 	return p;
 }
 
+static GatherTile *GatherFindTile(Connection *c, uint16_t zone_id, uint8_t point_id) {
+	for (uint16_t i = 0; i < c->gather.tile_count; i++) {
+		GatherTile *t = &c->gather.tiles[i];
+		if (t->zone_id == zone_id && t->point_id == point_id)
+			return t;
+	}
+	return NULL;
+}
+
+static GatherTile *GatherTrackTile(Connection *c, uint16_t zone_id, uint8_t point_id) {
+	GatherTile *t = GatherFindTile(c, zone_id, point_id);
+	if (t) return t;
+	if (c->gather.tile_count >= GATHER_MAX_TILES) return NULL;
+	t = &c->gather.tiles[c->gather.tile_count++];
+	memset(t, 0, sizeof(*t));
+	t->used = true;
+	t->zone_id = zone_id;
+	t->point_id = point_id;
+	return t;
+}
+
 static void JsonEscape(const char *in, char *out, size_t out_size) {
 	size_t j = 0;
 	for (size_t i = 0; in[i] != '\0' && j + 2 < out_size; i++) {
@@ -3343,11 +3364,13 @@ void NotifyDiscord(Connection *c, const char *message) {
 }
 
 void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
-	if (!c->war.enabled) return;
+	if (!c->war.enabled && !c->gather.enabled) return;
 
 	// Compact single-point update: matches the shape seen, once, at the exact moment
 	// a shield bubble disappeared for a tracked point.
 	if (size == 13) {
+		if (!c->war.enabled) return;
+
 		uint16_t zone_id  = read_u16(data + 9);
 		uint8_t  point_id = read_u8(data + 11);
 
@@ -3364,9 +3387,11 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 		return;
 	}
 
-	// Bulk snapshot: several record kinds back to back, sharing this shape when the
-	// tag byte is WAR_RECORD_TAG (player point). Anything else is skipped one byte at
-	// a time to resync, since its width is not decoded yet.
+	// Bulk snapshot: several record kinds back to back, all 51 bytes wide, sharing a
+	// zone(2) + point(1) + tag(1) header. tag=8 is a player point (see WarTick's
+	// header comment); tag=1..5 is a resource tile (GatherResourceKind), with a
+	// level byte and a 4-byte amount at fixed offsets instead of a name. Anything
+	// else is skipped one byte at a time to resync, since its width is not decoded.
 	if (size < 3 + WAR_RECORD_SIZE) {
 		LOGD("[WAR] map data reçue, taille=%u (trop petite pour un seul record de %u : format non reconnu)\n",
 			size, WAR_RECORD_SIZE);
@@ -3379,7 +3404,7 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 		uint8_t  point_id = read_u8(data + pos + 2);
 		uint8_t  tag      = read_u8(data + pos + 3);
 
-		if (zone_id < WAR_ZONE_COUNT && tag == WAR_RECORD_TAG) {
+		if (zone_id < WAR_ZONE_COUNT && c->war.enabled && tag == WAR_RECORD_TAG) {
 			WarPoint *p = WarTrackPoint(c, zone_id, point_id);
 			if (p) {
 				read_bytes((uint8_t*)p->name, data + pos + 4, 13);
@@ -3387,6 +3412,15 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 				read_bytes((uint8_t*)p->tag, data + pos + 17, 3);
 				p->tag[3] = '\0';
 				p->kingdom_id = read_u16(data + pos + 20);
+			}
+			matched++;
+			pos += WAR_RECORD_SIZE;
+		} else if (zone_id < WAR_ZONE_COUNT && c->gather.enabled && tag >= 1 && tag <= 5) {
+			GatherTile *t = GatherTrackTile(c, zone_id, point_id);
+			if (t) {
+				t->resource_kind = tag;
+				t->level  = read_u8(data + pos + 22);
+				t->amount = read_u32(data + pos + 23);
 			}
 			matched++;
 			pos += WAR_RECORD_SIZE;
@@ -3423,6 +3457,242 @@ void WarTick(Connection *c) {
 		return;
 	c->war.last_status_log = now;
 	LOGI("[WAR] %u point(s) connu(s) (reçus passivement, pas de scan actif)\n", c->war.point_count);
+}
+
+/* ------------------------------------------------------------------------
+ * Automatic gathering. See GatherSettings' comment (connection.h) for the
+ * whole picture. Reverse-engineered from a capture of manually browsing the
+ * map (which does send _MSG_REQUEST_MAPDATA, repeatedly, after one
+ * _MSG_REQUEST_OPEN_UI - contrary to what an earlier, different capture for
+ * the war feature concluded) and gathering/recalling 7 tiles.
+ * ------------------------------------------------------------------------ */
+
+void RequestOpenUI(Connection *c, uint32_t kind) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_OPEN_UI); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_u32(c->data + c->size, kind); c->size += 4;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/* Always exactly 4 zone slots on the wire, matching the captured client - pad
+ * unused slots with a zone already requested (harmless, never with 0 which is a
+ * real zone). */
+void RequestMapData(Connection *c, uint16_t zone[4]) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_MAPDATA); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_u8(c->data + c->size, 4); c->size += 1;
+	for (int i = 0; i < 4; i++) {
+		write_u16(c->data + c->size, zone[i]); c->size += 2;
+	}
+	write_zero(c->data + c->size, 32); c->size += 32;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_TROOPMARCH_NOTATK); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;      // payload offset 0
+	write_zero(c->data + c->size, 42); c->size += 42;                     // -> payload offset 46
+	write_u16(c->data + c->size, troop_type_id); c->size += 2;            // 0 = let the server auto-pick
+	write_zero(c->data + c->size, 14); c->size += 14;                     // -> payload offset 62
+	write_u32(c->data + c->size, troop_count); c->size += 4;
+	write_zero(c->data + c->size, 12); c->size += 12;                     // -> payload offset 78
+	write_u16(c->data + c->size, zone_id); c->size += 2;
+	write_u8 (c->data + c->size, point_id); c->size += 1;
+	write_zero(c->data + c->size, 26); c->size += 26;                     // pad to the captured 107-byte payload
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+void RequestGatherRecall(Connection *c, uint32_t march_id) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_TROOPRETURN); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_u32(c->data + c->size, march_id); c->size += 4;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 2) return;
+	uint8_t status = read_u8(data);
+	uint8_t march_id = read_u8(data + 1);
+
+	if (status != 0) {
+		LOGW("[GATHER] Marche refusée (code %u)\n", status);
+		if (c->gather.active_marches > 0) c->gather.active_marches--; // undo the optimistic count at send time
+		return;
+	}
+
+	c->player.current_marches++;
+	LOGD("[GATHER] Marche #%u acceptée\n", march_id);
+}
+
+void RecvGatheringEvent(Connection *c, const uint8_t *data, uint16_t size) {
+	(void)c; (void)data; (void)size;
+	LOGD("[GATHER] Récolte commencée\n");
+}
+
+void RecvGatherReturnResp(Connection *c, const uint8_t *data, uint16_t size) {
+	(void)c; (void)data; (void)size;
+	LOGD("[GATHER] Rappel confirmé\n");
+}
+
+/* Only march kind this bot sends is gather, so any troop coming home is a gather
+ * march: free its slot. Its own field layout (mostly resource stock totals) is
+ * not decoded - GatherReportInfo already gives the collected amount. */
+void RecvGatherTroopHome(Connection *c, const uint8_t *data, uint16_t size) {
+	(void)data; (void)size;
+	if (c->gather.active_marches > 0) c->gather.active_marches--;
+	if (c->player.current_marches > 0) c->player.current_marches--;
+	// Re-arm the pacing: whatever next_march_at held could be long past (a slot can
+	// free up after a march of several minutes), and firing the next march the
+	// instant that happens is exactly the "no delay" case GatherTick's arm-then-act
+	// pattern is meant to avoid.
+	c->gather.next_march_at = 0;
+}
+
+void RecvGatherReportInfo(Connection *c, const uint8_t *data, uint16_t size) {
+	(void)c;
+	if (size < 24) return;
+
+	uint16_t kingdom_id   = read_u16(data + 13);
+	uint16_t zone_id      = read_u16(data + 15);
+	uint8_t  point_id     = read_u8(data + 17);
+	uint8_t  resource_kind = read_u8(data + 18);
+	uint8_t  level        = read_u8(data + 19);
+	uint32_t amount       = read_u32(data + 20);
+
+	static const char *kind_names[] = {"?", "nourriture", "pierre", "minerai", "bois", "or"};
+	const char *kind = (resource_kind >= 1 && resource_kind <= 5) ? kind_names[resource_kind] : "?";
+
+	char amt[20];
+	format_number2(amount, amt, sizeof(amt));
+	LOGI("[GATHER] Récolté %s de %s (niveau %u), royaume %u zone %u point %u\n",
+		amt, kind, level, kingdom_id, zone_id, point_id);
+}
+
+/* Which zone (0..1023) the Nth step of the sweep covers: a rectangle of zones
+ * around the castle, gather.radius tiles wide, walked row by row. */
+static bool GatherZoneAt(Connection *c, uint16_t index, uint16_t *zone_out) {
+	map_pos_t castle = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
+	int radius = c->gather.radius > 0 ? c->gather.radius : 30;
+
+	int x_min = castle.x > radius ? castle.x - radius : 0;
+	int x_max = castle.x + radius < 511 ? castle.x + radius : 511;
+	int y_min = castle.y > radius ? castle.y - radius : 0;
+	int y_max = castle.y + radius < 1023 ? castle.y + radius : 1023;
+
+	int xz_min = x_min >> 5, xz_max = x_max >> 5;
+	int yz_min = y_min >> 4, yz_max = y_max >> 4;
+	int width = xz_max - xz_min + 1;
+	int height = yz_max - yz_min + 1;
+
+	if (index >= (uint16_t)(width * height)) return false;
+
+	int xz = xz_min + (index % width);
+	int yz = yz_min + (index / width);
+	*zone_out = (uint16_t)(xz + yz * 16);
+	return true;
+}
+
+/* Highest level first (faster gathering, fewer marches for the same total - see
+ * docs.gathering), ties broken by amount. */
+static GatherTile *GatherBestUntargeted(Connection *c) {
+	GatherTile *best = NULL;
+	for (uint16_t i = 0; i < c->gather.tile_count; i++) {
+		GatherTile *t = &c->gather.tiles[i];
+		if (t->targeted) continue;
+		if (!best || t->level > best->level || (t->level == best->level && t->amount > best->amount))
+			best = t;
+	}
+	return best;
+}
+
+/* 1-2s, jitter so it is never the same wait twice - same pacing the resource
+ * transfers needed to stop the server from flagging actions sent too fast. */
+static uint64_t GatherHumanDelay(void) {
+	return now_ms() + 1000 + (uint64_t)(rand() % 1000);
+}
+
+void GatherTick(Connection *c) {
+	if (!c->gather.enabled) return;
+	if (c->player.max_marches == 0) return; // march data not loaded yet
+
+	if (!c->gather.scan_done) {
+		// Armed on the first call instead of acting right away, so the very first
+		// action (opening the map) waits its turn too, not just the ones after it.
+		if (c->gather.next_scan_at == 0) {
+			c->gather.next_scan_at = GatherHumanDelay();
+			return;
+		}
+		if (now_ms() < c->gather.next_scan_at)
+			return;
+		c->gather.next_scan_at = GatherHumanDelay();
+
+		if (!c->gather.ui_opened) {
+			// Matches one of the OPEN_UI "kind" values seen right before a MAPDATA
+			// request that got an answer; not confirmed to be specifically "map".
+			RequestOpenUI(c, 5);
+			c->gather.ui_opened = true;
+			return;
+		}
+
+		uint16_t zone[4];
+		bool any = false;
+		for (int i = 0; i < 4; i++) {
+			uint16_t z;
+			if (GatherZoneAt(c, c->gather.scan_cursor + (uint16_t)i, &z)) {
+				zone[i] = z;
+				any = true;
+			} else {
+				zone[i] = any ? zone[0] : 0;
+			}
+		}
+
+		if (!any) {
+			c->gather.scan_done = true;
+			LOGI("[GATHER] Scan terminé : %u tuile(s) trouvée(s) dans le rayon\n", c->gather.tile_count);
+			return;
+		}
+
+		RequestMapData(c, zone);
+		c->gather.scan_cursor += 4;
+		return;
+	}
+
+	uint8_t reserved = c->gather.max_marches < c->player.max_marches ? c->gather.max_marches : c->player.max_marches;
+
+	if (c->gather.active_marches >= reserved || c->player.current_marches >= c->player.max_marches)
+		return;
+
+	// Armed on the first opportunity instead of acting right away, so the very
+	// first march (and one sent right after a slot frees up, how ever long that
+	// took) waits its turn too, instead of firing the instant a slot is free.
+	if (c->gather.next_march_at == 0) {
+		c->gather.next_march_at = GatherHumanDelay();
+		return;
+	}
+	if (now_ms() < c->gather.next_march_at)
+		return;
+
+	GatherTile *t = GatherBestUntargeted(c);
+	if (!t) return;
+
+	uint32_t count = (uint32_t)(t->amount / GATHER_DEFAULT_TROOP_CAPACITY) + 1;
+
+	t->targeted = true;
+	c->gather.active_marches++;
+	c->gather.next_march_at = GatherHumanDelay(); // one march per delay, never several back to back
+	RequestGatherMarch(c, t->zone_id, t->point_id, 0, count);
+
+	map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
+	LOGI("[GATHER] Envoi de %u troupes vers X:%u Y:%u (niveau %u, %u en stock)\n",
+		count, pos.x, pos.y, t->level, t->amount);
 }
 
 /* ------------------------------------------------------------------------

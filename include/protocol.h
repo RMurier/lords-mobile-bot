@@ -118,6 +118,17 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size);
 void WarTick(Connection *c);
 void NotifyDiscord(Connection *c, const char *message);
 
+void RequestOpenUI(Connection *c, uint32_t kind);
+void RequestMapData(Connection *c, uint16_t zone[4]);
+void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count);
+void RequestGatherRecall(Connection *c, uint32_t march_id);
+void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size);
+void RecvGatheringEvent(Connection *c, const uint8_t *data, uint16_t size);
+void RecvGatherReturnResp(Connection *c, const uint8_t *data, uint16_t size);
+void RecvGatherTroopHome(Connection *c, const uint8_t *data, uint16_t size);
+void RecvGatherReportInfo(Connection *c, const uint8_t *data, uint16_t size);
+void GatherTick(Connection *c);
+
 void RequestAllianceQuit(Connection *c);
 void RequestAllianceSearchByTag(Connection *c, const char *tag);
 void RequestAllianceApplyById(Connection *c, uint32_t alliance_id);

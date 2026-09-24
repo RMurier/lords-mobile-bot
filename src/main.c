@@ -75,6 +75,8 @@ void BotTick(Connection *c)
 
 	WarTick(c);
 
+	GatherTick(c);
+
 	MigrationTick(c);
 	
 	StatusTick(c);
@@ -285,6 +287,21 @@ static SessionResult ProcessConnection(Connection *c)
 					break;
 				case _MSG_RESP_ALLIANCE_APPLY:
 					RecvAllianceApplyResp(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_TROOPMARCH:
+					RecvGatherMarchResp(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_GATHERINGEVENT:
+					RecvGatheringEvent(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_TROOPRETURN:
+					RecvGatherReturnResp(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_TROOPHOME:
+					RecvGatherTroopHome(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_GATHERREPORTINFO:
+					RecvGatherReportInfo(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_BUFFINFO: 
 					RecvIBuffInfo(c, s->buffer + s->parse_pos + 4);

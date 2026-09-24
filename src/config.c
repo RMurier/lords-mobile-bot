@@ -333,6 +333,21 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 
+	if (strcmp(key, "gather.enabled") == 0) {
+		c->gather.enabled = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "gather.max_marches") == 0) {
+		c->gather.max_marches = (uint8_t)strtoul(value, NULL, 10);
+		return true;
+	}
+
+	if (strcmp(key, "gather.radius") == 0) {
+		c->gather.radius = (uint16_t)strtoul(value, NULL, 10);
+		return true;
+	}
+
 	if (strcmp(key, "protection.enabled") == 0) {
 		c->protection.enabled = (strcmp(value, "true") == 0);
 		return true;
@@ -572,6 +587,8 @@ bool LoadConfig(Connection *c, const char *filename)
 	c->reconnect.kicked_delay = 60;
 	c->reconnect.max_attempts = 0;
 	c->migration_scrolls_needed = 1;
+	c->gather.radius      = 30;
+	c->gather.max_marches = 1;
 	c->bot.command_input_mask = (1u << COMMAND_CHANNEL_GUILD) | (1u << COMMAND_CHANNEL_MAIL);
 	c->bot.command_output     = COMMAND_CHANNEL_MAIL;
 	snprintf(c->bot.data_path, sizeof(c->bot.data_path), "./data/");

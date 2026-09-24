@@ -238,6 +238,22 @@ CATEGORIES = [
         ],
     },
     {
+        "id": "gather",
+        "technical": True,      # experimental: troop count formula derived from a single capture
+        "label": "Récolte automatique",
+        "description": "Scanne les tuiles de ressources autour du château et y envoie des marches de récolte. "
+                      "Expérimental : la formule du nombre de troupes vient d'un seul échantillon capturé.",
+        "fields": [
+            _bool("gather.enabled", "Activer la récolte automatique"),
+            {"key": "gather.max_marches", "label": "Marches réservées à la récolte", "type": "int",
+             "min": 1, "max": 30, "default": "1", "depends": "gather.enabled",
+             "help": "Sur le total de marches du compte, combien peuvent être utilisées pour la récolte en même temps."},
+            {"key": "gather.radius", "label": "Rayon de recherche", "type": "int", "min": 5, "max": 200,
+             "default": "30", "unit": "cases", "depends": "gather.enabled",
+             "help": "Distance autour du château dans laquelle chercher des tuiles de ressources."},
+        ],
+    },
+    {
         "id": "advanced",
         "technical": True,      # not for everyday use: grouped in the "Technique" tab
         "label": "Avancé",
