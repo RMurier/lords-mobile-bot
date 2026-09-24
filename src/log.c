@@ -1,11 +1,36 @@
 #include "log.h"
 #include <stdarg.h>
 
+#ifdef _WIN32
+  #include <windows.h>
+#else
+  #include <time.h>
+#endif
+
 int g_log_debug = 1;          /* on by default: the raw exchanges are what lets a refused login be diagnosed */
 int g_log_debug_forced = 0;   /* --debug on the command line: the config cannot turn it off */
 
+/* Local time, millisecond precision: without it two log lines a couple of seconds apart
+ * (e.g. the human-pacing delay between two marches) look identical and a real gap cannot be
+ * told apart from none at all. */
+static void print_timestamp(void)
+{
+#ifdef _WIN32
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(stderr, "%02d:%02d:%02d.%03d ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tmv;
+    localtime_r(&ts.tv_sec, &tmv);
+    fprintf(stderr, "%02d:%02d:%02d.%03ld ", tmv.tm_hour, tmv.tm_min, tmv.tm_sec, ts.tv_nsec / 1000000);
+#endif
+}
+
 static void log_base(const char *prefix, const char *fmt, va_list args)
 {
+    print_timestamp();
     fprintf(stderr, "%s", prefix);
     vfprintf(stderr, fmt, args);
     // fprintf(stderr, "\n");
@@ -45,6 +70,7 @@ void log_debug(const char *fmt, ...)
 
 void log_hexdump(const char *label, const uint8_t *data, size_t size)
 {
+    print_timestamp();
     fprintf(stderr, "[DEBUG] %s (%zu bytes)\n", label, size);
 
     for (size_t i = 0; i < size; i += 16) {

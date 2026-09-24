@@ -298,8 +298,12 @@ COMMANDS = [
                  "ce qui est disponible.",
                  "Une seule livraison à la fois : un autre joueur reçoit « Transfer Busy » jusqu'à la fin ou à un stop."],
      "example": "gold 5M"},
-    {"group": "Administration", "name": "bank bal", "usage": "bank bal", "who": "Administrateurs",
-     "summary": "Répond avec le solde de la banque, du sac et le total de chaque ressource.", "example": "bank bal"},
+    {"group": "Administration", "name": "bank bal", "usage": "bank bal [chat|mail]", "who": "Administrateurs",
+     "summary": "Répond avec le solde de la banque, du sac et le total de chaque ressource, dans le canal choisi par "
+                "« Sortie des commandes » (command.output).",
+     "details": ["Ajoutez chat ou mail après bal pour forcer la réponse dans ce canal-là, juste pour cette fois, "
+                 "sans changer le réglage général."],
+     "example": "bank bal chat"},
     {"group": "Administration", "name": "admin list", "usage": "admin list", "who": "Administrateurs",
      "summary": "Liste les administrateurs, en indiquant ceux qui viennent du fichier de configuration.",
      "example": "admin list"},

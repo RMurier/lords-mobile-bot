@@ -21,7 +21,9 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$wood <amount>` | same, for wood | |
 | `$ore <amount>` | same, for ore | |
 | `$gold <amount>` | same, for gold | |
-| `$bank bal` | administrators | Mails the bank, bag and total balance of each resource |
+| `$bank bal` | administrators | Sends the bank, bag and total balance of each resource, in `command.output`'s channel |
+| `$bank bal chat` | administrators | Same, forced into alliance chat regardless of `command.output` |
+| `$bank bal mail` | administrators | Same, forced into mail regardless of `command.output` |
 | `$admin list` | administrators | Lists the administrators, marking those from the configuration file |
 | `$admin add <player>` | administrators | Adds an administrator |
 | `$admin remove <player>` | administrators | Removes an administrator added in game |
@@ -42,6 +44,7 @@ $stop              cancel the delivery that is on its way
 $admin add Bob     Bob can now use every command
 $admin remove Bob
 $bank bal
+$bank bal chat     forces the answer into alliance chat for this one command
 $relocate random
 $relocate 100 100
 $migrate 796 301 491

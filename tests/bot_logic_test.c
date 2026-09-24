@@ -209,6 +209,20 @@ int main(void)
 	CHECK(sent_count == 1 && replied("@boss Aucune livraison en cours"), "output GUILD: replies in chat addressed to the player");
 	free(c);
 
+	/* ---- $bank bal [chat|mail]: overrides command.output for one answer ---- */
+	c = fresh("boss"); // command_output defaults to MAIL
+	say(c, "boss", "$bank bal", COMMAND_CHANNEL_MAIL);
+	CHECK(sent_count == 1 && !replied("@boss"), "bank bal with no argument follows command.output (mail)");
+	reset_sent();
+	say(c, "boss", "$bank bal chat", COMMAND_CHANNEL_MAIL);
+	CHECK(sent_count == 1 && replied("@boss"), "bank bal chat overrides command.output for this one answer");
+	free(c);
+	c = fresh("boss");
+	c->bot.command_output = COMMAND_CHANNEL_GUILD;
+	say(c, "boss", "$bank bal mail", COMMAND_CHANNEL_MAIL);
+	CHECK(sent_count == 1 && !replied("@boss"), "bank bal mail overrides command.output (guild) the other way");
+	free(c);
+
 	/* ---- $stop ------------------------------------------------------- */
 	c = fresh("boss");
 	c->bank.enabled = true; c->bank.send_gold = true;

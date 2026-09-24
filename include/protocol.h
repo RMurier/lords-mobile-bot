@@ -189,6 +189,7 @@ void BagApply(Connection *c, const BagUse *plan, int count);
 
 /* Answers a player through the configured command.output channel. Defined in command.c. */
 void BotReply(Connection *c, const char *player_name, const char *subject, const char *fmt, ...);
+void BotReplyTo(Connection *c, const char *player_name, const char *subject, CommandChannel channel, const char *fmt, ...);
 
 /* Tells whoever asked for a relocation how it went. Defined in command.c. */
 void ReportRelocation(Connection *c, bool ok, uint8_t status);

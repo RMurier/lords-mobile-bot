@@ -37,7 +37,7 @@ void format_number2(uint64_t num, char *out, size_t size) {
     }
 }*/
 
-void ShowBankBalance(Connection *c, const char *player_name);
+void ShowBankBalance(Connection *c, const char *player_name, CommandChannel channel);
 static void ResourceCommandHandler(
     Connection *c,
     const char *player_name,
@@ -50,16 +50,13 @@ static void ResourceCommandHandler(
  * Replies: mail, alliance chat or world chat, depending on command.output
  * ------------------------------------------------------------------------ */
 
-void BotReply(Connection *c, const char *player_name, const char *subject, const char *fmt, ...)
+static void BotReplyV(Connection *c, const char *player_name, const char *subject, CommandChannel channel, const char *fmt, va_list args)
 {
 	char text[1024];
-	va_list args;
 
-	va_start(args, fmt);
 	vsnprintf(text, sizeof(text), fmt, args);
-	va_end(args);
 
-	if (c->bot.command_output == COMMAND_CHANNEL_MAIL) {
+	if (channel == COMMAND_CHANNEL_MAIL) {
 		RequestSendMail(c, player_name, subject, text);
 		return;
 	}
@@ -73,7 +70,26 @@ void BotReply(Connection *c, const char *player_name, const char *subject, const
 	char line[300];
 	snprintf(line, sizeof(line), "@%s %.240s", player_name, text); // chat lines are kept short on purpose
 
-	RequestSendChat(c, c->bot.command_output == COMMAND_CHANNEL_GUILD ? 1 : 0, line);
+	RequestSendChat(c, channel == COMMAND_CHANNEL_GUILD ? 1 : 0, line);
+}
+
+/* Same as BotReply, but the channel is picked by the caller instead of always
+ * following command.output - for a command like "$bank bal chat" that lets
+ * whoever asks override where just this one answer goes. */
+void BotReplyTo(Connection *c, const char *player_name, const char *subject, CommandChannel channel, const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	BotReplyV(c, player_name, subject, channel, fmt, args);
+	va_end(args);
+}
+
+void BotReply(Connection *c, const char *player_name, const char *subject, const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	BotReplyV(c, player_name, subject, c->bot.command_output, fmt, args);
+	va_end(args);
 }
 
 /* ------------------------------------------------------------------------
@@ -639,7 +655,7 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 	n += (size_t)snprintf(text + n, sizeof(text) - n, "%chelp - cette liste", p);
 
 	if (is_admin) {
-		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cbank bal - solde de la banque, du sac et total", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cbank bal [chat|mail] - solde de la banque, du sac et total", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <joueur>|remove <joueur> - gérer les administrateurs", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate <royaume> <x> <y> - migrer vers un autre royaume", p);
@@ -702,7 +718,16 @@ void command_handler(Connection *c, const char *player_name, const char *message
 	}
 
 	if (IsCommand(message, "bank", &args) && strncmp(args, "bal", 3) == 0 && (args[3] == '\0' || args[3] == ' ')) {
-		ShowBankBalance(c, player_name);
+		const char *channel_arg = args + 3;
+		while (*channel_arg == ' ') channel_arg++;
+
+		CommandChannel channel = c->bot.command_output;
+		if (strcmp(channel_arg, "chat") == 0)
+			channel = COMMAND_CHANNEL_GUILD;
+		else if (strcmp(channel_arg, "mail") == 0)
+			channel = COMMAND_CHANNEL_MAIL;
+
+		ShowBankBalance(c, player_name, channel);
 		return;
 	}
 
@@ -979,15 +1004,15 @@ uint64_t GetBagGold(Connection *c) {
 }
 
 
-void ShowBankBalance(Connection *c, const char *player_name) {
+void ShowBankBalance(Connection *c, const char *player_name, CommandChannel channel) {
 	if (!IsAdmin(c, player_name)) {
-		// Return message if necessary 
-		BotReply(c, player_name, "Non autorisé", "Vous n'avez pas la permission de voir le solde de la banque.");
+		// Return message if necessary
+		BotReplyTo(c, player_name, "Non autorisé", channel, "Vous n'avez pas la permission de voir le solde de la banque.");
 		return;
 	}
-	
+
 	if (!c->items_loaded) {
-		BotReply(c, player_name, "Problème", "Un problème est survenu, réessayez dans un instant.");
+		BotReplyTo(c, player_name, "Problème", channel, "Un problème est survenu, réessayez dans un instant.");
 		return;
 	}
 	
@@ -1038,7 +1063,7 @@ void ShowBankBalance(Connection *c, const char *player_name) {
 	format_number2(c->resources.ore  + BagOre,   sum_ore,  sizeof(sum_ore));
 	format_number2(c->resources.gold + BagGold,  sum_gold, sizeof(sum_gold));
 	
-	BotReply(c, player_name, "Solde de la banque", 
+	BotReplyTo(c, player_name, "Solde de la banque", channel,
 		"[BANQUE] Nourriture : %s | Pierre : %s | Bois : %s | Minerai : %s | Or : %s\n"
 		"[SAC] Nourriture : %s | Pierre : %s | Bois : %s | Minerai : %s | Or : %s\n"
 		"[TOTAL] Nourriture : %s | Pierre : %s | Bois : %s | Minerai : %s | Or : %s",
