@@ -1,5 +1,5 @@
 # Local test of the containers: docker compose up --build
-# The console is then on http://localhost:8765/#t=<LMBOT_TOKEN>
+# The console is then on http://localhost:8765/ - no authentication of its own, see webui/server.py's docstring.
 services:
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
@@ -25,7 +25,6 @@ services:
     environment:
       LMBOT_DB_HOST: sqlserver
       LMBOT_DB_PASSWORD: ${MSSQL_SA_PASSWORD}
-      LMBOT_TOKEN: ${LMBOT_TOKEN:?set LMBOT_TOKEN (16+ characters)}
       LMBOT_ALLOWED_ORIGINS: http://localhost:8765
     ports:
       - "8765:8765"

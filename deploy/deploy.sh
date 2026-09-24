@@ -146,11 +146,10 @@ install() {
   if "${KN[@]}" get secret lmbot-secrets >/dev/null 2>&1; then
     echo "  le secret existe déjà : conservé (les mots de passe ne sont jamais réécrits)."
   else
-    local sa token
+    local sa
     sa="Lm$(openssl rand -hex 8)-Aa1!"
-    token="$(openssl rand -hex 24)"
-    "${KN[@]}" create secret generic lmbot-secrets --from-literal=sa-password="$sa" --from-literal=token="$token" >/dev/null
-    echo "  secret créé (mot de passe SQL et jeton générés, lisibles avec « $0 status »)."
+    "${KN[@]}" create secret generic lmbot-secrets --from-literal=sa-password="$sa" >/dev/null
+    echo "  secret créé (mot de passe SQL généré, lisible avec « $0 status »)."
   fi
 
   say "== Contrôle serveur (rien n'est encore appliqué)"
@@ -175,12 +174,11 @@ upgrade() {
 
 status() {
   "${KN[@]}" get pods,pvc,svc,ingress 2>/dev/null
-  local token; token=$("${KN[@]}" get secret lmbot-secrets -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
   echo
   if [ -n "$HOST_NAME" ]; then
-    say "Console : https://$HOST_NAME/#t=$token"
+    say "Console : https://$HOST_NAME/ (sans authentification : accès réseau à restreindre par ailleurs)"
   else
-    say "Console : lancez « ${K[*]} -n $NAMESPACE port-forward svc/lmbot 8765:80 » puis ouvrez http://localhost:8765/#t=$token"
+    say "Console : lancez « ${K[*]} -n $NAMESPACE port-forward svc/lmbot 8765:80 » puis ouvrez http://localhost:8765/ (sans authentification)"
   fi
 }
 
