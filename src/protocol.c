@@ -3634,14 +3634,6 @@ void GatherTick(Connection *c) {
 			return;
 		c->gather.next_scan_at = GatherHumanDelay();
 
-		if (!c->gather.ui_opened) {
-			// Matches one of the OPEN_UI "kind" values seen right before a MAPDATA
-			// request that got an answer; not confirmed to be specifically "map".
-			RequestOpenUI(c, 5);
-			c->gather.ui_opened = true;
-			return;
-		}
-
 		uint16_t zone[4];
 		bool any = false;
 		for (int i = 0; i < 4; i++) {
@@ -3660,6 +3652,7 @@ void GatherTick(Connection *c) {
 			return;
 		}
 
+		LOGD("[GATHER] Demande de données pour les zones %u,%u,%u,%u\n", zone[0], zone[1], zone[2], zone[3]);
 		RequestMapData(c, zone);
 		c->gather.scan_cursor += 4;
 		return;
