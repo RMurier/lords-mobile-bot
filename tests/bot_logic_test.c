@@ -347,7 +347,11 @@ int main(void)
 		free(c);
 	}
 
-	/* ---- multi-march pacing: the 2nd+ march must wait too, not just the 1st ---------- */
+	/* ---- multi-march pacing: the 2nd+ march must wait too, not just the 1st ----------
+	 * Also re-finds the target (RequestAllyPoint) before every march after the first, instead of
+	 * reusing the cached zone/point - a live delivery was kicked by the server (no error packet)
+	 * right after the 2nd march every time, regardless of the gap between marches, and this was
+	 * the one structural difference left between the successful 1st march and every one after it. */
 	{
 		uint8_t shelp[72] = {0};
 		uint8_t home[21] = {0};
@@ -362,9 +366,9 @@ int main(void)
 		reset_sent();
 		/* shelp[0] = b = 0 (accepted), shelp[1] = b2 = 0 (marches count), rest unused by this test */
 		RecvSHelp(c, shelp);
-		CHECK(c->transfer.state == TRANSFER_SEND_MARCH && c->transfer.not_before > now_ms()
-			&& find_packet(_MSG_REQUEST_MAP_ADVANCE) >= 0,
-			"a march accepted (RecvSHelp) refreshes the target and waits before the next one");
+		CHECK(c->transfer.state == TRANSFER_FIND_TARGET && c->transfer.not_before > now_ms()
+			&& find_packet(_MSG_REQUEST_ALLYPOINT) < 0,
+			"a march accepted (RecvSHelp) waits, then re-finds the target before the next one (not sent yet: not_before has not elapsed)");
 
 		c->transfer.state = TRANSFER_WAIT_MARCH;
 		c->transfer.not_before = 0;
@@ -374,9 +378,15 @@ int main(void)
 		reset_sent();
 		/* home[0] = b = 0 (success), then food/rock/wood/ore/gold stocks (4 bytes each, unused here) */
 		RecvHelp_Home(c, home);
-		CHECK(c->transfer.state == TRANSFER_SEND_MARCH && c->transfer.not_before > now_ms()
-			&& find_packet(_MSG_REQUEST_MAP_ADVANCE) >= 0,
-			"a march returning home (RecvHelp_Home) also refreshes the target and waits");
+		CHECK(c->transfer.state == TRANSFER_FIND_TARGET && c->transfer.not_before > now_ms(),
+			"a march returning home (RecvHelp_Home) also waits, then re-finds the target");
+
+		/* once the wait is over, the tick re-sends RequestAllyPoint exactly like the first march did */
+		c->transfer.not_before = 0;
+		reset_sent();
+		ResourceTransferTick(c);
+		CHECK(c->transfer.state == TRANSFER_WAIT_TARGET && find_packet(_MSG_REQUEST_ALLYPOINT) >= 0,
+			"once the wait elapses, the next march looks the target up again, the same way the first one did");
 
 		free(c);
 	}

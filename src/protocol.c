@@ -5913,25 +5913,22 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 	// c->transfer.cur_marches++;
 	c->player.current_marches++;
 
-	// Same "look at the target, then wait" pacing as the first march (see RequestMapAdvance's
-	// comment): without it, this march's accept response was arriving fast enough that the next
-	// one went out with no human delay at all - not_before alone did not fix it, since nothing
-	// here was setting it.
+	// Re-find the target before every next march, exactly like the FIRST one (RequestAllyPoint ->
+	// RecvAllyPoint sets zone/point + RequestMapAdvance + waits -> send), instead of reusing the
+	// cached zone/point and only replaying the MapAdvance+wait half of that sequence.
 	//
-	// 2-4s here, wider than the 1-2s used to find the target and send the FIRST march: a live
-	// 10M food delivery (3 marches needed) was kicked by the server with no error packet, no
-	// _MSG_LOGIN_LOGINERRORRESP, right after the SECOND march went out 1.971s after the first
-	// was accepted - looks like repeating the exact same short gap for consecutive marches to
-	// the same target gets flagged, even though that same gap is fine for the first one. Not
-	// confirmed as the fix (could still be a count-based heuristic rather than pure timing,
-	// which widening the delay would only push further out rather than remove) - the first
-	// march's own delay is left alone since it has never been the one observed failing.
+	// History: a live 10M food delivery (3 marches needed) was kicked by the server with no
+	// error packet, no _MSG_LOGIN_LOGINERRORRESP, right after the SECOND march - first with a
+	// 1-2s gap after the first march's accept, then again with a widened 2-4s gap (3.036s):
+	// same failure either way, which rules out pure timing as the cause. The one structural
+	// difference left between march 1 and every march after it was this missing RequestAllyPoint
+	// round-trip - worth trying before anything else, since nothing else in the sequence differs.
 	if (c->transfer.remaining > 0) {
-		RequestMapAdvance(c, c->transfer.zone_id, c->transfer.point_id);
 		c->transfer.not_before = now_ms() + 2000 + (rand() % 2000);
+		c->transfer.state = TRANSFER_FIND_TARGET;
+	} else {
+		c->transfer.state = TRANSFER_SEND_MARCH; // remaining == 0: let the tick complete it, no need to look anyone up again
 	}
-
-	c->transfer.state = TRANSFER_SEND_MARCH;
 }
 
 /* _MSG_RESP_RESHELPREPORTINFO (47 bytes), sent right after a delivery leaves. Confirmed on
@@ -6064,11 +6061,10 @@ void RecvHelp_Home(Connection *c, const uint8_t *data) {
 		// TRANSFER_SEND_MARCH, once the last march is accepted) - completing here as well is
 		// what notified twice.
 		if (c->transfer.remaining > 0) {
-			// Same pacing as after RecvSHelp (see its comment: widened to 2-4s after a live
-			// disconnect on the 2nd march of a multi-march delivery).
-			RequestMapAdvance(c, c->transfer.zone_id, c->transfer.point_id);
+			// Same as RecvSHelp: re-find the target before the next march instead of reusing
+			// the cached zone/point (see its comment for why).
 			c->transfer.not_before = now_ms() + 2000 + (rand() % 2000);
-			c->transfer.state = TRANSFER_SEND_MARCH;
+			c->transfer.state = TRANSFER_FIND_TARGET;
 		}
 
 		return;
