@@ -2015,14 +2015,27 @@ bool CanSpendResource(Connection *c, ResourceType type)
 	return false;
 }
 
-/* cargo_ship.use_bag_rss: use bag items to cover what a trade lacks. Returns true when items were used. */
+/* cargo_ship.use_bag_rss: use bag items to cover what a trade lacks. Returns true when items were used.
+ * Capped at BAG_TOPUP_MAX_ATTEMPTS per market refresh: BagApply's optimistic credit should make the
+ * trade affordable after one round, so repeated attempts without ever completing the purchase mean
+ * something is genuinely wrong (a reserve that can never be met, a stale market item...) - better to
+ * stop and leave the rest of the bag alone than to keep draining it, which is exactly what an earlier
+ * version of this code did before that credit existed (see BagApply's own comment). */
+#define BAG_TOPUP_MAX_ATTEMPTS 5
+
 static bool TopUpFromBag(Connection *c, const MarketItem *item)
 {
 	ResourceType type = (ResourceType)item->resource_kind;
-	
+
 	if (!c->market.settings.use_bag_rss)
 		return false;
-	
+
+	if (c->market.bag_topup_attempts >= BAG_TOPUP_MAX_ATTEMPTS) {
+		LOGW("[MARKET] Trop de tentatives de complément depuis le sac pour du %s sans conclure "
+			"l'échange, on arrête pour ce cycle\n", GetResourceName(type));
+		return false;
+	}
+
 	uint64_t have    = GetResourceAmount(c, type);
 	uint64_t reserve = 0;
 	
@@ -2046,7 +2059,8 @@ static bool TopUpFromBag(Connection *c, const MarketItem *item)
 		return false;
 	
 	LOGI("[MARKET] Using %d kind(s) of %s items from the bag to cover a trade\n", used, GetResourceName(type));
-	BagApply(c, plan, used);
+	BagApply(c, plan, used, type);
+	c->market.bag_topup_attempts++;
 	c->market_bag_wait = time(NULL) + 3;
 	
 	return true;
@@ -2152,8 +2166,10 @@ void RecvBlackMarket_Buy(Connection *c, const uint8_t *data) {
 	
 	uint8_t new_trade_status = read_u8(data + offset); offset++;
 	uint8_t changed = new_trade_status ^ c->market.trade_status;
-	
-	for (int i = 0; i < 4; i++) 
+
+	c->market.bag_topup_attempts = 0; // a purchase went through: give the next slot its attempts back
+
+	for (int i = 0; i < 4; i++)
 	{
 		if (((changed >> i) & 1) == 1) 
 		{
@@ -2196,6 +2212,7 @@ void RecvBlackMarket_Data(Connection *c, const uint8_t *data) {
 	c->market.refresh_time = read_u64(data + offset); offset += 8;
 	c->market.trade_locks  = read_i8( data + offset); offset += 1;
 	c->market.trade_status = read_u8( data + offset); offset += 1;
+	c->market.bag_topup_attempts = 0; // fresh market cycle: give use_bag_rss its attempts back
 	
 	for (int i = 0; i < 4; i++) {
 		c->market.items[i].item_id        = read_u16(data + offset);  offset += 2;
@@ -3112,7 +3129,14 @@ void UsePriorityShield(Connection *c)
 		}
 	}
 	
-	printf("[INFO] No shield items available.\n");
+	// Checked on every BotTick while a shield is wanted and none is active: without this,
+	// running out of shields prints this line as fast as the main loop spins (observed: about
+	// once a millisecond) instead of once every few minutes.
+	time_t now = time(NULL);
+	if (now - c->shield_info.no_item_logged_at >= 300) {
+		c->shield_info.no_item_logged_at = now;
+		printf("[INFO] No shield items available.\n");
+	}
 	return; // No shields available
 }
 
@@ -3144,7 +3168,12 @@ void UsePriorityAntiScout(Connection *c)
 		}
 	}
 
-	LOGD("[ANTISCOUT] No anti-scout items available.\n");
+	// Same throttling as UsePriorityShield's "no shield items available", same reason.
+	time_t now = time(NULL);
+	if (now - c->antiscout_info.no_item_logged_at >= 300) {
+		c->antiscout_info.no_item_logged_at = now;
+		LOGD("[ANTISCOUT] No anti-scout items available.\n");
+	}
 }
 
 /*
@@ -3841,11 +3870,52 @@ void WarTick(Connection *c) {
 
 /* ------------------------------------------------------------------------
  * Automatic gathering. See GatherSettings' comment (connection.h) for the
- * whole picture, including why there is no active map scan here (confirmed
- * live: the server does not answer _MSG_REQUEST_MAPDATA sent by this bot, so
- * RequestOpenUI/RequestMapData were removed the same way the war feature
- * removed its own attempt rather than leave dead/misleading code behind).
+ * whole picture and for why the request below is shaped the way it is.
  * ------------------------------------------------------------------------ */
+
+/* One zone, sent as the sole real entry of the 4 the wire format reserves -
+ * matches every real capture: total payload always 45 bytes (4 header + 45 =
+ * the captured 49-byte packet) whether count is 1, 2 or 4, count truthful,
+ * unused zone slots zero (never a repeat of the real one). */
+void RequestMapData(Connection *c, uint16_t zone_id) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_MAPDATA); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_u8(c->data + c->size, 1); c->size += 1;          // count: one real zone
+	write_u16(c->data + c->size, zone_id); c->size += 2;
+	write_zero(c->data + c->size, 6);  c->size += 6;       // 3 unused zone slots
+	write_zero(c->data + c->size, 32); c->size += 32;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/* zone_id of the tile `index` steps into the square scan rectangle around the
+ * castle (row-major, width columns per row). Same formula as MapPosToPointCode
+ * (map_point.c): zone = (x >> 5) + (y >> 4) * 16 - confirmed against several
+ * real MAPDATA requests (adjacent zones a capture batched together always
+ * differ by exactly 1 or 16). Returns false past the last tile in the
+ * rectangle (scan complete). */
+static bool GatherZoneAt(Connection *c, uint16_t index, uint16_t *zone_out) {
+	map_pos_t castle = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
+	int radius = c->gather.radius > 0 ? c->gather.radius : 30;
+
+	int x_min = castle.x > radius ? castle.x - radius : 0;
+	int x_max = castle.x + radius < 511 ? castle.x + radius : 511;
+	int y_min = castle.y > radius ? castle.y - radius : 0;
+	int y_max = castle.y + radius < 1023 ? castle.y + radius : 1023;
+
+	int xz_min = x_min >> 5, xz_max = x_max >> 5;
+	int yz_min = y_min >> 4, yz_max = y_max >> 4;
+	int width = xz_max - xz_min + 1;
+	int height = yz_max - yz_min + 1;
+
+	if (index >= (uint16_t)(width * height)) return false;
+
+	int xz = xz_min + (index % width);
+	int yz = yz_min + (index / width);
+	*zone_out = (uint16_t)(xz + yz * 16);
+	return true;
+}
 
 void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count) {
 	if (MarchesPaused()) {
@@ -3998,28 +4068,95 @@ static uint64_t GatherHumanDelay(void) {
 	return now_ms() + 1000 + (uint64_t)(rand() % 1000);
 }
 
+/* amount/GATHER_DEFAULT_TROOP_CAPACITY is only an experimental estimate (see its own comment) -
+ * live-tested, it asked for tens of millions of troops on a high-level tile, several orders of
+ * magnitude past what any account actually has. gather.max_troop_count (0 = no cap) is the
+ * admin's own known troop count, since the bot has no way to read it from the server; capping
+ * to it just gathers less per march rather than sending a request that can only be refused. */
+static uint32_t GatherTroopCount(const Connection *c, uint32_t amount) {
+	uint32_t count = (uint32_t)((double)amount / GATHER_DEFAULT_TROOP_CAPACITY) + 1;
+
+	if (c->gather.max_troop_count > 0 && count > c->gather.max_troop_count)
+		count = c->gather.max_troop_count;
+
+	return count;
+}
+
 void GatherTick(Connection *c) {
 	if (!c->gather.enabled) return;
 	if (c->player.max_marches == 0) return; // march data not loaded yet
 	if (MarchesPaused()) return;            // $recall: no march for a while
 
-	// Confirmed live, twice: the server never answers _MSG_REQUEST_MAPDATA sent by
-	// this bot (0 responses to 22, then 23, paced requests covering the right
-	// zones), unlike direct actions (marches, resources...) which all work. Same
-	// wall the war feature hit - see its own header comment. Tiles are therefore
-	// only ever known from whatever _MSG_RESP_UPDATE_MAPINFO(_PLUS) arrives on its
-	// own (e.g. a human opening the map on this account from time to time); there
-	// is no way, currently, to make this a true "no one has to touch anything" scan.
 	if (!c->gather.scan_done) {
-		c->gather.scan_done = true;
-		LOGW("[GATHER] Pas de scan actif (le serveur ne répond pas aux demandes du bot) : "
-			"seules les tuiles vues passivement seront récoltées\n");
+		if (now_ms() < c->gather.next_scan_at)
+			return;
+		c->gather.next_scan_at = GatherHumanDelay();
+
+		uint16_t zone;
+		if (GatherZoneAt(c, c->gather.scan_cursor, &zone)) {
+			RequestMapData(c, zone);
+			c->gather.scan_cursor++;
+		} else {
+			c->gather.scan_done = true;
+			LOGI("[GATHER] Scan terminé : %u tuile(s) trouvée(s) dans le rayon\n", c->gather.tile_count);
+		}
+		return;
 	}
 
 	time_t now = time(NULL);
 	if (now - c->gather.last_status_log >= 600) {
 		c->gather.last_status_log = now;
 		LOGI("[GATHER] %u tuile(s) connue(s) (reçues passivement)\n", c->gather.tile_count);
+	}
+
+	// A RequestMapAdvance was sent for this tile last tick: its human-pacing delay is the only
+	// thing left to wait out before the march itself goes out (see pending_tile's comment).
+	if (c->gather.pending_tile != GATHER_NO_PENDING_TILE) {
+		if (now_ms() < c->gather.march_send_at)
+			return;
+
+		GatherTile *t = &c->gather.tiles[c->gather.pending_tile];
+		uint32_t raw_count = GatherTroopCount(c, t->amount); // tile-formula estimate, capped to gather.max_troop_count if set
+
+		uint32_t count = raw_count;
+		uint32_t available = 0;
+		bool troop_capped = false;
+
+		// raw_count has no idea how many troops the account actually has free right now - it is
+		// purely the tile's stock divided by an unverified per-troop capacity constant, optionally
+		// capped by the admin's own known max_troop_count. c->troop.total minus troops_out (troops
+		// this code already committed to marches still out - see GatherSettings' comment) is a
+		// hard ceiling on top of that regardless of which tier/kind the server ends up drawing
+		// from (troop_type_id 0 = auto-pick - see RequestGatherMarch's comment).
+		if (c->troop.loaded) {
+			available = c->troop.total > c->gather.troops_out ? c->troop.total - c->gather.troops_out : 0;
+			if (available == 0) {
+				// Nothing free right now: this is our own shortage, not the tile's fault (unlike
+				// a server refusal) - free the tile and the march slot reserved for it in the
+				// target-picking step instead of burning both on a march that never goes out.
+				t->targeted = false;
+				if (c->gather.active_marches > 0) c->gather.active_marches--;
+				c->gather.pending_tile = GATHER_NO_PENDING_TILE;
+				return;
+			}
+			if (count > available) { count = available; troop_capped = true; }
+		}
+
+		RequestGatherMarch(c, t->zone_id, t->point_id, 0, count);
+		GatherQueuePush(c, count);
+		c->gather.pending_tile = GATHER_NO_PENDING_TILE;
+		c->gather.next_march_at = GatherHumanDelay(); // one march per delay, never several back to back
+
+		map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
+		if (troop_capped)
+			LOGI("[GATHER] Envoi de %u troupes (plafonne, %u demandees par le calcul) vers X:%u Y:%u "
+				"(niveau %u, %u en stock) - %u troupes libres sur %u au total\n",
+				count, raw_count, pos.x, pos.y, t->level, t->amount, available, c->troop.total);
+		else
+			LOGI("[GATHER] Envoi de %u troupes vers X:%u Y:%u (niveau %u, %u en stock)%s\n",
+				count, pos.x, pos.y, t->level, t->amount,
+				c->troop.loaded ? "" : " (troupes non chargees, aucun plafond applique)");
+		return;
 	}
 
 	uint8_t reserved = c->gather.max_marches < c->player.max_marches ? c->gather.max_marches : c->player.max_marches;
@@ -4040,40 +4177,15 @@ void GatherTick(Connection *c) {
 	GatherTile *t = GatherBestUntargeted(c);
 	if (!t) return;
 
-	uint32_t raw_count = (uint32_t)(t->amount / GATHER_DEFAULT_TROOP_CAPACITY) + 1;
-	uint32_t count = raw_count;
-	uint32_t available = 0;
-	bool troop_capped = false;
-
-	// raw_count above has no idea how many troops the account actually has free - it is purely
-	// the tile's own stock divided by an unverified per-troop capacity constant (see its
-	// comment). c->troop.total minus troops_out (troops this code already committed to
-	// marches still out - see GatherSettings' comment) is a hard ceiling regardless of that
-	// formula's accuracy or of which tier/kind the server ends up drawing from (troop_type_id
-	// 0 = auto-pick - see RequestGatherMarch's comment): asking for more than what is free is
-	// guaranteed to fail. This does not fix the formula, just stops requests that cannot
-	// possibly succeed.
-	if (c->troop.loaded) {
-		available = c->troop.total > c->gather.troops_out ? c->troop.total - c->gather.troops_out : 0;
-		if (available == 0) return; // nothing free right now - leave the tile untargeted, try again later
-		if (count > available) { count = available; troop_capped = true; }
-	}
-
 	t->targeted = true;
 	c->gather.active_marches++;
-	c->gather.next_march_at = GatherHumanDelay(); // one march per delay, never several back to back
-	GatherQueuePush(c, count);
-	RequestGatherMarch(c, t->zone_id, t->point_id, 0, count);
 
-	map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
-	if (troop_capped)
-		LOGI("[GATHER] Envoi de %u troupes (plafonne, %u demandees par le calcul) vers X:%u Y:%u "
-			"(niveau %u, %u en stock) - %u troupes libres sur %u au total\n",
-			count, raw_count, pos.x, pos.y, t->level, t->amount, available, c->troop.total);
-	else
-		LOGI("[GATHER] Envoi de %u troupes vers X:%u Y:%u (niveau %u, %u en stock)%s\n",
-			count, pos.x, pos.y, t->level, t->amount,
-			c->troop.loaded ? "" : " (troupes non chargees, aucun plafond applique)");
+	// Same fix a resource delivery already needed: sending the march for a point the client
+	// never "advanced" to this way got it refused (code 14) even with everything else right.
+	// Live-tested without this step, gather marches were refused outright (codes 2/6/12).
+	RequestMapAdvance(c, t->zone_id, t->point_id);
+	c->gather.pending_tile = (uint16_t)(t - c->gather.tiles);
+	c->gather.march_send_at = now_ms() + 1000 + (uint64_t)(rand() % 1000);
 }
 
 /* ------------------------------------------------------------------------
@@ -5772,8 +5884,12 @@ bool TransferQueueRemove(Connection *c, const char *requester)
 }
 
 /* Amount of a resource the bot may give away from its stock: what is above the reserve and, with a guild bank,
- * above what the members have deposited. */
-uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balance)
+ * above what the members have deposited. ignore_reserve ($adminall) still respects the deposits - those are
+ * never the bot's to give, migration or not - it only skips the reserve itself. ignore_deposits ($adminrss)
+ * is the other way round: the admin can dip into the members' deposits, only the reserve still holds it back.
+ * Meaningless with from_balance (a member's own deposit was never reserve- or deposit-guarded), so both are
+ * ignored in that case. */
+uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balance, bool ignore_reserve, bool ignore_deposits)
 {
 	uint32_t current = 0, reserve = 0;
 
@@ -5790,7 +5906,8 @@ uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balanc
 	if (from_balance)
 		kept = 0;                                    // a member takes their own money back: the reserve is not theirs to respect
 	else
-		kept = (uint64_t)reserve + (c->guildbank.enabled ? GuildBankTotal(type) : 0);   // the deposits are not the bot's to give
+		kept = (ignore_reserve ? 0 : (uint64_t)reserve) +
+			(ignore_deposits || !c->guildbank.enabled ? 0 : (uint64_t)GuildBankTotal(type));
 
 	return current > kept ? (uint32_t)(current - kept) : 0;
 }
@@ -5798,42 +5915,57 @@ uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balanc
 /* Starts the next waiting request once the delivery in progress is over. */
 static void StartNextTransfer(Connection *c)
 {
+	static const char *kind_names[] = {"nourriture", "pierre", "bois", "minerai", "or"};
+
 	while (c->transfer_queue_count > 0) {
 		TransferRequest r = c->transfer_queue[0];
 		memmove(&c->transfer_queue[0], &c->transfer_queue[1],
 			(size_t)(c->transfer_queue_count - 1) * sizeof(c->transfer_queue[0]));
 		c->transfer_queue_count--;
 
-		uint32_t available = StockAvailable(c, r.type, r.from_balance);
-		if (r.from_balance) {
-			uint64_t balance = GuildBankBalance(r.requester, r.type);
-			if (balance < available)
-				available = (uint32_t)balance;
+		// The stock or a balance may have changed while this request waited: check every
+		// resource of the batch ($adminrss/$rss can carry several) before starting any of it,
+		// so a delivery never starts on the resources it can honor and only then hits one it
+		// cannot, part way through.
+		bool ok = true;
+		for (uint8_t i = 0; i < r.line_count && ok; i++) {
+			ResourceType type = r.lines[i].type;
+			uint32_t available = StockAvailable(c, type, r.from_balance, r.ignore_reserve, r.ignore_deposits);
+			if (r.from_balance) {
+				uint64_t balance = GuildBankBalance(r.requester, type);
+				if (balance < available)
+					available = (uint32_t)balance;
+			}
+			if (r.lines[i].amount > available) {
+				char have[20];
+				format_number2(available, have, sizeof(have));
+				const char *label = (type <= RESOURCE_GOLD) ? kind_names[type] : "?";
+				BotReply(c, r.requester, "Livraison impossible",
+					"Votre demande ne peut plus être honorée (%s disponible pour %s), elle est annulée.",
+					have, label);
+				ok = false;
+			}
 		}
-
-		uint64_t not_before = 0;
-		if (r.amount > available) {
-			// the stock or the balance changed while it waited: tell them instead of sending less in silence
-			char have[20];
-			format_number2(available, have, sizeof(have));
-			BotReply(c, r.requester, "Livraison impossible",
-				"Votre demande ne peut plus être honorée (%s disponible), elle est annulée.", have);
+		if (!ok)
 			continue;
-		}
 
 		memset(&c->transfer, 0, sizeof(c->transfer));
-		c->transfer.amount = r.amount;
-		c->transfer.remaining = r.amount;
-		c->transfer.resource_type = r.type;
-		c->transfer.not_before = not_before;
+		memcpy(c->transfer.lines, r.lines, sizeof(r.lines));
+		c->transfer.line_count = r.line_count;
+		c->transfer.line_index = 0;
+		c->transfer.amount = r.lines[0].amount;
+		c->transfer.remaining = r.lines[0].amount;
+		c->transfer.resource_type = r.lines[0].type;
 		c->transfer.from_balance = r.from_balance;
+		c->transfer.ignore_reserve = r.ignore_reserve;
+		c->transfer.ignore_deposits = r.ignore_deposits;
 		snprintf(c->transfer.target_name, sizeof(c->transfer.target_name), "%s", r.target);
 		snprintf(c->transfer.issued_name, sizeof(c->transfer.issued_name), "%s", r.requester);
 		if (r.from_balance)
 			snprintf(c->transfer.balance_owner, sizeof(c->transfer.balance_owner), "%s", r.requester);
 		c->transfer.state = TRANSFER_FIND_TARGET;
-		LOGI("[BANK] Livraison de %u pour %s (destinataire %s), %u demande(s) encore en file\n",
-			r.amount, r.requester, r.target, c->transfer_queue_count);
+		LOGI("[BANK] Livraison de %u pour %s (destinataire %s, %u ressource(s)), %u demande(s) encore en file\n",
+			r.lines[0].amount, r.requester, r.target, r.line_count, c->transfer_queue_count);
 		return;
 	}
 }
@@ -5868,9 +6000,12 @@ uint32_t CalculateTransferAmount(Connection *c)
 			return 0;
 	}
 	
-	/* Keep reserved resources (and, with a guild bank, the members' deposits). */
+	/* Keep reserved resources (and, with a guild bank, the members' deposits) - unless this
+	 * delivery is $adminall's, which is allowed to dip into the reserve too, or $adminrss's,
+	 * which is allowed to dip into the deposits too. */
 	(void)reserve;
-	uint32_t available = StockAvailable(c, c->transfer.resource_type, c->transfer.from_balance);
+	uint32_t available = StockAvailable(c, c->transfer.resource_type, c->transfer.from_balance,
+		c->transfer.ignore_reserve, c->transfer.ignore_deposits);
 	if (available == 0 || current == 0)
 		return 0;
 
@@ -6046,6 +6181,24 @@ void ResourceTransferTick(Connection *c)
 						"Envoi terminé : %u de %s envoyés à %s, environ %llu reçus après la taxe de %.1f%%.",
 						c->transfer.amount, label, c->transfer.target_name, (unsigned long long)net, tax);
 			}
+
+			// $adminrss/$rss: more resources still to go to the same target - move to the next
+			// one instead of going idle. Re-finds the target first (TRANSFER_FIND_TARGET), same
+			// as between two marches of the same resource, for the same reason (see RecvSHelp's
+			// comment): nothing about switching resource should look different to the server
+			// than switching marches.
+			if (c->transfer.remaining == 0 && c->transfer.line_index + 1 < c->transfer.line_count) {
+				c->transfer.line_index++;
+				TransferLine next = c->transfer.lines[c->transfer.line_index];
+				c->transfer.resource_type = next.type;
+				c->transfer.amount = next.amount;
+				c->transfer.remaining = next.amount;
+				c->transfer.in_flight = 0;
+				c->transfer.not_before = now_ms() + 2000 + (rand() % 2000);
+				c->transfer.state = TRANSFER_FIND_TARGET;
+				break;
+			}
+
 			c->transfer.state = TRANSFER_IDLE;
 			break;
 		case TRANSFER_FAILED:
@@ -6131,16 +6284,22 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 	// c->transfer.cur_marches++;
 	c->player.current_marches++;
 
-	// Same "look at the target, then wait" pacing as the first march (see RequestMapAdvance's
-	// comment): without it, this march's accept response was arriving fast enough that the next
-	// one went out with no human delay at all - not_before alone did not fix it, since nothing
-	// here was setting it.
+	// Re-find the target before every next march, exactly like the FIRST one (RequestAllyPoint ->
+	// RecvAllyPoint sets zone/point + RequestMapAdvance + waits -> send), instead of reusing the
+	// cached zone/point and only replaying the MapAdvance+wait half of that sequence.
+	//
+	// History: a live 10M food delivery (3 marches needed) was kicked by the server with no
+	// error packet, no _MSG_LOGIN_LOGINERRORRESP, right after the SECOND march - first with a
+	// 1-2s gap after the first march's accept, then again with a widened 2-4s gap (3.036s):
+	// same failure either way, which rules out pure timing as the cause. The one structural
+	// difference left between march 1 and every march after it was this missing RequestAllyPoint
+	// round-trip - worth trying before anything else, since nothing else in the sequence differs.
 	if (c->transfer.remaining > 0) {
-		RequestMapAdvance(c, c->transfer.zone_id, c->transfer.point_id);
-		c->transfer.not_before = now_ms() + 1000 + (rand() % 1000);
+		c->transfer.not_before = now_ms() + 2000 + (rand() % 2000);
+		c->transfer.state = TRANSFER_FIND_TARGET;
+	} else {
+		c->transfer.state = TRANSFER_SEND_MARCH; // remaining == 0: let the tick complete it, no need to look anyone up again
 	}
-
-	c->transfer.state = TRANSFER_SEND_MARCH;
 }
 
 /* _MSG_RESP_RESHELPREPORTINFO (47 bytes), sent right after a delivery leaves. Confirmed on
@@ -6277,11 +6436,10 @@ void RecvHelp_Home(Connection *c, const uint8_t *data) {
 		// TRANSFER_SEND_MARCH, once the last march is accepted) - completing here as well is
 		// what notified twice.
 		if (c->transfer.remaining > 0) {
-			// Same pacing as after RecvSHelp: refresh "looking at the target" and wait
-			// before the next march.
-			RequestMapAdvance(c, c->transfer.zone_id, c->transfer.point_id);
-			c->transfer.not_before = now_ms() + 1000 + (rand() % 1000);
-			c->transfer.state = TRANSFER_SEND_MARCH;
+			// Same as RecvSHelp: re-find the target before the next march instead of reusing
+			// the cached zone/point (see its comment for why).
+			c->transfer.not_before = now_ms() + 2000 + (rand() % 2000);
+			c->transfer.state = TRANSFER_FIND_TARGET;
 		}
 
 		return;
@@ -6535,14 +6693,49 @@ int BagPlan(const Connection *c, ResourceType type, uint64_t need, BagUse out[BA
 	return written;
 }
 
-/* Uses the planned items. The server sends back the real quantities and the new resources. */
-void BagApply(Connection *c, const BagUse *plan, int count)
+/* _MSG_RESP_USEITEM (RecvUseItem) only ever updates the bag's own item count for a plain
+ * resource item - never c->resources.* - so callers that immediately re-check the stock
+ * (TopUpFromBag/CanAffordMarketItem) never see it move and retry forever, spending the whole
+ * bag a little at a time before giving up (only because the bag ran out, not because the
+ * trade succeeded - this is exactly what drained a 2B wood bag live). Credit the resource here
+ * instead, optimistically, from the known fixed value of each item (the same table BagPlan
+ * picked them from) - the next real RecvResources/RecvRefreshResources push overwrites it with
+ * the authoritative total anyway, so any drift here is short-lived. */
+static uint32_t SaturatingAddU32(uint32_t a, uint64_t b)
 {
+	uint64_t sum = (uint64_t)a + b;
+	return sum > UINT32_MAX ? UINT32_MAX : (uint32_t)sum;
+}
+
+static void AddResourceAmount(Connection *c, ResourceType type, uint64_t amount)
+{
+	switch (type) {
+		case RESOURCE_FOOD: c->resources.food = SaturatingAddU32(c->resources.food, amount); break;
+		case RESOURCE_ROCK: c->resources.rock = SaturatingAddU32(c->resources.rock, amount); break;
+		case RESOURCE_WOOD: c->resources.wood = SaturatingAddU32(c->resources.wood, amount); break;
+		case RESOURCE_ORE:  c->resources.ore  = SaturatingAddU32(c->resources.ore,  amount); break;
+		case RESOURCE_GOLD: c->resources.gold = SaturatingAddU32(c->resources.gold, amount); break;
+	}
+}
+
+/* Uses the planned items. The server sends back the real quantities and the new resources. */
+void BagApply(Connection *c, const BagUse *plan, int count, ResourceType type)
+{
+	int item_count;
+	const ResourceItem *items = ResourceItemsFor(type, &item_count);
+
 	for (int i = 0; i < count; i++) {
 		RequestSimpleUseItem(c, plan[i].item_id, plan[i].quantity);
 
 		if (c->items[plan[i].item_id].quantity >= plan[i].quantity)
 			c->items[plan[i].item_id].quantity -= plan[i].quantity;
+
+		for (int j = 0; j < item_count; j++) {
+			if (items[j].item_id == plan[i].item_id) {
+				AddResourceAmount(c, type, (uint64_t)plan[i].quantity * items[j].value);
+				break;
+			}
+		}
 	}
 }
 

@@ -84,6 +84,7 @@ static Connection *fresh(const char *admins)
 {
 	Connection *c = calloc(1, sizeof(*c));
 	c->sock = -1;
+	c->gather.pending_tile = GATHER_NO_PENDING_TILE;
 	c->bot.command_prefix = '$';
 	c->bot.command_input_mask = (1u << COMMAND_CHANNEL_GUILD) | (1u << COMMAND_CHANNEL_MAIL);
 	c->bot.command_output = COMMAND_CHANNEL_MAIL;
@@ -312,6 +313,40 @@ int main(void)
 	CHECK(c->transfer.state == TRANSFER_IDLE && useitem_count == 0 && replied("(or) : 3.00M disponible"), "bag too small: nothing is used, message counts the bag");
 	free(c);
 
+	/* ---- black market: use_bag_rss must not drain the whole bag ------
+	 * A live bug: RecvUseItem never credited c->resources.* for a plain resource item, so
+	 * CanAffordMarketItem never became true after a bag top-up - EvaluateBlackMarket kept
+	 * retrying every 3s (BlackMarketTick) and BagApply kept "topping up" the same unmet need,
+	 * spending a little more of the bag each time, until a 2B wood bag was fully emptied
+	 * without ever completing the trade. BagApply now credits the resource itself. */
+	{
+		c = fresh("boss");
+		c->market.loaded = true;
+		c->market.settings.auto_trade = true;
+		c->market.settings.use_bag_rss = true;
+		c->market.settings.spend_wood = true;
+		c->market.items[0].resource_kind = RESOURCE_WOOD;
+		c->market.items[0].resource_count = 5000000;
+		c->items[TIMBER_5M].quantity = 2; // 10M available, only 5M needed: must not use both
+
+		reset_sent();
+		EvaluateBlackMarket(c);
+		CHECK(find_packet(_MSG_REQUEST_BLACKMARKET_BUY) < 0 && c->market_bag_wait > 0,
+			"market: not affordable yet, tops up from the bag and waits instead of buying");
+		CHECK(c->resources.wood == 5000000 && c->items[TIMBER_5M].quantity == 1,
+			"market: BagApply credits the resource immediately, using only the one item needed");
+		CHECK(c->market.bag_topup_attempts == 1, "market: one top-up attempt recorded");
+
+		c->market_bag_wait = 0; // simulate BlackMarketTick's 3s wait having elapsed
+		reset_sent();
+		EvaluateBlackMarket(c);
+		CHECK(find_packet(_MSG_REQUEST_BLACKMARKET_BUY) >= 0 && c->market.buy_pending,
+			"market: now affordable, buys instead of topping up from the bag again");
+		CHECK(c->items[TIMBER_5M].quantity == 1 && c->market.bag_topup_attempts == 1,
+			"market: the trade completed without ever touching the second wood item");
+		free(c);
+	}
+
 	/* ---- delivery distance ------------------------------------------- */
 	{
 		map_pos_t home = { 100, 100 }, near_pos = { 105, 104 }, far_pos = { 400, 100 };
@@ -347,7 +382,11 @@ int main(void)
 		free(c);
 	}
 
-	/* ---- multi-march pacing: the 2nd+ march must wait too, not just the 1st ---------- */
+	/* ---- multi-march pacing: the 2nd+ march must wait too, not just the 1st ----------
+	 * Also re-finds the target (RequestAllyPoint) before every march after the first, instead of
+	 * reusing the cached zone/point - a live delivery was kicked by the server (no error packet)
+	 * right after the 2nd march every time, regardless of the gap between marches, and this was
+	 * the one structural difference left between the successful 1st march and every one after it. */
 	{
 		uint8_t shelp[72] = {0};
 		uint8_t home[21] = {0};
@@ -362,9 +401,9 @@ int main(void)
 		reset_sent();
 		/* shelp[0] = b = 0 (accepted), shelp[1] = b2 = 0 (marches count), rest unused by this test */
 		RecvSHelp(c, shelp);
-		CHECK(c->transfer.state == TRANSFER_SEND_MARCH && c->transfer.not_before > now_ms()
-			&& find_packet(_MSG_REQUEST_MAP_ADVANCE) >= 0,
-			"a march accepted (RecvSHelp) refreshes the target and waits before the next one");
+		CHECK(c->transfer.state == TRANSFER_FIND_TARGET && c->transfer.not_before > now_ms()
+			&& find_packet(_MSG_REQUEST_ALLYPOINT) < 0,
+			"a march accepted (RecvSHelp) waits, then re-finds the target before the next one (not sent yet: not_before has not elapsed)");
 
 		c->transfer.state = TRANSFER_WAIT_MARCH;
 		c->transfer.not_before = 0;
@@ -374,9 +413,15 @@ int main(void)
 		reset_sent();
 		/* home[0] = b = 0 (success), then food/rock/wood/ore/gold stocks (4 bytes each, unused here) */
 		RecvHelp_Home(c, home);
-		CHECK(c->transfer.state == TRANSFER_SEND_MARCH && c->transfer.not_before > now_ms()
-			&& find_packet(_MSG_REQUEST_MAP_ADVANCE) >= 0,
-			"a march returning home (RecvHelp_Home) also refreshes the target and waits");
+		CHECK(c->transfer.state == TRANSFER_FIND_TARGET && c->transfer.not_before > now_ms(),
+			"a march returning home (RecvHelp_Home) also waits, then re-finds the target");
+
+		/* once the wait is over, the tick re-sends RequestAllyPoint exactly like the first march did */
+		c->transfer.not_before = 0;
+		reset_sent();
+		ResourceTransferTick(c);
+		CHECK(c->transfer.state == TRANSFER_WAIT_TARGET && find_packet(_MSG_REQUEST_ALLYPOINT) >= 0,
+			"once the wait elapses, the next march looks the target up again, the same way the first one did");
 
 		free(c);
 	}
@@ -1319,6 +1364,7 @@ static const uint8_t build_event_none[] = {
 		c->recall.pause_seconds = 300;
 		c->gather.enabled = true;
 		c->gather.max_marches = 1;
+		c->gather.scan_done = true; // this test is about the march, not the zone scan
 		c->player.max_marches = 6;
 		c->player.current_marches = 0;
 		c->gather.tile_count = 1;
@@ -1331,7 +1377,11 @@ static const uint8_t build_event_none[] = {
 		MarchesPauseEnd();
 		c->gather.next_march_at = 1;
 		GatherTick(c);
-		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) >= 0, "recall: gathering goes on once the pause is over");
+		CHECK(find_packet(_MSG_REQUEST_MAP_ADVANCE) >= 0 && c->gather.pending_tile != GATHER_NO_PENDING_TILE,
+			"recall: gathering goes on once the pause is over (looks at the tile first)");
+		c->gather.march_send_at = 1; // skip the human-pacing wait between the look and the march
+		GatherTick(c);
+		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) >= 0, "recall: the march itself follows once the pacing delay is over");
 
 		/* the request builder refuses too */
 		MarchesPauseStart(300);
@@ -1478,6 +1528,80 @@ static const uint8_t build_event_none[] = {
 		MarchesPauseEnd(); /* leave no pause behind for whatever runs after */
 	}
 
+	/* Automatic gathering: the active zone scan (RequestMapData), byte-for-byte matched against
+	 * real captures - see GatherSettings' comment (connection.h). radius=1 around the castle's own
+	 * zone (100,100 -> zone 99) covers exactly that one zone, so the scan is a single request. */
+	{
+		map_pos_t home = { 100, 100 };
+		uint16_t hz; uint8_t hp;
+		MapPosToPointCode(home, &hz, &hp);
+
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.radius = 1;
+		c->player.zone_id = hz; c->player.point_id = hp;
+		c->player.max_marches = 6;
+		c->player.current_marches = 0;
+
+		reset_sent();
+		c->gather.next_scan_at = 0;
+		GatherTick(c);
+		int k = find_packet(_MSG_REQUEST_MAPDATA);
+		CHECK(k >= 0 && find_packet(_MSG_REQUEST_OPEN_UI) < 0,
+			"gather: scans with MAPDATA directly, no OPEN_UI needed first");
+		CHECK(sent_size[k] == 49, "gather: MAPDATA is the captured 49-byte shape regardless of zone count");
+		CHECK(sent[k][8] == 1, "gather: count is the true number of zones (1), never hardcoded to 4");
+		uint16_t sent_zone = (uint16_t)(sent[k][9] | (sent[k][10] << 8));
+		CHECK(sent_zone == 99, "gather: requests the castle's own zone (100,100 -> zone 99)");
+		bool rest_zero = true;
+		for (int i = 11; i < 49; i++) if (sent[k][i] != 0) rest_zero = false;
+		CHECK(rest_zero, "gather: unused zone slots and padding are zero, never a repeat of the real zone");
+		CHECK(c->gather.scan_cursor == 1 && !c->gather.scan_done, "gather: scan_cursor advances, scan not done yet");
+
+		reset_sent();
+		c->gather.next_scan_at = 0;
+		GatherTick(c);
+		CHECK(find_packet(_MSG_REQUEST_MAPDATA) < 0 && c->gather.scan_done,
+			"gather: nothing left in a radius-1 rectangle, scan ends after the one zone");
+		free(c);
+	}
+
+	/* Automatic gathering: sending a march. Live-tested, a level 13 tile with just over 1B in
+	 * stock made the uncapped amount/GATHER_DEFAULT_TROOP_CAPACITY formula ask for 44,193,237
+	 * troops - refused outright (nowhere near a real troop count). gather.max_troop_count caps
+	 * that. Also covers the two-step march (RequestMapAdvance, paced, then the march itself) on
+	 * a path that is not $recall's. */
+	{
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 1;
+		c->gather.scan_done = true;
+		c->gather.max_troop_count = 500000; // admin's real, known troop count
+		c->player.max_marches = 6;
+		c->player.current_marches = 0;
+		c->gather.tile_count = 1;
+		c->gather.tiles[0] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 2, .level = 13,
+			.amount = 1029702400 }; // the exact live figure that asked for 44,193,237 troops uncapped
+
+		reset_sent();
+		c->gather.next_march_at = 1;
+		GatherTick(c);
+		int adv = find_packet(_MSG_REQUEST_MAP_ADVANCE);
+		CHECK(adv >= 0 && find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) < 0 && c->gather.tiles[0].targeted,
+			"gather: looks at the tile and reserves it before sending anything else");
+		CHECK(c->gather.pending_tile == 0 && c->gather.march_send_at > now_ms(),
+			"gather: the march itself waits out a human-like pause first");
+
+		c->gather.march_send_at = 1;
+		GatherTick(c);
+		int m = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
+		CHECK(m >= 0 && c->gather.pending_tile == GATHER_NO_PENDING_TILE, "gather: the march follows, pending tile cleared");
+		uint32_t sent_troops = (uint32_t)sent[m][66] | ((uint32_t)sent[m][67] << 8)
+			| ((uint32_t)sent[m][68] << 16) | ((uint32_t)sent[m][69] << 24);
+		CHECK(sent_troops == 500000, "gather: troop count capped at gather.max_troop_count instead of the raw 44M+ formula result");
+		free(c);
+	}
+
 	/* Guild bank: members deposit by sending resources to the bot, the bot keeps a balance per player, the
 	 * resource commands take it back. The deposit below is a real delivery report received by an account
 	 * (Zyco sent it 925,000 stone), flag byte 13 = 1. */
@@ -1567,7 +1691,7 @@ static const uint8_t build_event_none[] = {
 		CHECK(c->transfer_queue_count == 0 && replied("vide"), "guild bank: an administrator takes back their own balance like everybody, not the stock");
 
 		say(c, "Zyco", "$stone 500k", COMMAND_CHANNEL_MAIL);
-		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].amount == 526316 && c->transfer_queue[0].from_balance,
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].lines[0].amount == 526316 && c->transfer_queue[0].from_balance,
 			"guild bank: 500k asked is 526,316 sent so that 500k arrives after the 5% tax");
 		ResourceTransferTick(c);
 		CHECK(c->transfer.state == TRANSFER_WAIT_TARGET && c->transfer.from_balance && strcmp(c->transfer.balance_owner, "Zyco") == 0,
@@ -1618,7 +1742,7 @@ static const uint8_t build_event_none[] = {
 
 		/* all: the whole balance, whatever the tax */
 		say(c, "Zyco", "$stone all", COMMAND_CHANNEL_MAIL);
-		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].amount == GuildBankBalance("Zyco", RESOURCE_ROCK),
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].lines[0].amount == GuildBankBalance("Zyco", RESOURCE_ROCK),
 			"guild bank: 'all' takes the whole balance");
 		TransferQueueRemove(c, "Zyco");
 
@@ -1689,6 +1813,180 @@ static const uint8_t build_event_none[] = {
 			"guild bank: a debit above the balance changes nothing, one within it works");
 		free(c);
 
+		GuildBankReset();
+		char cleanup[64];
+		snprintf(cleanup, sizeof(cleanup), "rm -rf %s", dir);
+		if (system(cleanup) != 0) { /* best effort */ }
+	}
+
+	/* $rss / $adminrss: several resources in one command, sent in priority order (gold, ore, wood,
+	 * stone, then food last) regardless of the order typed, 0 skips a resource. */
+	{
+		char dir[] = "/tmp/lmbot_rss_XXXXXX";
+		CHECK(mkdtemp(dir) != NULL, "rss: temporary folder");
+		GuildBankReset();
+		MarchesPauseEnd();
+
+		c = fresh("boss");
+		snprintf(c->bot.data_path, sizeof(c->bot.data_path), "%s/", dir);
+		c->guildbank.enabled = true;
+		c->server_time = 1000;
+		c->bank.delivery_tax_percent = 0.0;   /* keep the amounts round: tax math is covered elsewhere */
+		c->resources.food = c->resources.rock = c->resources.wood = c->resources.ore = c->resources.gold = 100000000;
+		const char *members[] = { "boss", "Bob" };
+		for (int i = 0; i < 2; i++)
+			snprintf(c->alliance_member.member[c->alliance_member.count++].name, 14, "%s", members[i]);
+		GuildBankCredit(c, "boss", RESOURCE_ROCK, 100);
+		GuildBankCredit(c, "boss", RESOURCE_ORE, 200);
+		GuildBankCredit(c, "boss", RESOURCE_GOLD, 300);
+
+		/* usage and "all zero" are both rejected without touching the queue */
+		reset_sent();
+		say(c, "boss", "$rss", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Usage"), "rss: no arguments at all is rejected with the usage");
+		reset_sent();
+		say(c, "boss", "$rss 0 0 0 0 0", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Rien à retirer"), "rss: every amount at 0 is rejected, nothing queued");
+
+		/* stone, ore and gold requested (in that typed order): sent gold first, then ore, then stone last - food and wood skipped */
+		reset_sent();
+		say(c, "boss", "$rss 0 100 0 200 300", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].line_count == 3
+			&& c->transfer_queue[0].lines[0].type == RESOURCE_GOLD && c->transfer_queue[0].lines[0].amount == 300
+			&& c->transfer_queue[0].lines[1].type == RESOURCE_ORE  && c->transfer_queue[0].lines[1].amount == 200
+			&& c->transfer_queue[0].lines[2].type == RESOURCE_ROCK && c->transfer_queue[0].lines[2].amount == 100,
+			"rss: queued in priority order (gold, ore, stone), not the order typed, food and wood skipped (0)");
+
+		ResourceTransferTick(c);
+		CHECK(c->transfer.line_count == 3 && c->transfer.line_index == 0
+			&& c->transfer.resource_type == RESOURCE_GOLD && c->transfer.amount == 300,
+			"rss: the delivery starts on the highest priority resource (gold)");
+
+		/* gold's delivery completes: line_index advances to ore instead of going idle */
+		c->transfer.zone_id = 1; c->transfer.point_id = 2; c->transfer.remaining = 0; c->transfer.state = TRANSFER_COMPLETE;
+		reset_sent();
+		ResourceTransferTick(c);
+		CHECK(c->transfer.state == TRANSFER_FIND_TARGET && c->transfer.line_index == 1
+			&& c->transfer.resource_type == RESOURCE_ORE && c->transfer.amount == 200 && c->transfer.not_before > now_ms(),
+			"rss: gold done, moves on to ore (re-finding the target) instead of completing the whole request");
+
+		/* ore's delivery completes too: advances to the last line (stone) */
+		c->transfer.remaining = 0; c->transfer.state = TRANSFER_COMPLETE;
+		ResourceTransferTick(c);
+		CHECK(c->transfer.state == TRANSFER_FIND_TARGET && c->transfer.line_index == 2
+			&& c->transfer.resource_type == RESOURCE_ROCK && c->transfer.amount == 100,
+			"rss: ore done, moves on to stone (the last line)");
+
+		/* stone's delivery completes: nothing left, goes idle this time */
+		c->transfer.remaining = 0; c->transfer.state = TRANSFER_COMPLETE;
+		ResourceTransferTick(c);
+		CHECK(c->transfer.state == TRANSFER_IDLE, "rss: stone done, nothing left in the batch: the delivery is over");
+		AbortTransfer(c);
+
+		/* insufficient balance on any one resource cancels the whole request, not just that resource */
+		reset_sent();
+		say(c, "boss", "$rss 0 0 0 0 1000000", COMMAND_CHANNEL_MAIL);   /* boss only has 300 gold deposited */
+		CHECK(c->transfer_queue_count == 0 && replied("insuffisant"), "rss: a single resource above the balance rejects the whole command");
+
+		/* "all", like the single-resource commands' own $gold all: the whole balance, no need to know the exact number */
+		reset_sent();
+		say(c, "boss", "$rss 0 0 0 0 all", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].line_count == 1
+			&& c->transfer_queue[0].lines[0].type == RESOURCE_GOLD && c->transfer_queue[0].lines[0].amount == 300,
+			"rss: \"all\" takes the whole balance of that resource (boss has 300 gold deposited)");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		/* $adminrss: same ordering, admin-only, from the bot's stock, name can hold spaces */
+		reset_sent();
+		say(c, "eve", "$adminrss 0 0 0 0 1M Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Seuls les administrateurs"), "adminrss: a stranger cannot use it");
+
+		reset_sent();
+		say(c, "boss", "$adminrss 0 50 0 0 0 Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].line_count == 1
+			&& c->transfer_queue[0].lines[0].type == RESOURCE_ROCK && c->transfer_queue[0].lines[0].amount == 50
+			&& !c->transfer_queue[0].from_balance && strcmp(c->transfer_queue[0].target, "Bob") == 0,
+			"adminrss: a single non-zero resource among five gives from the stock, never the balance");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		/* "all" here means everything the bot can give from its stock, not a balance - and unlike
+		 * $admin<ressource>, $adminrss is allowed to dip into the members' deposits, so "all" is
+		 * the whole stock, not the stock minus the 300 gold boss has deposited. */
+		reset_sent();
+		say(c, "boss", "$adminrss 0 0 0 0 all Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].line_count == 1
+			&& c->transfer_queue[0].lines[0].type == RESOURCE_GOLD && c->transfer_queue[0].lines[0].amount == 100000000
+			&& c->transfer_queue[0].ignore_deposits,
+			"adminrss: \"all\" takes the whole stock, deposits included (100,000,000, not minus the 300 boss deposited)");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		/* asking for more than the stock minus deposits still goes through - only the reserve, not
+		 * the deposits, can stop $adminrss */
+		reset_sent();
+		say(c, "boss", "$adminrss 0 0 0 0 200000000 Bob", COMMAND_CHANNEL_MAIL);   /* > the 100M in stock */
+		CHECK(c->transfer_queue_count == 0 && replied("Ressources insuffisantes"),
+			"adminrss: still rejected once the request exceeds the raw stock itself");
+		reset_sent();
+		say(c, "boss", "$adminrss 0 0 0 0 99999900 Bob", COMMAND_CHANNEL_MAIL);   /* > stock - 300 deposited, <= stock */
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].lines[0].amount == 99999900,
+			"adminrss: dips into the 300 gold members have deposited without being blocked");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		/* the reserve still holds $adminrss back, unlike the deposits */
+		c->bank.reserve.gold = 1000;
+		reset_sent();
+		say(c, "boss", "$adminrss 0 0 0 0 all Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].lines[0].amount == 100000000 - 1000,
+			"adminrss: \"all\" still respects the configured reserve (1000 gold kept back)");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+		c->bank.reserve.gold = 0;
+
+		snprintf(c->alliance_member.member[c->alliance_member.count++].name, 14, "%s", "Little Zyco");
+		reset_sent();
+		say(c, "boss", "$adminrss 0 0 0 0 100 Little Zyco", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && strcmp(c->transfer_queue[0].target, "Little Zyco") == 0,
+			"adminrss: the player name (after the five amounts) can hold spaces");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		/* $adminall: empties the stock (reserve included) into another player, deposits excepted -
+		 * boss still has 100/200/300 deposited (rock/ore/gold) from earlier in this block. */
+		c->bank.reserve.food = 5000000;
+		c->bank.reserve.gold = 1000;
+		reset_sent();
+		say(c, "eve", "$adminall Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Seuls les administrateurs"), "adminall: a stranger cannot use it");
+
+		reset_sent();
+		say(c, "boss", "$adminall Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].ignore_reserve && !c->transfer_queue[0].from_balance
+			&& strcmp(c->transfer_queue[0].target, "Bob") == 0 && c->transfer_queue[0].line_count == 5,
+			"adminall: queues every resource (all non-zero here), flagged to ignore the reserve");
+		CHECK(c->transfer_queue[0].lines[0].type == RESOURCE_GOLD && c->transfer_queue[0].lines[0].amount == 100000000 - 300,
+			"adminall: gold ignores its 1,000 reserve but still respects the 300 members deposited");
+		CHECK(c->transfer_queue[0].lines[4].type == RESOURCE_FOOD && c->transfer_queue[0].lines[4].amount == 100000000,
+			"adminall: food ignores its 5,000,000 reserve too, nobody deposited food so nothing else is subtracted");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		/* contrast: every other admin command still respects the reserve normally */
+		reset_sent();
+		say(c, "boss", "$adminfood Bob 100M", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Ressources insuffisantes"),
+			"adminall vs adminfood: adminfood still refuses to dip into the reserve, unlike adminall");
+
+		/* nothing left once the deposits are excepted */
+		c->resources.food = c->resources.rock = c->resources.wood = c->resources.ore = c->resources.gold = 0;
+		reset_sent();
+		say(c, "boss", "$adminall Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Rien à envoyer"), "adminall: nothing in stock, nothing queued");
+
+		free(c);
 		GuildBankReset();
 		char cleanup[64];
 		snprintf(cleanup, sizeof(cleanup), "rm -rf %s", dir);

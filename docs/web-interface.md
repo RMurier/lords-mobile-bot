@@ -7,10 +7,11 @@ read its logs. It needs only Python 3 (standard library, nothing to install).
 python3 webui/server.py        # Windows: webui.bat
 ```
 
-The server prints a link that contains a random access token and opens it in your
-browser. Use that link: the API refuses requests without the token. Bots you start
-from the console run as long as the server window stays open; closing it (Ctrl+C)
-stops them all.
+The server prints its address and opens it in your browser. There is no login or access
+token: anyone who can reach the port can read and change every account (the config files
+hold live credentials), so keep it on a machine only you use, or restrict network access
+to it some other way if it runs somewhere shared. Bots you start from the console run as
+long as the server window stays open; closing it (Ctrl+C) stops them all.
 
 Options: `--port 8765` (the next free port is used if it is busy), `--no-browser`.
 
@@ -125,13 +126,18 @@ The full history is in `logs/<name>.log` (rotated at 5 MB).
 
 Config files hold live session keys, so:
 
-- The server listens on `127.0.0.1` only, checks the `Host` header (protection against DNS
-  rebinding) and the `Origin` of writes, and requires the token on every API call.
-- The token travels in the URL fragment, which is never sent to the server or logged, and
-  is removed from the address bar.
-- **Do not expose it to a network or the internet** (reverse proxy, container port
-  mapping, tunnel). There is no user authentication behind the token, and it refuses
-  requests whose `Host` is not `localhost` anyway.
+- **There is no login or access token.** Anyone who can reach the console's port can read
+  and change every account. This is a deliberate choice (see `webui/server.py`'s docstring),
+  made for a single-user machine - it is not a login system with the auth stripped out for
+  convenience, there simply is none.
+- The server listens on `127.0.0.1` only by default (`--host`/`LMBOT_HOST` to change that,
+  e.g. `0.0.0.0` in the container image), and checks the `Host` header (protection against DNS
+  rebinding) and the `Origin` of writes (`LMBOT_ALLOWED_ORIGINS` for the addresses behind an
+  ingress/reverse proxy) regardless of that setting.
+- **Do not expose it to a network or the internet without restricting access some other
+  way** (firewall, private network, VPN, an ingress that itself requires auth...). The
+  `Host`/`Origin` checks above stop drive-by attacks from a browser tab open on something
+  else, not a deliberate visit to the console's own address.
 
 ## Files
 

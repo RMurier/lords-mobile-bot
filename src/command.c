@@ -48,6 +48,9 @@ static void ResourceCommandHandler(
 );
 static void BalanceCommand(Connection *c, const char *player_name, bool is_admin, const char *args);
 static void AdminResourceCommand(Connection *c, const char *player_name, bool is_admin, const char *args, ResourceType type);
+static void AdminRssCommand(Connection *c, const char *player_name, bool is_admin, const char *args);
+static void RssCommand(Connection *c, const char *player_name, const char *args);
+static void AdminAllCommand(Connection *c, const char *player_name, bool is_admin, const char *args);
 
 /* ------------------------------------------------------------------------
  * Replies: mail, alliance chat or world chat, depending on command.output
@@ -55,7 +58,9 @@ static void AdminResourceCommand(Connection *c, const char *player_name, bool is
 
 static void BotReplyV(Connection *c, const char *player_name, const char *subject, CommandChannel channel, const char *fmt, va_list args)
 {
-	char text[1024];
+	// 2048, not 1024: $help's text alone (ShowHelp's buffer, up to 1700) was getting silently
+	// truncated by vsnprintf here once $adminrss/$rss were added to it.
+	char text[2048];
 
 	vsnprintf(text, sizeof(text), fmt, args);
 
@@ -631,7 +636,7 @@ static bool IsCommand(const char *message, const char *name, const char **args)
 
 static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 {
-	char text[1400];
+	char text[1700];
 	char names[64] = {0};
 	char p = c->bot.command_prefix;
 	const char *first = "";
@@ -656,6 +661,8 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 
 	if (c->guildbank.enabled) {
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "%c<ressource> <montant>|all - retirer votre solde, ex. %cfood 1M\n", p, p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n,
+			"%crss <food> <stone> <wood> <ore> <gold> - retirer plusieurs ressources d'un coup (0 = aucune, all = tout), ex. %crss 0 0 0 0 5M\n", p, p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "%cbal - votre solde (les dépôts se font en envoyant des ressources au bot)\n", p);
 	}
 	n += (size_t)snprintf(text + n, sizeof(text) - n, "%cstop - annuler votre livraison en cours\n", p);
@@ -665,6 +672,10 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cbank bal [chat|mail] - solde de la banque, du sac et total", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <joueur>|remove <joueur> - gérer les administrateurs", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin<ressource> <joueur> <montant> - envoyer depuis le stock, ex. %cadminfood Bob 5M", p, p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n,
+			"\n%cadminrss <food> <stone> <wood> <ore> <gold> <joueur> - envoyer plusieurs ressources d'un coup (0 = aucune, all = tout), ex. %cadminrss 0 0 0 0 5M Bob", p, p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n,
+			"\n%cadminall <joueur> - vider le stock (réserve incluse) sur ce joueur, ex. %cadminall Bob (utile avant une migration)", p, p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crecall - rappeler toutes les troupes, aucune marche ensuite pendant un moment", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate <royaume> <x> <y> - migrer vers un autre royaume", p);
@@ -789,6 +800,21 @@ void command_handler(Connection *c, const char *player_name, const char *message
 
 	if (IsCommand(message, "bal", &args)) {
 		BalanceCommand(c, player_name, is_admin, args);
+		return;
+	}
+
+	if (IsCommand(message, "adminrss", &args)) {
+		AdminRssCommand(c, player_name, is_admin, args);
+		return;
+	}
+
+	if (IsCommand(message, "adminall", &args)) {
+		AdminAllCommand(c, player_name, is_admin, args);
+		return;
+	}
+
+	if (IsCommand(message, "rss", &args)) {
+		RssCommand(c, player_name, args);
 		return;
 	}
 
@@ -956,6 +982,50 @@ static uint64_t GrossUp(const Connection *c, uint64_t net)
 	return net;
 }
 
+/* $adminrss/$rss: one field of the command line. 0 means "skip this resource" (not an error).
+ * "all" (like the single-resource commands' own $gold all) means everything currently available
+ * for that resource - the requester's balance for $rss, the bot's stock for $adminrss. Otherwise
+ * a non-zero amount that overflows once grossed up is rejected. */
+static bool ParseGrossAmount(const Connection *c, const char *player_name, const char *str,
+	ResourceType type, bool from_balance, uint32_t *out)
+{
+	if (strcmp(str, "all") == 0) {
+		uint64_t gross = from_balance ? GuildBankBalance(player_name, type) : StockAvailable(c, type, false, false, true);
+		if (gross > UINT32_MAX)
+			return false;
+		*out = (uint32_t)gross;
+		return true;
+	}
+
+	uint64_t net = parse_number_u64(str);
+	if (net == 0) {
+		*out = 0;
+		return true;
+	}
+	uint64_t gross = GrossUp(c, net);
+	if (gross > UINT32_MAX)
+		return false;
+	*out = (uint32_t)gross;
+	return true;
+}
+
+/* $adminrss/$rss: orders the (already grossed up) amounts - gross[] indexed by ResourceType, same
+ * order as RESOURCE_COMMANDS/the command's own arguments (food, stone, wood, ore, gold) - into the
+ * priority the resources must leave in: gold, ore (minerai), wood (bois), stone (pierre), then food
+ * last (the one a recipient is least likely to be short on). Resources left at 0 are skipped.
+ * Returns how many lines were filled. */
+static uint8_t BuildPriorityLines(const uint32_t gross[5], TransferLine lines[TRANSFER_BATCH_MAX])
+{
+	static const ResourceType priority[5] = { RESOURCE_GOLD, RESOURCE_ORE, RESOURCE_WOOD, RESOURCE_ROCK, RESOURCE_FOOD };
+	uint8_t count = 0;
+	for (int i = 0; i < 5; i++) {
+		ResourceType type = priority[i];
+		if (gross[type] > 0)
+			lines[count++] = (TransferLine){ .type = type, .amount = gross[type] };
+	}
+	return count;
+}
+
 /* What arrives of a gross amount once the tax is taken off. */
 static uint64_t NetOf(const Connection *c, uint64_t gross)
 {
@@ -1063,7 +1133,7 @@ static void GuildWithdrawCommand(Connection *c, const char *player_name, const c
 		return;
 	}
 
-	uint32_t stock = StockAvailable(c, type, true);
+	uint32_t stock = StockAvailable(c, type, true, false, false);
 	if (gross > stock) {
 		char in_stock[32];
 		FormatExact(stock, in_stock, sizeof(in_stock));
@@ -1072,7 +1142,7 @@ static void GuildWithdrawCommand(Connection *c, const char *player_name, const c
 		return;
 	}
 
-	TransferRequest request = { .type = type, .amount = (uint32_t)gross, .from_balance = true };
+	TransferRequest request = { .lines = { { type, (uint32_t)gross } }, .line_count = 1, .from_balance = true };
 	snprintf(request.requester, sizeof(request.requester), "%s", player_name);
 	snprintf(request.target, sizeof(request.target), "%s", player_name);
 	QueueDelivery(c, &request, "Retrait");
@@ -1164,7 +1234,7 @@ static void AdminResourceCommand(Connection *c, const char *player_name, bool is
 			return;
 	}
 
-	uint32_t available = StockAvailable(c, type, false);
+	uint32_t available = StockAvailable(c, type, false, false, false);
 	if (gross > available) {
 		char have[32];
 		FormatExact(available, have, sizeof(have));
@@ -1173,9 +1243,214 @@ static void AdminResourceCommand(Connection *c, const char *player_name, bool is
 		return;
 	}
 
-	TransferRequest request = { .type = type, .amount = (uint32_t)gross, .from_balance = false };
+	TransferRequest request = { .lines = { { type, (uint32_t)gross } }, .line_count = 1, .from_balance = false };
 	snprintf(request.requester, sizeof(request.requester), "%s", player_name);
 	snprintf(request.target, sizeof(request.target), "%s", line);
+	QueueDelivery(c, &request, "Envoi");
+}
+
+/* $adminrss <food> <stone> <wood> <ore> <gold> <pseudo>: like $admin<ressource>, but sends up to
+ * five resources to the same player in one command - gives from the bot's stock, and unlike
+ * $admin<ressource> it is allowed to dip into the members' deposits: what the guild is short to
+ * reimburse everyone is not this command's problem, only an empty stock (below the reserve) blocks
+ * it. 0 skips a resource; they leave in priority order (BuildPriorityLines), not the order they are
+ * typed in. */
+static void AdminRssCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent envoyer des ressources à un autre joueur.");
+		return;
+	}
+	if (!DeliveryReady(c, player_name))
+		return;
+
+	char food_s[32], stone_s[32], wood_s[32], ore_s[32], gold_s[32];
+	int consumed = 0;
+	if (sscanf(args, " %31s %31s %31s %31s %31s%n", food_s, stone_s, wood_s, ore_s, gold_s, &consumed) != 5) {
+		BotReply(c, player_name, "Envoi",
+			"Usage : %cadminrss <food> <stone> <wood> <ore> <gold> <pseudo>, ex. %cadminrss 0 0 0 0 5M Bob (0 = rien, all = tout de cette ressource)",
+			c->bot.command_prefix, c->bot.command_prefix);
+		return;
+	}
+
+	char name[64];
+	snprintf(name, sizeof(name), "%s", args + consumed);
+	char *start = name;
+	while (*start == ' ') start++;
+	char *end = start + strlen(start);
+	while (end > start && end[-1] == ' ')
+		*--end = '\0';
+
+	if (strlen(start) == 0 || strlen(start) >= 13) {
+		BotReply(c, player_name, "Envoi", "Pseudo invalide (12 caractères au plus).");
+		return;
+	}
+
+	const char *fields[5] = { food_s, stone_s, wood_s, ore_s, gold_s };
+	uint32_t gross[5];
+	for (int i = 0; i < 5; i++) {
+		if (!ParseGrossAmount(c, player_name, fields[i], RESOURCE_COMMANDS[i].type, false, &gross[i])) {
+			BotReply(c, player_name, "Envoi", "Montant invalide : %s.", RESOURCE_COMMANDS[i].label);
+			return;
+		}
+	}
+
+	TransferLine lines[TRANSFER_BATCH_MAX];
+	uint8_t line_count = BuildPriorityLines(gross, lines);
+	if (line_count == 0) {
+		BotReply(c, player_name, "Envoi", "Rien à envoyer (tous les montants sont à 0).");
+		return;
+	}
+
+	if (c->guildbank.enabled) {
+		GuildBankLoad(c);
+		if (!GuildMemberOrReply(c, start, player_name, false))
+			return;
+	}
+
+	for (uint8_t i = 0; i < line_count; i++) {
+		uint32_t available = StockAvailable(c, lines[i].type, false, false, true);
+		if (lines[i].amount > available) {
+			char have[32];
+			FormatExact(available, have, sizeof(have));
+			BotReply(c, player_name, "Ressources insuffisantes",
+				"Ressources insuffisantes (%s) : %s disponible, sans toucher à la réserve.",
+				ResourceLabel(lines[i].type), have);
+			return;
+		}
+	}
+
+	TransferRequest request = { .line_count = line_count, .from_balance = false, .ignore_deposits = true };
+	memcpy(request.lines, lines, sizeof(lines));
+	snprintf(request.requester, sizeof(request.requester), "%s", player_name);
+	snprintf(request.target, sizeof(request.target), "%s", start);
+	QueueDelivery(c, &request, "Envoi");
+}
+
+/* $rss <food> <stone> <wood> <ore> <gold>: like $<ressource>, but withdraws up to five resources
+ * from the caller's own guild bank balance in one command. 0 skips a resource; they leave in
+ * priority order (BuildPriorityLines), not the order they are typed in. Guild bank only - without
+ * it there is no personal balance to withdraw from. */
+static void RssCommand(Connection *c, const char *player_name, const char *args)
+{
+	if (!c->guildbank.enabled) {
+		BotReply(c, player_name, "Indisponible", "Cette commande n'existe qu'avec la banque de guilde activée.");
+		return;
+	}
+
+	GuildBankLoad(c);
+	if (!GuildMemberOrReply(c, player_name, player_name, true))
+		return;
+	if (!DeliveryReady(c, player_name))
+		return;
+
+	char food_s[32], stone_s[32], wood_s[32], ore_s[32], gold_s[32];
+	if (sscanf(args, " %31s %31s %31s %31s %31s", food_s, stone_s, wood_s, ore_s, gold_s) != 5) {
+		BotReply(c, player_name, "Retrait",
+			"Usage : %crss <food> <stone> <wood> <ore> <gold>, ex. %crss 0 0 0 0 5M (0 = rien, all = tout de cette ressource)",
+			c->bot.command_prefix, c->bot.command_prefix);
+		return;
+	}
+
+	const char *fields[5] = { food_s, stone_s, wood_s, ore_s, gold_s };
+	uint32_t gross[5];
+	for (int i = 0; i < 5; i++) {
+		if (!ParseGrossAmount(c, player_name, fields[i], RESOURCE_COMMANDS[i].type, true, &gross[i])) {
+			BotReply(c, player_name, "Retrait", "Montant invalide : %s.", RESOURCE_COMMANDS[i].label);
+			return;
+		}
+	}
+
+	TransferLine lines[TRANSFER_BATCH_MAX];
+	uint8_t line_count = BuildPriorityLines(gross, lines);
+	if (line_count == 0) {
+		BotReply(c, player_name, "Retrait", "Rien à retirer (tous les montants sont à 0).");
+		return;
+	}
+
+	for (uint8_t i = 0; i < line_count; i++) {
+		ResourceType type = lines[i].type;
+		const char *label = ResourceLabel(type);
+		uint64_t balance = GuildBankBalance(player_name, type);
+
+		if (lines[i].amount > balance) {
+			char have[32], have_net[32];
+			FormatExact(balance, have, sizeof(have));
+			FormatExact(NetOf(c, balance), have_net, sizeof(have_net));
+			BotReply(c, player_name, "Solde insuffisant",
+				"Solde de %s insuffisant : %s, soit %s reçus après la taxe de %.1f%%.",
+				label, have, have_net, DeliveryTaxPercent(c));
+			return;
+		}
+
+		uint32_t stock = StockAvailable(c, type, true, false, false);
+		if (lines[i].amount > stock) {
+			char in_stock[32];
+			FormatExact(stock, in_stock, sizeof(in_stock));
+			BotReply(c, player_name, "Indisponible",
+				"La banque n'a actuellement que %s de %s en stock, moins que votre demande. Prévenez un administrateur.",
+				in_stock, label);
+			return;
+		}
+	}
+
+	TransferRequest request = { .line_count = line_count, .from_balance = true };
+	memcpy(request.lines, lines, sizeof(lines));
+	snprintf(request.requester, sizeof(request.requester), "%s", player_name);
+	snprintf(request.target, sizeof(request.target), "%s", player_name);
+	QueueDelivery(c, &request, "Retrait");
+}
+
+/* $adminall <pseudo>: empties the bank into another player - every resource currently available,
+ * in priority order (BuildPriorityLines), from the bot's stock. Meant for handing everything to
+ * another bot before a migration: unlike every other resource command, this one also sends what
+ * is normally kept as the reserve (bank.reserve.*) - there is no point keeping a reserve at a
+ * kingdom the account is about to leave. The guild members' deposits are never touched though,
+ * migration or not: StockAvailable(..., ignore_reserve=true) still subtracts those. */
+static void AdminAllCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent envoyer des ressources à un autre joueur.");
+		return;
+	}
+	if (!DeliveryReady(c, player_name))
+		return;
+
+	char name[64];
+	snprintf(name, sizeof(name), "%s", args);
+	char *start = name;
+	while (*start == ' ') start++;
+	char *end = start + strlen(start);
+	while (end > start && end[-1] == ' ')
+		*--end = '\0';
+
+	if (strlen(start) == 0 || strlen(start) >= 13) {
+		BotReply(c, player_name, "Envoi", "Usage : %cadminall <pseudo>, ex. %cadminall Bob",
+			c->bot.command_prefix, c->bot.command_prefix);
+		return;
+	}
+
+	if (c->guildbank.enabled) {
+		GuildBankLoad(c);
+		if (!GuildMemberOrReply(c, start, player_name, false))
+			return;
+	}
+
+	uint32_t gross[5];
+	for (size_t i = 0; i < RESOURCE_COMMAND_COUNT; i++)
+		gross[RESOURCE_COMMANDS[i].type] = StockAvailable(c, RESOURCE_COMMANDS[i].type, false, true, false);
+
+	TransferLine lines[TRANSFER_BATCH_MAX];
+	uint8_t line_count = BuildPriorityLines(gross, lines);
+	if (line_count == 0) {
+		BotReply(c, player_name, "Envoi", "Rien à envoyer : le stock est vide (dépôts des membres exceptés).");
+		return;
+	}
+
+	TransferRequest request = { .line_count = line_count, .from_balance = false, .ignore_reserve = true };
+	memcpy(request.lines, lines, sizeof(lines));
+	snprintf(request.requester, sizeof(request.requester), "%s", player_name);
+	snprintf(request.target, sizeof(request.target), "%s", start);
 	QueueDelivery(c, &request, "Envoi");
 }
 
@@ -1276,7 +1551,7 @@ static void ResourceCommandHandler(
 		int used = BankMayUseBag(c, type) ? BagPlan(c, type, amount - available, plan) : -1;
 
 		if (used > 0) {
-			BagApply(c, plan, used);
+			BagApply(c, plan, used, type);
 			not_before = now_ms() + 3000; // wait for the resources to be credited
 		} else {
 			char available_str[20];

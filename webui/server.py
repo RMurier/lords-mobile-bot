@@ -4,9 +4,11 @@ Web interface to configure and run the Lords Mobile bot.
 
     python3 webui/server.py            (Windows: webui.bat)
 
-Standard library only. The server listens on 127.0.0.1 and hands out a random
-access token in the URL it opens, because the configuration files contain live
-account credentials.
+Standard library only. No access token: the configuration files contain live account
+credentials, so anyone who can reach this server's port (127.0.0.1 by default, or the
+whole network if LMBOT_HOST is set to something else) can read and change every
+account. Restrict network access some other way (firewall, private network, VPN...)
+if this is not running on a single-user machine.
 
 Accounts are the `accounts/<name>.cfg` files. Every account has its own bot
 process and its own log file (`logs/<name>.log`), so adding accounts later only
@@ -19,7 +21,6 @@ import json
 import mimetypes
 import os
 import re
-import secrets
 import shutil
 import subprocess
 import sys
@@ -636,9 +637,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": "Erreur interne du serveur."})
 
     def _check_api(self, method):
-        supplied = self.headers.get("X-Token") or ""
-        if not secrets.compare_digest(supplied, self.server.token):
-            raise ApiError(401, "Jeton d'accès invalide. Rouvrez le lien affiché dans la console.")
         if method != "GET":
             origin = self.headers.get("Origin")
             allowed = {f"http://127.0.0.1:{self.server.server_address[1]}",
@@ -1262,14 +1260,10 @@ def main():
                         help="start the bots of these accounts as soon as the console is up (one after the other, "
                              "with the start delay of the settings)")
     parser.add_argument("--host", default=os.environ.get("LMBOT_HOST", "127.0.0.1"),
-                        help="address to listen on (default 127.0.0.1; 0.0.0.0 in a container, with LMBOT_TOKEN)")
+                        help="address to listen on (default 127.0.0.1; 0.0.0.0 in a container)")
     args = parser.parse_args()
 
     local = args.host in ("127.0.0.1", "localhost")
-    fixed_token = os.environ.get("LMBOT_TOKEN", "")
-    if not local and len(fixed_token) < 16:
-        sys.exit("[webui] Hors de cette machine, définissez LMBOT_TOKEN (16 caractères au moins) : "
-                 "sans lui le jeton change à chaque démarrage.")
 
     server = None
     for port in range(args.port, args.port + (10 if local else 1)):
@@ -1281,7 +1275,6 @@ def main():
     if server is None:
         sys.exit(f"Port {args.port} is already in use.")
 
-    server.token = fixed_token or secrets.token_urlsafe(24)
     print("Lords Mobile Bot - web interface", flush=True)
     print(f"Stockage : {store.describe()}", flush=True)
     if isinstance(store, storage.SqlStore):
@@ -1289,14 +1282,13 @@ def main():
         if imported:
             print(f"[webui] {imported} compte(s) importé(s) depuis les fichiers vers SQL Server", flush=True)
             settings.data.update(store.get_settings())
-    if fixed_token:
-        url = f"http://{'127.0.0.1' if local else args.host}:{server.server_address[1]}/"
-        print(f"Interface : {url} (jeton : celui de LMBOT_TOKEN, à passer dans l'adresse : #t=<jeton>)", flush=True)
-    else:
-        url = f"http://127.0.0.1:{server.server_address[1]}/#t={server.token}"
-        print(f"Open this link (it contains your access token, do not share it):\n\n    {url}\n", flush=True)
+    url = f"http://{'127.0.0.1' if local else args.host}:{server.server_address[1]}/"
+    print(f"Interface : {url}", flush=True)
+    if not local:
+        print("[webui] Aucune authentification : accessible à quiconque atteint ce port. "
+              "Restreignez l'accès au réseau autrement (pare-feu, réseau privé, VPN...) si besoin.", flush=True)
     print("Bots started from the interface run as long as this process runs. Ctrl+C stops everything.", flush=True)
-    if not args.no_browser and local and not fixed_token:
+    if not args.no_browser and local:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     threading.Thread(target=sync_loop, daemon=True).start()
     wanted = list(args.start)

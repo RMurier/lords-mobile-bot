@@ -8,7 +8,6 @@
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
   const S = {
-    token: null,
     schema: null,
     accounts: [],
     settings: {},
@@ -33,7 +32,7 @@
   // ------------------------------------------------------------------ api
 
   async function api(method, path, body) {
-    const options = { method, headers: { "X-Token": S.token || "" } };
+    const options = { method, headers: {} };
     if (body instanceof Blob) {
       options.body = body;
       options.headers["Content-Type"] = "application/octet-stream";
@@ -602,9 +601,9 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
           <div class="field"><label class="lbl" for="set-remote_url">Adresse de la console du serveur</label>
             <input type="text" id="set-remote_url" spellcheck="false" placeholder="https://bot.exemple.com" value="${esc(s.remote_url || "")}">
             <p class="error" id="set-remote_url-err" hidden></p></div>
-          <div class="field"><label class="lbl" for="set-remote_token">Jeton de la console du serveur</label>
-            <input type="password" id="set-remote_token" autocomplete="off" placeholder="${s.remote_token_set ? "Enregistré : laisser vide pour le garder" : "Collez le jeton"}">
-            <p class="help">Celui de l'adresse <span class="mono">…/#t=jeton</span> affichée par <span class="mono">deploy.sh status</span>.</p></div>
+          <div class="field"><label class="lbl" for="set-remote_token">Jeton de la console du serveur (optionnel)</label>
+            <input type="password" id="set-remote_token" autocomplete="off" placeholder="${s.remote_token_set ? "Enregistré : laisser vide pour le garder" : "Laissez vide si la console distante n'en demande pas"}">
+            <p class="help">La console n'a plus de jeton d'accès par défaut : ce champ ne sert que si la console distante est protégée autrement (proxy, etc.) et attend un en-tête <span class="mono">X-Token</span>.</p></div>
         </div>
       </section>
       <section class="card"><h3>Sauvegarde et transfert des comptes</h3>
@@ -1268,8 +1267,9 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
   function authProblem() {
     stopLogs();
     $("#app").innerHTML = `<main style="margin:10vh auto;max-width:520px;padding:24px"><div class="notice err">
-      <p><strong>Accès refusé.</strong></p>
-      <p>Ouvrez le lien affiché dans la fenêtre où le serveur a été lancé : il contient le jeton d'accès.</p></div></main>`;
+      <p><strong>Accès refusé (401).</strong></p>
+      <p>La requête a été bloquée par quelque chose entre le navigateur et la console (proxy, extension...) :
+      la console elle-même ne demande plus de jeton d'accès. Rechargez la page.</p></div></main>`;
   }
 
   const ACTIONS = {
@@ -1531,22 +1531,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
 
   // ------------------------------------------------------------------ boot
 
-  function initToken() {
-    const match = /[#&]t=([^&]+)/.exec(location.hash);
-    try {
-      if (match) {
-        sessionStorage.setItem("lmbot-token", match[1]);
-        history.replaceState(null, "", location.pathname);
-      }
-      S.token = sessionStorage.getItem("lmbot-token");
-    } catch (_) {
-      S.token = match ? match[1] : null;
-    }
-  }
-
   async function boot() {
-    initToken();
-    if (!S.token) return authProblem();
     renderShell();
     document.addEventListener("click", onClick);
     document.addEventListener("input", onInput);

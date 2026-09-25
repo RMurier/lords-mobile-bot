@@ -231,7 +231,7 @@ class SqlStore:
     persists_admins = True
     persists_bank = True
 
-    def __init__(self, host, port, user, password, database, runtime_dir, wait=120):
+    def __init__(self, host, port, user, password, database, runtime_dir, root, wait=120):
         try:
             import pymssql  # noqa: F401
         except ImportError:
@@ -239,6 +239,10 @@ class SqlStore:
         self.params = dict(server=host, port=str(port), user=user, password=password)
         self.database = database
         self.runtime = Path(runtime_dir)
+        # Where the bot process itself runs (Bots.start()'s cwd=ROOT in server.py): its .cfg's
+        # relative "data.path = ./data/<id>/" resolves from there, so prepare_start() must write
+        # to the same place, not to self.runtime (a different scratch subfolder).
+        self.root = Path(root)
         self.host, self.port = host, port
         self.lock = threading.RLock()
         self.conn = None
@@ -259,7 +263,8 @@ class SqlStore:
         return cls(host, int(os.environ.get("LMBOT_DB_PORT", "1433")),
                    os.environ.get("LMBOT_DB_USER", "sa"), password,
                    os.environ.get("LMBOT_DB_NAME", "lordsbot"),
-                   os.environ.get("LMBOT_RUNTIME_DIR") or Path(root) / "runtime")
+                   os.environ.get("LMBOT_RUNTIME_DIR") or Path(root) / "runtime",
+                   root)
 
     def describe(self):
         return f"SQL Server ({self.host}:{self.port}/{self.database})"
@@ -496,7 +501,7 @@ class SqlStore:
 
     def prepare_start(self, account_id):
         """Give the bot back what it kept in its data folder (administrators added in game, the guild bank)."""
-        folder = Path("data") / account_id
+        folder = self.root / "data" / account_id
         content = self.get_admins(account_id)
         if content is not None:
             folder.mkdir(parents=True, exist_ok=True)

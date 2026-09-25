@@ -128,6 +128,7 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size);
 void WarTick(Connection *c);
 void NotifyDiscord(Connection *c, const char *message);
 
+void RequestMapData(Connection *c, uint16_t zone_id);
 void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count);
 void RequestGatherRecall(Connection *c, uint32_t march_id);
 
@@ -154,7 +155,7 @@ void     AbortTransfer(Connection *c);
 bool     TransferQueuePush(Connection *c, const TransferRequest *request);
 int      TransferQueuePosition(const Connection *c, const char *requester);
 bool     TransferQueueRemove(Connection *c, const char *requester);
-uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balance);
+uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balance, bool ignore_reserve, bool ignore_deposits);
 void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size);
 void RecvGatheringEvent(Connection *c, const uint8_t *data, uint16_t size);
 void RecvGatherReturnResp(Connection *c, const uint8_t *data, uint16_t size);
@@ -240,7 +241,7 @@ typedef struct {
 
 uint64_t BagTotal(const Connection *c, ResourceType type);
 int  BagPlan(const Connection *c, ResourceType type, uint64_t need, BagUse out[BAG_PLAN_MAX]);
-void BagApply(Connection *c, const BagUse *plan, int count);
+void BagApply(Connection *c, const BagUse *plan, int count, ResourceType type);
 
 /* Answers a player through the configured command.output channel. Defined in command.c. */
 void BotReply(Connection *c, const char *player_name, const char *subject, const char *fmt, ...);

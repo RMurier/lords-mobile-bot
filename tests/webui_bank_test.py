@@ -33,7 +33,6 @@ import guild_bank as gb  # noqa: E402
 import server  # noqa: E402
 import store as storage  # noqa: E402
 
-TOKEN = "test-token-0123456789"
 ACCOUNT = "1001"
 
 
@@ -89,7 +88,7 @@ class Api:
     def call(self, method, path, body=None):
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(self.base + path, data=data, method=method,
-                                         headers={"X-Token": TOKEN, "Content-Type": "application/json"})
+                                         headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
                 return response.status, json.load(response)
@@ -193,13 +192,33 @@ class SqlStatements(unittest.TestCase):
         self.assertIn("Latin1_General_100_BIN2", text)
         self.assertIn("dbo.guild_bank_state", text)
 
+    def test_prepare_start_writes_where_the_bot_process_looks_not_the_cwd(self):
+        # Regression: prepare_start() used to build its folder from a bare relative "data" path,
+        # which resolved against the console process's current directory - read-only in the
+        # container image (readOnlyRootFilesystem) - instead of ROOT (self.root), which is what
+        # Bots.start() uses as the bot subprocess's cwd and what its .cfg's relative
+        # "data.path = ./data/<id>/" is read against. Confirmed live: this raised
+        # "OSError: [Errno 30] Read-only file system: 'data'" on every start with SQL Server storage.
+        store = self.make()
+        with tempfile.TemporaryDirectory() as scratch:
+            store.root = Path(scratch)
+            store.get_admins = lambda account_id: "boss\n"
+            store.get_bank = lambda account_id: {"activated": 1, "seen": [], "accounts": {"Bob": [1, 0, 0, 0, 0]}}
+            previous_cwd = os.getcwd()
+            os.chdir(tempfile.gettempdir())  # anywhere but under `scratch`
+            try:
+                store.prepare_start("1001")
+            finally:
+                os.chdir(previous_cwd)
+            self.assertEqual((Path(scratch) / "data" / "1001" / "admins.txt").read_text(encoding="utf-8"), "boss\n")
+            self.assertTrue((Path(scratch) / "data" / "1001" / "guild_bank.txt").is_file())
+
 
 class ConsoleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         make_account(ACCOUNT)
         cls.httpd = server.Server(("127.0.0.1", 0), server.Handler)
-        cls.httpd.token = TOKEN
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
         cls.api = Api(cls.httpd.server_address[1])
         cls.folder = ROOT / "data" / ACCOUNT
@@ -286,11 +305,12 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(state["accounts"], {})
         self.assertGreater(state["activated"], 1_700_000_000, "old deliveries must not come back after a reset")
 
-    def test_the_token_is_required(self):
+    def test_no_token_is_required(self):
+        # The console has no login of its own (see webui/server.py's docstring): a bare
+        # request, with no header at all, must be served rather than rejected.
         request = urllib.request.Request(self.api.base + f"/api/accounts/{ACCOUNT}/bank", method="GET")
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            urllib.request.urlopen(request, timeout=10)
-        self.assertEqual(caught.exception.code, 401)
+        with urllib.request.urlopen(request, timeout=10) as response:
+            self.assertEqual(response.status, 200)
 
     # ---- a running bot owns the file: the console queues requests and waits for it
 

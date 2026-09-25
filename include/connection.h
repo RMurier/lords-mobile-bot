@@ -126,6 +126,7 @@ typedef struct {
 	MarketItem items[4];
 	ResourceStock reserve;
 	MarketSettings settings;
+	uint8_t bag_topup_attempts; // safety net: stop retrying use_bag_rss top-ups after too many in a row
 } BlackMarket;
 
 typedef struct {
@@ -373,13 +374,18 @@ typedef struct {
     time_t last_online_gift_try;
 } ActivitySettings;
 
-/* Automatic resource-tile gathering. Tiles are known only from whatever
- * _MSG_RESP_UPDATE_MAPINFO(_PLUS) arrives on its own - live-tested twice, the
- * server never answers _MSG_REQUEST_MAPDATA sent by this bot (0 responses to 22,
- * then 23, correctly zoned and paced requests), unlike direct actions (marches,
- * resources...) which all work. Same wall the war feature hit; see its own header
- * comment. So, for now, this only gathers tiles a human happens to have shown the
- * account by opening the map - not a true hands-off scan.
+/* Automatic resource-tile gathering: scan the zones around the castle with
+ * _MSG_REQUEST_MAPDATA, one zone at a time. The first attempt at this (see git
+ * history) sent no active scan at all live: it always requested 4 zone slots,
+ * padding whichever it didn't have with a repeat of the first one - a shape
+ * that never appears in a real client's traffic (real captures always declare
+ * the true count - 1, 2 or 4 - and pad unused slots with zero, never a repeat).
+ * It also sent _MSG_REQUEST_OPEN_UI before scanning, on the assumption (from a
+ * single capture where the two happened to be close together) that it was a
+ * required precondition; a later capture shows the very first MAPDATA of a
+ * session going out - and answered - before any OPEN_UI at all, so it is not
+ * sent here. One zone per request is simpler to keep byte-identical to a real
+ * client than trying to reproduce its multi-zone batches.
  *
  * Sending a march to the best untargeted tile found (while a slot is free) uses
  * the game's own "low level first" auto troop selection (troop_type_id = 0 lets
@@ -432,14 +438,28 @@ typedef struct {
     char     requester[64];   // who is told when it is done
 } RecallState;
 
+#define GATHER_NO_PENDING_TILE 0xFFFF
+
 typedef struct {
     bool     enabled;
     uint8_t  max_marches;   // out of player.max_marches, how many to use for gathering
+    uint16_t radius;        // tiles around the castle to scan
+    uint32_t max_troop_count; // never send more troops than this in one gather march (0 = no cap)
 
-    bool     scan_done;     // just gates the one-time "no active scan" warning below
+    bool     scan_done;
+    uint16_t scan_cursor;   // index into the zone rectangle being swept
+    uint64_t next_scan_at;  // now_ms() deadline: do not send the next RequestMapData before this
 
     uint8_t  active_marches; // gather marches this code has out right now (subset of player.current_marches)
     uint64_t next_march_at;  // now_ms() deadline: do not send another gather march before this
+
+    /* Committed to a tile (targeted, slot reserved) but the march itself still waits: a
+     * RequestMapAdvance was just sent for it and, like a resource delivery, needs a human-like
+     * pause before the march - sending it in the same tick got resource deliveries refused
+     * (code 14) for a target never "looked at" this way; gather marches were refused outright
+     * (codes 2/6/12, live) without this step at all. */
+    uint16_t pending_tile;   // index into tiles[], or GATHER_NO_PENDING_TILE
+    uint64_t march_send_at;  // now_ms() deadline: send pending_tile's march no sooner than this
 
     /* c->troop.total is never adjusted when a march leaves or comes home, so capping to it
      * alone still lets the bot ask for troops that are already out on an earlier gather march.
@@ -689,6 +709,7 @@ typedef struct {
     bool loaded; // Have we received the buff list yet?
     bool pending;
     bool expiring_notified; // "about to run out, nothing to renew with" already sent - reset once active again with time to spare
+    time_t no_item_logged_at; // throttles "no item available" (UsePriorityShield/UsePriorityAntiScout): checked every BotTick, would spam otherwise
     uint16_t item_id;
     uint16_t quantity;
     uint64_t begin_time;
@@ -1023,30 +1044,53 @@ typedef struct {
     time_t   deadline;
 } Migration;
 
+/* One resource of a $adminrss/$rss batch: up to TRANSFER_BATCH_MAX resources sent one after another
+ * to the same target, in a fixed priority order (see BuildPriorityLines() in command.c) - gold first,
+ * food last, since food is the one the recipient is least likely to be short on. */
+#define TRANSFER_BATCH_MAX 5
+
+typedef struct {
+    ResourceType type;
+    uint32_t     amount;   // GROSS amount: the delivery tax is already added
+} TransferLine;
+
 typedef struct {
 	char issued_name[13]; // Who initiated resource command?
     char target_name[13]; // Who will receive resource?
 
     ResourceType resource_type;
     ResourceStock resource;
-    
+
     time_t timeout;
-    
+
     uint8_t max_marches;
     uint8_t cur_marches;
-    
+
     uint32_t amount;
     uint32_t remaining;
 
+    /* $adminrss/$rss: the resources still to come after this one. resource_type/amount/remaining
+     * above always describe lines[line_index], the one currently being delivered - single-resource
+     * commands ($food, $adminfood...) just set line_count = 1 and never touch line_index. */
+    TransferLine lines[TRANSFER_BATCH_MAX];
+    uint8_t      line_count;
+    uint8_t      line_index;
+
     uint16_t zone_id;
     uint8_t point_id;
-    
+
     uint64_t not_before; /* now_ms() deadline: do not start before this (bag credit wait, human pacing) */
 
     /* Guild bank (guildbank.h): the marches of a withdrawal are debited from balance_owner's balance as they leave. */
     bool     from_balance;
     char     balance_owner[13];
     uint32_t in_flight;      /* debited for a march sent but not accepted yet: given back if it is refused */
+
+    bool     ignore_reserve; /* $adminall: send everything, the configured reserve included - never set for from_balance (a
+                               * member's own deposit is never the bot's reserve to respect) or for anything else */
+
+    bool     ignore_deposits; /* $adminrss: the admin can dip into what members have deposited - only an empty stock
+                                * blocks it. Never set for from_balance or for $admin<resource>/$adminall. */
 
     TransferState state;
 } ResourceTransfer;
@@ -1055,9 +1099,11 @@ typedef struct {
 typedef struct {
     char         requester[13];  // who asked, told about the result
     char         target[13];     // who receives
-    ResourceType type;
-    uint32_t     amount;         // GROSS amount to send: the delivery tax is already added
+    TransferLine lines[TRANSFER_BATCH_MAX];
+    uint8_t      line_count;
     bool         from_balance;   // taken from the requester's guild balance, else from the stock
+    bool         ignore_reserve; // $adminall: see ResourceTransfer's own field
+    bool         ignore_deposits; // $adminrss: see ResourceTransfer's own field
 } TransferRequest;
 
 #define TRANSFER_QUEUE_MAX 16

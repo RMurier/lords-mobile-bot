@@ -273,16 +273,22 @@ CATEGORIES = [
         "id": "gather",
         "technical": True,      # experimental: troop count formula derived from a single capture
         "label": "Récolte automatique",
-        "description": "Envoie des marches de récolte sur les tuiles de ressources connues du bot. Le bot ne "
-                      "scanne pas la carte lui-même (le serveur ne répond pas à cette demande venant de lui) : "
-                      "il ne connaît que les tuiles vues passivement (par ex. si le compte ouvre la carte de temps "
-                      "en temps). Expérimental aussi côté troupes : la formule du nombre envoyé vient d'un seul "
+        "description": "Scanne les tuiles de ressources autour du château (une zone à la fois) et y envoie des "
+                      "marches de récolte. Expérimental : la formule du nombre de troupes vient d'un seul "
                       "échantillon capturé.",
         "fields": [
             _bool("gather.enabled", "Activer la récolte automatique"),
             {"key": "gather.max_marches", "label": "Marches réservées à la récolte", "type": "int",
              "min": 1, "max": 30, "default": "1", "depends": "gather.enabled",
              "help": "Sur le total de marches du compte, combien peuvent être utilisées pour la récolte en même temps."},
+            {"key": "gather.radius", "label": "Rayon de recherche", "type": "int", "min": 5, "max": 200,
+             "default": "30", "unit": "cases", "depends": "gather.enabled",
+             "help": "Distance autour du château dans laquelle chercher des tuiles de ressources."},
+            {"key": "gather.max_troop_count", "label": "Troupes max par marche", "type": "int",
+             "min": 0, "max": 10000000, "default": "0", "depends": "gather.enabled",
+             "help": "Plafonne le nombre de troupes envoyées en une marche de récolte à votre nombre de troupes "
+                     "réellement disponibles (0 = pas de plafond - déconseillé, la formule du nombre de troupes "
+                     "est expérimentale et peut largement dépasser ce que vous avez réellement pour une grosse tuile)."},
         ],
     },
     {
@@ -385,6 +391,15 @@ COMMANDS = [
                  "Un administrateur peut ajouter un pseudo pour voir le solde d'un autre joueur.",
                  "Sans banque de guilde activée, la commande est ignorée."],
      "example": "bal"},
+    {"group": "Banque de guilde", "name": "rss", "usage": "rss <food> <stone> <wood> <ore> <gold>",
+     "who": "Tous les membres",
+     "summary": "Comme la commande simple par ressource, mais retire plusieurs ressources de votre solde en une seule commande.",
+     "details": ["Les 5 montants sont dans cet ordre fixe ; 0 = ne rien retirer de cette ressource, all = tout le solde de "
+                 "cette ressource, ex. « rss 0 0 0 0 5M » ou « rss 0 0 0 0 all » pour de l'or seul.",
+                 "Envoyées dans un ordre de priorité fixe, pas l'ordre tapé : or, minerai, bois, pierre, puis nourriture en dernier.",
+                 "Chaque ressource part comme une livraison à part (une ou plusieurs marches), l'une après l'autre.",
+                 "Sans banque de guilde activée, la commande est ignorée."],
+     "example": "rss 0 0 0 0 all"},
     {"group": "Banque de guilde", "name": "adminresources", "usage": "admin<food|stone|wood|ore|gold> <pseudo> <montant>",
      "who": "Administrateurs",
      "summary": "Envoie des ressources depuis le stock du bot au joueur indiqué (adminfood, adminstone, adminwood, adminore, admingold).",
@@ -393,6 +408,23 @@ COMMANDS = [
                  "Avec la banque de guilde, le joueur doit être dans la guilde. Les messages d'erreur vont à l'administrateur.",
                  "Passe par la même file d'attente que les retraits. Les objets du sac ne sont pas utilisés."],
      "example": "adminfood Bob 5M"},
+    {"group": "Banque de guilde", "name": "adminrss", "usage": "adminrss <food> <stone> <wood> <ore> <gold> <pseudo>",
+     "who": "Administrateurs",
+     "summary": "Comme adminfood/adminstone/..., mais envoie plusieurs ressources depuis le stock du bot en une seule commande.",
+     "details": ["Les 5 montants sont dans cet ordre fixe, suivis du pseudo ; 0 = ne rien envoyer de cette ressource, "
+                 "all = tout ce que le stock permet de donner pour cette ressource.",
+                 "Envoyées dans un ordre de priorité fixe, pas l'ordre tapé : or, minerai, bois, pierre, puis nourriture en dernier.",
+                 "Le pseudo peut contenir des espaces.",
+                 "Le bot ne touche jamais à sa réserve ni aux dépôts des membres."],
+     "example": "adminrss 0 0 0 0 all Bob"},
+    {"group": "Banque de guilde", "name": "adminall", "usage": "adminall <pseudo>",
+     "who": "Administrateurs",
+     "summary": "Envoie tout ce qui est actuellement disponible à ce joueur, les cinq ressources d'un coup, même ordre de priorité que adminrss.",
+     "details": ["Contrairement à toutes les autres commandes de ressources, celle-ci envoie aussi la réserve configurée "
+                 "(bank.reserve.*) : utile pour vider complètement la banque dans un autre bot avant une migration.",
+                 "Les dépôts des membres de la guilde ne sont jamais touchés, migration ou non.",
+                 "Rien n'est envoyé si le stock (dépôts exceptés) est vide."],
+     "example": "adminall Bob"},
     {"group": "Administration", "name": "bank bal", "usage": "bank bal [chat|mail]", "who": "Administrateurs",
      "summary": "Répond avec le solde de la banque, du sac et le total de chaque ressource, dans le canal choisi par "
                 "« Sortie des commandes » (command.output).",

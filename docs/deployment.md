@@ -35,9 +35,13 @@ stays stopped. Set `LMBOT_AUTOSTART=0` to disable this.
 |---|---|
 | `LMBOT_DB_HOST`, `LMBOT_DB_PORT` (1433) | SQL Server; selects SQL Server storage |
 | `LMBOT_DB_USER` (`sa`), `LMBOT_DB_PASSWORD`, `LMBOT_DB_NAME` (`lordsbot`) | login and database |
-| `LMBOT_TOKEN` | access token, 16+ characters. **Required outside localhost.** Give it in the address: `https://host/#t=<token>` |
 | `LMBOT_HOST` | address to listen on (`0.0.0.0` in the image) |
 | `LMBOT_ALLOWED_ORIGINS` | public address(es) of the console, comma separated, needed behind an ingress |
+
+**No authentication.** The console has no access token or login of its own: anyone who can reach its port can read
+and change every account, including the access keys. This is fine on a single-user machine or behind a network
+already restricted some other way (firewall, private network, VPN, an ingress that itself requires auth...); it is
+not fine on an address reachable by anyone else.
 | `LMBOT_AUTOSTART` | `1` (default with SQL Server) restarts the bots that were running |
 | `LMBOT_CLIENT`, `LMBOT_UI_ROOT` | bot program (set in the image), scratch folder |
 
@@ -46,7 +50,7 @@ stays stopped. Set `LMBOT_AUTOSTART=0` to disable this.
 You can build the database on your PC with Docker (`docker compose up`, see below), load your accounts into it, and move
 it to the server as a SQL Server backup:
 
-1. On the PC: `docker compose up -d --build` (settings in a git-ignored `.env`: `MSSQL_SA_PASSWORD`, `LMBOT_TOKEN`).
+1. On the PC: `docker compose up -d --build` (settings in a git-ignored `.env`: `MSSQL_SA_PASSWORD`).
    The data lives in the Docker volume `lmbot_sqldata` and survives `docker compose down`.
 2. Load the accounts (*Paramètres → Restaurer une sauvegarde*, or the API), then make the backup file:
    `BACKUP DATABASE [lordsbot] TO DISK = ... WITH INIT, CHECKSUM, FORMAT` (Express edition does not allow COMPRESSION).
@@ -77,10 +81,10 @@ the computer that has the game. The bots run on the server. Two ways to bring th
 
 **1. Send from your PC's console (recommended).** Keep using the console on your PC (`webui.bat`), which has the
 automatic capture button. In *Paramètres → Serveur distant* give the address of the server's console
-(`https://bot.example.com`) and its token (`deploy/deploy.sh status` prints the address with `#t=<token>`). From then
-on, every capture made or imported on your PC is **sent to the server, which creates or refreshes the account**; the
-PC keeps nothing (the capture file is deleted, as usual). Do the capture when the key is about to expire (about every
-30 days) or after the account was logged in on another device.
+(`https://bot.example.com`); the token field can stay empty (the console no longer requires one - see "No
+authentication" above). From then on, every capture made or imported on your PC is **sent to the server, which
+creates or refreshes the account**; the PC keeps nothing (the capture file is deleted, as usual). Do the capture when
+the key is about to expire (about every 30 days) or after the account was logged in on another device.
 
 **2. Upload the file to the server's console.** Capture by hand (`docs/credentials.md`), open the server's console,
 *Ajouter un compte → Importer une capture réseau*, and choose the `.pcapng`.
@@ -92,9 +96,8 @@ The game and the bot cannot use the same account at the same time: opening the g
 
 ```bash
 export MSSQL_SA_PASSWORD='Chang3-me-Str0ng!'      # 12+ characters, upper, lower, digit, symbol
-export LMBOT_TOKEN="$(openssl rand -hex 24)"
 docker compose up --build
-# console: http://localhost:8765/#t=<the token>
+# console: http://localhost:8765/
 ```
 
 The data is in the `sqldata` volume: `docker compose down` keeps it, `docker compose down -v` erases it.
@@ -112,7 +115,7 @@ LMBOT_HOST=bot.example.com deploy/deploy.sh install
 ```
 
 Leave `LMBOT_HOST` empty if you have no domain name: no Ingress is created and you reach the console with
-`kubectl -n lmbot port-forward svc/lmbot 8765:80` (the `status` command prints the exact line, token included).
+`kubectl -n lmbot port-forward svc/lmbot 8765:80` (the `status` command prints the exact line).
 
 What protects your other workloads:
 
@@ -177,7 +180,7 @@ No `DEPLOY_HOST`/`DEPLOY_SSH_KEY`/etc. secrets are needed with this setup.
    ```bash
    kubectl create namespace lmbot
    kubectl -n lmbot create secret generic lmbot-secrets \
-     --from-literal=sa-password='Chang3-me-Str0ng!' --from-literal=token="$(openssl rand -hex 24)"
+     --from-literal=sa-password='Chang3-me-Str0ng!'
    ```
 
 3. **Address**: in `deploy/k8s/bot.yaml`, replace `lmbot.example.com` (the Ingress host and
@@ -190,8 +193,7 @@ No `DEPLOY_HOST`/`DEPLOY_SSH_KEY`/etc. secrets are needed with this setup.
    kubectl -n lmbot get pods -w
    ```
 
-   Open `https://<host>/#t=<the token>`. Read the token back with
-   `kubectl -n lmbot get secret lmbot-secrets -o jsonpath='{.data.token}' | base64 -d`.
+   Open `https://<host>/`.
 
 Points to know:
 
