@@ -3829,25 +3829,32 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 			// level 0 and a near-UINT32_MAX amount; skip it instead of tracking/overwriting a
 			// real tile with garbage - it would never be gatherable anyway.
 			if (level >= 1 && level <= 5 && amount > 0) {
-				bool is_new_tile = GatherFindTile(c, zone_id, point_id) == NULL;
 				GatherTile *t = GatherTrackTile(c, zone_id, point_id);
 				if (t) {
 					t->resource_kind = tag;
 					t->level  = level;
 					t->amount = amount;
 
-					// Temporary: dump the full 51-byte record (we only decode 3 fields of it)
-					// so a tile's raw bytes can be compared once its in-game occupied/free
-					// status is known - see docs/configuration.md's gather section. Remove once
-					// the occupancy field (if any) is confirmed and decoded properly.
-					if (is_new_tile) {
-						char hex[WAR_RECORD_SIZE * 2 + 1];
-						for (int b = 0; b < WAR_RECORD_SIZE; b++)
-							snprintf(hex + b * 2, 3, "%02x", data[pos + b]);
-						map_pos_t dbg_pos = getTileMapPosbyPointCode(zone_id, point_id);
-						LOGI("[GATHER-DEBUG] Tuile X:%u Y:%u zone=%u point=%u (niveau %u, %u en stock) - octets bruts : %s\n",
-							dbg_pos.x, dbg_pos.y, zone_id, point_id, level, amount, hex);
+					// Confirmed live: a tile currently being gathered by someone embeds that
+					// player's name (13 bytes) and alliance tag (3 bytes) at the exact offsets
+					// a WAR_RECORD_TAG player-point record uses (+4 and +17) instead of zeros -
+					// see GatherTile's comment. Checked and refreshed on every update, so this
+					// clears again once the occupier leaves - only logged on a real transition,
+					// not on every repeat push of an already-known state.
+					bool occupied = false;
+					for (int b = 0; b < 13; b++) {
+						if (data[pos + 4 + b] != 0) { occupied = true; break; }
 					}
+					if (occupied && !t->occupied) {
+						read_bytes((uint8_t*)t->occupied_by, data + pos + 4, 13);
+						t->occupied_by[12] = '\0';
+						map_pos_t mpos = getTileMapPosbyPointCode(zone_id, point_id);
+						LOGI("[GATHER] Tuile X:%u Y:%u desormais occupee par %s\n", mpos.x, mpos.y, t->occupied_by);
+					} else if (!occupied && t->occupied) {
+						map_pos_t mpos = getTileMapPosbyPointCode(zone_id, point_id);
+						LOGI("[GATHER] Tuile X:%u Y:%u desormais libre\n", mpos.x, mpos.y);
+					}
+					t->occupied = occupied;
 				}
 			}
 			matched++;
@@ -4100,6 +4107,7 @@ static GatherTile *GatherBestUntargeted(Connection *c) {
 	for (uint16_t i = 0; i < c->gather.tile_count; i++) {
 		GatherTile *t = &c->gather.tiles[i];
 		if (t->targeted) continue;
+		if (t->occupied) continue; // someone else is already gathering it - see GatherTile's comment
 		if (!best || t->level > best->level || (t->level == best->level && t->amount > best->amount))
 			best = t;
 	}

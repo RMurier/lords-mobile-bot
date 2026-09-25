@@ -424,6 +424,14 @@ typedef struct {
     uint8_t  resource_kind; // GatherResourceKind
     uint8_t  level;         // 1-5
     uint32_t amount;
+
+    /* Confirmed live: a tile currently occupied (someone gathering it) embeds that player's
+     * name (13 bytes) and alliance tag (3 bytes) at the exact offsets a WAR_RECORD_TAG
+     * player-point record uses (offset+4 and +17 - see RecvMapInfoPlus) instead of zeros. Not
+     * a separate flag - inferred from the name field being non-empty. Refreshed on every
+     * update for this tile, so it clears again once the occupier leaves. */
+    bool     occupied;
+    char     occupied_by[13];
 } GatherTile;
 
 /* $recall (command.c): every march is taken back, then the bot sends none for pause_seconds. The pause deadline

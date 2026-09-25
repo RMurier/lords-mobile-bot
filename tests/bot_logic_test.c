@@ -2311,6 +2311,66 @@ static const uint8_t first_2[] = {
 		free(c);
 	}
 
+	/* ---- gather: a tile with a player's name/tag embedded is occupied, never targeted ---- */
+	{
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 1;
+		c->gather.scan_done = true;
+		c->player.max_marches = 6;
+
+		// Two ORE tiles in one _MSG_RESP_UPDATE_MAPINFO_PLUS push: point 5 (level 4, higher -
+		// would normally win) has a name+tag embedded like a real capture showed for an
+		// occupied tile; point 6 (level 3, lower) has an all-zero name field, i.e. free.
+		uint8_t buf[3 + 51 * 2];
+		memset(buf, 0, sizeof(buf));
+		uint8_t *r0 = buf + 3;
+		r0[0] = 100; r0[1] = 0; r0[2] = 5; r0[3] = 3;
+		memcpy(r0 + 4, "Hentai Man", 10);
+		memcpy(r0 + 17, "TR4", 3);
+		r0[22] = 4;
+		r0[23] = 0x68; r0[24] = 0x6b; r0[25] = 0x0e; r0[26] = 0x00; // 945000
+
+		uint8_t *r1 = buf + 3 + 51;
+		r1[0] = 100; r1[1] = 0; r1[2] = 6; r1[3] = 3;
+		r1[22] = 3;
+		r1[23] = 0x80; r1[24] = 0xfc; r1[25] = 0x0a; r1[26] = 0x00; // 720000
+
+		RecvMapInfoPlus(c, buf, sizeof(buf));
+
+		bool found_occupied = false, found_free = false;
+		for (int i = 0; i < c->gather.tile_count; i++) {
+			GatherTile *t = &c->gather.tiles[i];
+			if (t->point_id == 5) {
+				found_occupied = true;
+				CHECK(t->occupied && strcmp(t->occupied_by, "Hentai Man") == 0,
+					"gather: a tile with a name embedded is marked occupied, name decoded");
+			}
+			if (t->point_id == 6) {
+				found_free = true;
+				CHECK(!t->occupied, "gather: a tile with an all-zero name field is not occupied");
+			}
+		}
+		CHECK(found_occupied && found_free, "gather: both tiles tracked from the map data push");
+
+		reset_sent();
+		c->gather.next_march_at = 1;
+		GatherTick(c);
+		int adv = find_packet(_MSG_REQUEST_MAP_ADVANCE);
+		CHECK(adv >= 0 && c->gather.pending_tile != GATHER_NO_PENDING_TILE
+			&& c->gather.tiles[c->gather.pending_tile].point_id == 6,
+			"gather: picks the free, lower-level tile over the occupied, higher-level one");
+
+		// the occupier leaves: a fresh push with the name zeroed clears the flag
+		memset(r0 + 4, 0, 13);
+		RecvMapInfoPlus(c, buf, sizeof(buf));
+		for (int i = 0; i < c->gather.tile_count; i++) {
+			if (c->gather.tiles[i].point_id == 5)
+				CHECK(!c->gather.tiles[i].occupied, "gather: a tile is freed again once its name field clears");
+		}
+		free(c);
+	}
+
 	printf("%s\n", failures ? "SOME TESTS FAILED" : "ALL BOT LOGIC TESTS PASSED");
 	return failures ? 1 : 0;
 }
