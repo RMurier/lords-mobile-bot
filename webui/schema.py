@@ -409,6 +409,14 @@ COMMANDS = [
                  "Le pseudo peut contenir des espaces.",
                  "Le bot ne touche jamais à sa réserve ni aux dépôts des membres."],
      "example": "adminrss 0 0 0 0 5M Bob"},
+    {"group": "Banque de guilde", "name": "adminall", "usage": "adminall <pseudo>",
+     "who": "Administrateurs",
+     "summary": "Envoie tout ce qui est actuellement disponible à ce joueur, les cinq ressources d'un coup, même ordre de priorité que adminrss.",
+     "details": ["Contrairement à toutes les autres commandes de ressources, celle-ci envoie aussi la réserve configurée "
+                 "(bank.reserve.*) : utile pour vider complètement la banque dans un autre bot avant une migration.",
+                 "Les dépôts des membres de la guilde ne sont jamais touchés, migration ou non.",
+                 "Rien n'est envoyé si le stock (dépôts exceptés) est vide."],
+     "example": "adminall Bob"},
     {"group": "Administration", "name": "bank bal", "usage": "bank bal [chat|mail]", "who": "Administrateurs",
      "summary": "Répond avec le solde de la banque, du sac et le total de chaque ressource, dans le canal choisi par "
                 "« Sortie des commandes » (command.output).",

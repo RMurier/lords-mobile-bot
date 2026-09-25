@@ -1724,6 +1724,38 @@ static const uint8_t build_event_none[] = {
 		AbortTransfer(c);
 		c->transfer_queue_count = 0;
 
+		/* $adminall: empties the stock (reserve included) into another player, deposits excepted -
+		 * boss still has 100/200/300 deposited (rock/ore/gold) from earlier in this block. */
+		c->bank.reserve.food = 5000000;
+		c->bank.reserve.gold = 1000;
+		reset_sent();
+		say(c, "eve", "$adminall Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Seuls les administrateurs"), "adminall: a stranger cannot use it");
+
+		reset_sent();
+		say(c, "boss", "$adminall Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].ignore_reserve && !c->transfer_queue[0].from_balance
+			&& strcmp(c->transfer_queue[0].target, "Bob") == 0 && c->transfer_queue[0].line_count == 5,
+			"adminall: queues every resource (all non-zero here), flagged to ignore the reserve");
+		CHECK(c->transfer_queue[0].lines[0].type == RESOURCE_GOLD && c->transfer_queue[0].lines[0].amount == 100000000 - 300,
+			"adminall: gold ignores its 1,000 reserve but still respects the 300 members deposited");
+		CHECK(c->transfer_queue[0].lines[4].type == RESOURCE_FOOD && c->transfer_queue[0].lines[4].amount == 100000000,
+			"adminall: food ignores its 5,000,000 reserve too, nobody deposited food so nothing else is subtracted");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		/* contrast: every other admin command still respects the reserve normally */
+		reset_sent();
+		say(c, "boss", "$adminfood Bob 100M", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Ressources insuffisantes"),
+			"adminall vs adminfood: adminfood still refuses to dip into the reserve, unlike adminall");
+
+		/* nothing left once the deposits are excepted */
+		c->resources.food = c->resources.rock = c->resources.wood = c->resources.ore = c->resources.gold = 0;
+		reset_sent();
+		say(c, "boss", "$adminall Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Rien à envoyer"), "adminall: nothing in stock, nothing queued");
+
 		free(c);
 		GuildBankReset();
 		char cleanup[64];

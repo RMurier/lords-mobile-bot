@@ -1009,6 +1009,9 @@ typedef struct {
     char     balance_owner[13];
     uint32_t in_flight;      /* debited for a march sent but not accepted yet: given back if it is refused */
 
+    bool     ignore_reserve; /* $adminall: send everything, the configured reserve included - never set for from_balance (a
+                               * member's own deposit is never the bot's reserve to respect) or for anything else */
+
     TransferState state;
 } ResourceTransfer;
 
@@ -1019,6 +1022,7 @@ typedef struct {
     TransferLine lines[TRANSFER_BATCH_MAX];
     uint8_t      line_count;
     bool         from_balance;   // taken from the requester's guild balance, else from the stock
+    bool         ignore_reserve; // $adminall: see ResourceTransfer's own field
 } TransferRequest;
 
 #define TRANSFER_QUEUE_MAX 16
