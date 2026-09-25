@@ -4474,8 +4474,10 @@ static uint32_t *TroopBucket(Connection *c, uint8_t kind, uint8_t tier) {
 // Shared by every "N troops of this kind/tier were added" packet below. Also the one place
 // that knows a kind's training building just freed up - see AutoTrainSettings' comment.
 static void TroopAdd(Connection *c, uint8_t kind, uint8_t tier, uint32_t amount) {
-	if (kind < 4)
+	if (kind < 4) {
 		c->autotrain.kind_busy[kind] = false;
+		c->training[kind].active = false;
+	}
 
 	// Only add on top of a real baseline: without one (c->troop never loaded from
 	// _MSG_RESP_ARMYGROUPINFO_), applying just this delta would show a small "total" that
@@ -4532,6 +4534,12 @@ void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size) {
 	uint8_t status = read_u8(data);
 	uint8_t kind = read_u8(data + 1);
 	if (kind >= 4) return;
+
+	if (status == 0 && size >= 7) {
+		c->training[kind].active = true;
+		c->training[kind].tier   = read_u8(data + 2);
+		c->training[kind].amount = read_u32(data + 3);
+	}
 
 	if (status != 0) {
 		c->autotrain.kind_busy[kind] = false;

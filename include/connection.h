@@ -756,6 +756,18 @@ typedef struct {
 	uint32_t t5_data[4];
 } TroopData;
 
+/* One per TroopKind: what _MSG_RESP_TRAINING_ (2408) last confirmed as accepted for that
+ * kind's building, regardless of who asked for it (this bot's autotrain or a human in game -
+ * RecvTrainingStart fires either way). No end time: the response's trailing bytes are not
+ * decoded (see RecvTrainingStart's comment), so this can say a training is running and what
+ * it is, not when it finishes. Cleared by TroopAdd, the same "a batch just completed" event
+ * used to credit c->troop and free AutoTrainSettings' kind_busy. */
+typedef struct {
+	bool     active;
+	uint8_t  tier;
+	uint32_t amount;
+} TrainingSlot;
+
 #define AUTOTRAIN_MAX_TARGETS 16
 #define AUTOTRAIN_REFUSAL_BACKOFF_MS       (60 * 1000)       // normal case: likely transient (resources, timing)
 #define AUTOTRAIN_HARD_BLOCK_THRESHOLD     5                 // this many refusals in a row -> stop assuming "transient"
@@ -1232,6 +1244,7 @@ typedef struct {
 	
 	TroopData troop;
 	AutoTrainSettings autotrain;
+	TrainingSlot training[4]; // indexed by TroopKind - see TrainingSlot's comment
 
 	WoundedTroopData wounded;
 	

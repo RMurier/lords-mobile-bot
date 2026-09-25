@@ -96,6 +96,30 @@ void StatusWrite(Connection *c, bool connected)
 		(unsigned long long)TroopSum(c->troop.infantry), (unsigned long long)TroopSum(c->troop.cavalry),
 		(unsigned long long)TroopSum(c->troop.ranged), (unsigned long long)TroopSum(c->troop.siege),
 		(unsigned long long)TroopSum(c->troop.t5_data));
+
+	// Per (kind, tier) breakdown - "troops" above only has kind-level sums, not enough to tell
+	// e.g. "plenty of troops overall but none of the tier gather/training actually needs".
+	{
+		static const char *kind_keys[4] = {"infantry", "ranged", "cavalry", "siege"};
+		const uint32_t *kind_tiers[4] = {c->troop.infantry, c->troop.ranged, c->troop.cavalry, c->troop.siege};
+		fprintf(f, "\"troops_by_tier\":{");
+		for (int k = 0; k < 4; k++) {
+			fprintf(f, "%s\"%s\":[%u,%u,%u,%u,%u]", k ? "," : "", kind_keys[k],
+				kind_tiers[k][0], kind_tiers[k][1], kind_tiers[k][2], kind_tiers[k][3], c->troop.t5_data[k]);
+		}
+		fprintf(f, "},");
+
+		// What each kind's building is training right now, regardless of whether autotrain or
+		// a human in game started it (see TrainingSlot's comment) - no ETA, see its comment.
+		fprintf(f, "\"training\":[");
+		for (int k = 0; k < 4; k++) {
+			TrainingSlot *t = &c->training[k];
+			fprintf(f, "%s{\"kind\":\"%s\",\"active\":%s,\"tier\":%u,\"amount\":%u}",
+				k ? "," : "", kind_keys[k], t->active ? "true" : "false", t->tier + 1, t->amount);
+		}
+		fprintf(f, "],");
+	}
+
 	fprintf(f, "\"wounded\":{\"loaded\":%s,\"total\":%u},",
 		c->wounded.loaded ? "true" : "false", c->wounded.troop.total);
 
