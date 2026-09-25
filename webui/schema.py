@@ -16,7 +16,6 @@ Field types:
     shields  ordered subset of SHIELDS
     names    comma separated in-game player names
     channels one or several of CHANNELS, comma separated
-    autotrain_steps  comma separated TIER:CAP entries for one troop kind, in priority order
 """
 
 import re
@@ -48,6 +47,7 @@ CHANNELS = [
 RESOURCES = [("food", "Nourriture"), ("rock", "Pierre"), ("wood", "Bois"), ("ore", "Minerai"), ("gold", "Or")]
 
 TROOP_TIERS = ["T1", "T2", "T3", "T4", "T5"]
+TROOP_KINDS_FR = [("infantry", "Infanterie"), ("ranged", "Distance"), ("cavalry", "Cavalerie"), ("siege", "Siège")]
 
 
 def _bool(key, label, help="", default=False, depends=None):
@@ -303,25 +303,14 @@ CATEGORIES = [
     {
         "id": "autotrain",
         "label": "Formation automatique",
-        "description": "Un objectif par palier, pour chacun des quatre types (infanterie, distance, cavalerie, "
-                      "siège - chacun sa propre file, en parallèle). Dans chaque ligne, les paliers sont traités "
-                      "dans l'ordre donné : le suivant démarre une fois le précédent à son objectif (ex : "
-                      "T2:10000000, T4:5000000 forme jusqu'à 10M de T2, puis 5M de T4 en plus).",
-        "fields": [
-            _bool("autotrain.enabled", "Activer la formation automatique"),
-            {"key": "autotrain.infantry", "label": "Infanterie", "type": "autotrain_steps",
-             "default": "", "optional": True, "depends": "autotrain.enabled",
-             "help": "PALIER:OBJECTIF séparés par des virgules, dans l'ordre. Ex : T2:10000000, T4:5000000. "
-                     "Vide = ne pas former ce type."},
-            {"key": "autotrain.ranged", "label": "Distance", "type": "autotrain_steps",
-             "default": "", "optional": True, "depends": "autotrain.enabled",
-             "help": "Ex : T2:12000000, T4:5000000. Vide = ne pas former ce type."},
-            {"key": "autotrain.cavalry", "label": "Cavalerie", "type": "autotrain_steps",
-             "default": "", "optional": True, "depends": "autotrain.enabled",
-             "help": "Ex : T2:10000000, T4:5000000. Vide = ne pas former ce type."},
-            {"key": "autotrain.siege", "label": "Siège", "type": "autotrain_steps",
-             "default": "", "optional": True, "depends": "autotrain.enabled",
-             "help": "Ex : T3:2000000. Vide = ne pas former ce type."},
+        "description": "Comme l'écran caserne/champ de tir/écurie/atelier du jeu : une case par palier, pour "
+                      "chacun des quatre types (chacun sa propre file, en parallèle). 0 ou vide = ne pas former "
+                      "cette case. Pour un même type, le palier le plus bas non atteint est toujours formé en "
+                      "premier (ex : T2 rempli avant que T4 démarre).",
+        "fields": [_bool("autotrain.enabled", "Activer la formation automatique")] + [
+            {"key": f"autotrain.{kind}_t{tier}", "label": f"T{tier}", "type": "size",
+             "default": "0", "depends": "autotrain.enabled", "group": label}
+            for kind, label in TROOP_KINDS_FR for tier in range(1, 6)
         ],
     },
     {
@@ -625,31 +614,6 @@ def validate(field, raw):
         if len(names) > 8:
             raise ValueError("Maximum 8 objets.")
         return ", ".join(names)
-
-    if kind == "autotrain_steps":
-        entries = [part.strip() for part in text.split(",") if part.strip()]
-        if not entries:
-            return ""  # this kind is simply not trained
-        if len(entries) > 5:
-            raise ValueError("Maximum 5 paliers (un par palier existant).")
-        seen = set()
-        normalised = []
-        for entry in entries:
-            parts = entry.split(":")
-            if len(parts) != 2:
-                raise ValueError(f"« {entry} » : format attendu PALIER:OBJECTIF (ex : T2:10000000).")
-            tier, cap = (p.strip().upper() for p in parts)
-            if tier not in TROOP_TIERS:
-                raise ValueError(f"« {tier} » : palier inconnu (T1 à T5).")
-            if tier in seen:
-                raise ValueError(f"« {tier} » : palier déjà utilisé dans cette ligne.")
-            if not re.fullmatch(r"\d+", cap):
-                raise ValueError(f"« {cap} » : l'objectif doit être un nombre entier positif.")
-            if int(cap) > _U32_MAX:
-                raise ValueError(f"« {cap} » : trop grand (maximum {_U32_MAX}).")
-            seen.add(tier)
-            normalised.append(f"{tier}:{int(cap)}")
-        return ", ".join(normalised)
 
     if kind == "names":
         names = []

@@ -786,6 +786,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     const rows = [];
     for (const k of autotrain.kinds || []) {
       for (const step of k.steps || []) {
+        if (!step.cap) continue; // target 0 = this (kind, tier) box is empty, nothing to show
         const pct = Math.min(100, (step.current / step.cap) * 100);
         const done = step.current >= step.cap;
         rows.push(`<div class="atrow"><span class="atlabel">${icon(k.kind, 18)} ${TROOP_KIND_LABELS[k.kind] || k.kind} T${step.tier}</span>

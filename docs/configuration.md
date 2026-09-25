@@ -506,22 +506,24 @@ both cap it, whichever is lower.
 
 ## Automatic Training
 
-Trains troops toward a target for each kind, one priority-ordered step at a time.
+One box per (kind, tier) pair, like the game's own barracks/range/stable/workshop screen: a 4x5 grid, 20 independent targets.
 
 ```cfg
 autotrain.enabled = false
-autotrain.infantry = T2:10000000, T4:5000000
-autotrain.ranged =
-autotrain.cavalry =
-autotrain.siege =
+autotrain.infantry_t2 = 10M
+autotrain.infantry_t4 = 5M
+autotrain.ranged_t2 = 12M
+autotrain.ranged_t4 = 5M
+autotrain.cavalry_t2 = 10M
+autotrain.cavalry_t4 = 5M
 ```
 
-Each of the four kinds (`infantry`, `ranged`, `cavalry`, `siege`) has its own building/queue and its own line: a comma-separated
-list of `TIER:CAP` steps (`T1`-`T5`), tried in the order given. A step is skipped once its own tier already holds that many troops,
-which moves on to that kind's next step (e.g. fill `T2` to 10M, then `T4` to 5M more). Leaving a line empty (or unset) means that
-kind is never auto-trained. A tier that keeps getting refused (e.g. the research for it is not done yet) backs off automatically
-instead of retrying every tick - a few times a minute at first, then once every 30 minutes if it still fails, without ever giving up
-on it for the session (the research could finish later).
+Key format: `autotrain.<kind>_t<1-5>` (`kind`: `infantry`, `ranged`, `cavalry`, `siege`). Each box is independent: 0 or unset means
+"do not train that exact (kind, tier) pair". Each of the four kinds has its own building/queue; within a kind, the lowest tier not
+yet at its own target is always trained first (e.g. `T2` fills before `T4` starts). Accepts a plain number or a `K`/`M`/`B` suffix
+(`10M` = 10000000), same as the bank/cargo ship reserve settings. A tier that keeps getting refused (e.g. the research for it is not
+done yet) backs off automatically instead of retrying every tick - a few times a minute at first, then once every 30 minutes if it
+still fails, without ever giving up on it for the session (the research could finish later).
 
 **Speeding up a training queue with items, cheaply:** research/observation from live play - use **one 50% reduction item first**,
 then fill the remainder of the timer with **25% items**. Using several 50% items back to back wastes more of each one's reduction

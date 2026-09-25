@@ -119,16 +119,16 @@ void StatusWrite(Connection *c, bool connected)
 		}
 		fprintf(f, "],");
 
-		// Autotrain's own view: per kind, each configured (tier, cap) step with that exact
-		// tier's current count - same numbers the per-type config lines are about.
+		// Autotrain's own view: per kind, each of the 5 tiers with its configured target and
+		// its current count - same numbers the per-type config grid is about. A tier with
+		// target 0 is still listed (the UI decides whether to show it).
 		fprintf(f, "\"autotrain\":{\"enabled\":%s,\"kinds\":[", c->autotrain.enabled ? "true" : "false");
 		for (int k = 0; k < 4; k++) {
 			fprintf(f, "%s{\"kind\":\"%s\",\"steps\":[", k ? "," : "", kind_keys[k]);
-			for (int i = 0; i < c->autotrain.step_count[k]; i++) {
-				AutoTrainStep *step = &c->autotrain.steps[k][i];
-				uint32_t current = step->tier <= TIER_T4 ? kind_tiers[k][step->tier] : c->troop.t5_data[k];
+			for (int tier = 0; tier <= TIER_T5; tier++) {
+				uint32_t current = tier <= TIER_T4 ? kind_tiers[k][tier] : c->troop.t5_data[k];
 				fprintf(f, "%s{\"tier\":%u,\"cap\":%u,\"current\":%u}",
-					i ? "," : "", step->tier + 1, step->cap, current);
+					tier ? "," : "", tier + 1, c->autotrain.target[k][tier], current);
 			}
 			fprintf(f, "]}");
 		}

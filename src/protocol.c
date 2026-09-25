@@ -2827,24 +2827,29 @@ void RecvAllianceGiftOpen(Connection *c, const uint8_t *data) {
 	*/
 	
 	uint32_t sn = read_u32(data + offset); offset += 4;
-	
+
 	printf("[OPENED] GIFT ID %u\n", sn);
-	
-	return;
-	
+
+	// This early return used to skip everything below unconditionally: an opened gift was
+	// never marked opened locally nor deleted server-side, so it kept counting toward
+	// TOTAL/UNOPENED forever (only a fresh RecvAllianceGiftInfo full refresh ever corrected
+	// UNOPENED, and TOTAL never shrank since the box itself was never deleted).
 	for (int i = 0; i < c->alliance.gift_count; i++) {
 		AllianceGift *gift = &c->alliance.gifts[i];
-		
+
 		if (gift->sn != sn)
             continue;
-            
+
+        if (gift->status == 0 && c->alliance.unopened_gift_count > 0)
+            c->alliance.unopened_gift_count--;
+
         gift->status = 0xFF;
 
         RequestDeleteAllianceGiftBox(c, 0xFFFFFFFF);
         c->alliance.gift_state = GIFT_STATE_DELETING;
         break;
 	}
-	
+
 }
 
 void RecvDeleteAllianceGiftBox(Connection *c, const uint8_t *data) {
@@ -3824,11 +3829,25 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 			// level 0 and a near-UINT32_MAX amount; skip it instead of tracking/overwriting a
 			// real tile with garbage - it would never be gatherable anyway.
 			if (level >= 1 && level <= 5 && amount > 0) {
+				bool is_new_tile = GatherFindTile(c, zone_id, point_id) == NULL;
 				GatherTile *t = GatherTrackTile(c, zone_id, point_id);
 				if (t) {
 					t->resource_kind = tag;
 					t->level  = level;
 					t->amount = amount;
+
+					// Temporary: dump the full 51-byte record (we only decode 3 fields of it)
+					// so a tile's raw bytes can be compared once its in-game occupied/free
+					// status is known - see docs/configuration.md's gather section. Remove once
+					// the occupancy field (if any) is confirmed and decoded properly.
+					if (is_new_tile) {
+						char hex[WAR_RECORD_SIZE * 2 + 1];
+						for (int b = 0; b < WAR_RECORD_SIZE; b++)
+							snprintf(hex + b * 2, 3, "%02x", data[pos + b]);
+						map_pos_t dbg_pos = getTileMapPosbyPointCode(zone_id, point_id);
+						LOGI("[GATHER-DEBUG] Tuile X:%u Y:%u zone=%u point=%u (niveau %u, %u en stock) - octets bruts : %s\n",
+							dbg_pos.x, dbg_pos.y, zone_id, point_id, level, amount, hex);
+					}
 				}
 			}
 			matched++;
@@ -4006,10 +4025,17 @@ void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size) {
 
 		if (++c->gather.consecutive_refusals >= GATHER_REFUSAL_WARN_THRESHOLD && !c->gather.refusal_warned) {
 			c->gather.refusal_warned = true;
-			LOGW("[GATHER] %u refus consécutifs sur des tuiles différentes : ce n'est pas "
-				"\"tuile déjà prise\" (improbable pour autant de tuiles distinctes), plus probablement "
-				"pas assez de troupes du tier attendu pour le nombre envoyé (voir le commentaire de "
-				"GATHER_DEFAULT_TROOP_CAPACITY dans connection.h)\n", c->gather.consecutive_refusals);
+			// Confirmed live (manual in-game check) that a run of refusals across different
+			// tiles CAN genuinely be "already taken" one after another - high-level tiles
+			// especially are contested most of the time, not a rare coincidence. If refusals
+			// persist even on lower-level tiles (much less likely to all be taken at once),
+			// a troop/tier mismatch (see gather.kind and GATHER_DEFAULT_TROOP_CAPACITY's
+			// comment in connection.h) is still worth checking, just not the default assumption.
+			LOGW("[GATHER] %u refus consécutifs sur des tuiles différentes : les tuiles de haut "
+				"niveau (5) sont très souvent déjà prises par quelqu'un d'autre, donc plausible en "
+				"soi ; si ça persiste aussi sur des tuiles de niveau plus bas, verifier gather.kind "
+				"et le commentaire de GATHER_DEFAULT_TROOP_CAPACITY dans connection.h\n",
+				c->gather.consecutive_refusals);
 		}
 		return;
 	}
@@ -4608,21 +4634,21 @@ void AutoTrainTick(Connection *c) {
 	for (uint8_t kind = 0; kind < 4; kind++) {
 		if (c->autotrain.kind_busy[kind]) continue; // already training something
 
-		for (uint8_t i = 0; i < c->autotrain.step_count[kind]; i++) {
-			AutoTrainStep *step = &c->autotrain.steps[kind][i];
-			if (step->tier > TIER_T5) continue;
-			if (now < c->autotrain.retry_at[kind][step->tier]) continue; // this step's tier is backed off - try the kind's next step
+		for (uint8_t tier = 0; tier <= TIER_T5; tier++) {
+			uint32_t target = c->autotrain.target[kind][tier];
+			if (target == 0) continue; // this exact (kind, tier) box is empty - not requested
+			if (now < c->autotrain.retry_at[kind][tier]) continue; // backed off - try the kind's next tier
 
-			uint32_t *bucket = TroopBucket(c, kind, step->tier);
+			uint32_t *bucket = TroopBucket(c, kind, tier);
 			uint32_t current = bucket ? *bucket : 0;
-			if (current >= step->cap) continue; // this step is already filled - move on to the kind's next one
+			if (current >= target) continue; // already at its target - move on to the kind's next tier
 
 			c->autotrain.kind_busy[kind] = true; // optimistic, mirrors gather's active_marches pattern
 			c->autotrain.next_action_at = GatherHumanDelay(); // one new order per tick, same pacing as gather
-			RequestTroopTraining(c, kind, step->tier, step->cap - current);
+			RequestTroopTraining(c, kind, tier, target - current);
 
 			LOGI("[AUTOTRAIN] Formation de %u troupes %s T%u (objectif %u)\n",
-				step->cap - current, AUTOTRAIN_KIND_NAMES[kind], step->tier + 1, step->cap);
+				target - current, AUTOTRAIN_KIND_NAMES[kind], tier + 1, target);
 			return;
 		}
 	}

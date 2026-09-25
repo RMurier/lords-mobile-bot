@@ -2221,10 +2221,8 @@ static const uint8_t first_2[] = {
 		c->troop.ranged[TIER_T2] = 1000;
 		c->troop.infantry[TIER_T2] = 500;
 		c->autotrain.enabled = true;
-		c->autotrain.step_count[TROOP_RANGED] = 1;
-		c->autotrain.steps[TROOP_RANGED][0] = (AutoTrainStep){ .tier = TIER_T2, .cap = 5000 };
-		c->autotrain.step_count[TROOP_INFANTRY] = 1;
-		c->autotrain.steps[TROOP_INFANTRY][0] = (AutoTrainStep){ .tier = TIER_T2, .cap = 2000 };
+		c->autotrain.target[TROOP_RANGED][TIER_T2] = 5000;
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 2000;
 		reset_sent();
 
 		// Both kinds need action; AutoTrainTick sends at most one order per call (like gather,
@@ -2267,49 +2265,48 @@ static const uint8_t first_2[] = {
 		free(c);
 	}
 
-	/* ---- autotrain: falls back to the next priority tier while the top one is backed off ---- */
+	/* ---- autotrain: moves on to the next unmet tier (ascending) while the lowest one is backed off ---- */
 	{
 		c = fresh("boss");
 		c->troop.loaded = true;
 		c->autotrain.enabled = true;
-		c->autotrain.step_count[TROOP_INFANTRY] = 2;
-		c->autotrain.steps[TROOP_INFANTRY][0] = (AutoTrainStep){ .tier = TIER_T4, .cap = 2000 };
-		c->autotrain.steps[TROOP_INFANTRY][1] = (AutoTrainStep){ .tier = TIER_T2, .cap = 2000 };
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 2000;
+		c->autotrain.target[TROOP_INFANTRY][TIER_T4] = 2000;
 		reset_sent();
 
 		AutoTrainTick(c);
 		int k = find_packet(_MSG_REQUEST_TRAINING_);
-		CHECK(k >= 0 && sent[k][9] == TIER_T4, "autotrain: tries the kind's first step first");
+		CHECK(k >= 0 && sent[k][9] == TIER_T2, "autotrain: tries the lowest unmet tier first (T2 before T4)");
 
-		// T4 refused (e.g. the research for it is not done) - reply carries kind/tier/amount now
-		uint8_t refuseT4[7] = { 2, TROOP_INFANTRY, TIER_T4, 0, 0, 0, 0 };
-		RecvTrainingStart(c, refuseT4, sizeof(refuseT4));
+		// T2 refused (e.g. a resource shortage) - reply carries kind/tier/amount now
+		uint8_t refuseT2[7] = { 2, TROOP_INFANTRY, TIER_T2, 0, 0, 0, 0 };
+		RecvTrainingStart(c, refuseT2, sizeof(refuseT2));
 		CHECK(!c->autotrain.kind_busy[TROOP_INFANTRY], "autotrain: a refusal frees the kind");
-		uint64_t short_backoff = c->autotrain.retry_at[TROOP_INFANTRY][TIER_T4];
+		uint64_t short_backoff = c->autotrain.retry_at[TROOP_INFANTRY][TIER_T2];
 		CHECK(short_backoff > 0 && short_backoff < now_ms() + 5 * 60 * 1000,
 			"autotrain: the first refusals on a tier use a short backoff (assumed transient)");
 
 		c->autotrain.next_action_at = 0;
 		reset_sent();
-		AutoTrainTick(c); // T4 backed off for this kind - T2 (the kind's next step) is not
+		AutoTrainTick(c); // T2 backed off for this kind - T4 (the next unmet tier) is not
 		k = find_packet(_MSG_REQUEST_TRAINING_);
-		CHECK(k >= 0 && sent[k][9] == TIER_T2,
-			"autotrain: moves on to the kind's next step while the first one is backed off");
+		CHECK(k >= 0 && sent[k][9] == TIER_T4,
+			"autotrain: moves on to the next unmet tier while the lowest one is backed off");
 
 		// a tier that is never going to succeed must not be hammered forever at the short
 		// backoff - after enough refusals in a row on that SAME tier, the backoff grows a lot,
-		// without ever giving up on it for the whole run (research could finish later)
+		// without ever giving up on it for the whole run (a shortage could resolve later)
 		for (int i = 0; i < AUTOTRAIN_HARD_BLOCK_THRESHOLD - 1; i++)
-			RecvTrainingStart(c, refuseT4, sizeof(refuseT4));
-		uint64_t long_backoff = c->autotrain.retry_at[TROOP_INFANTRY][TIER_T4];
+			RecvTrainingStart(c, refuseT2, sizeof(refuseT2));
+		uint64_t long_backoff = c->autotrain.retry_at[TROOP_INFANTRY][TIER_T2];
 		CHECK(long_backoff > now_ms() + 5 * 60 * 1000,
 			"autotrain: enough consecutive refusals on one tier switch to a long backoff for that tier");
 
-		// an accepted order on T4 resets ONLY T4's streak, so a later real transient refusal
+		// an accepted order on T2 resets ONLY T2's streak, so a later real transient refusal
 		// there is not immediately treated as another hard block
-		uint8_t acceptT4[7] = { 0, TROOP_INFANTRY, TIER_T4, 0, 0, 0, 0 };
-		RecvTrainingStart(c, acceptT4, sizeof(acceptT4));
-		CHECK(c->autotrain.consecutive_refusals[TROOP_INFANTRY][TIER_T4] == 0,
+		uint8_t acceptT2[7] = { 0, TROOP_INFANTRY, TIER_T2, 0, 0, 0, 0 };
+		RecvTrainingStart(c, acceptT2, sizeof(acceptT2));
+		CHECK(c->autotrain.consecutive_refusals[TROOP_INFANTRY][TIER_T2] == 0,
 			"autotrain: an accepted order resets that tier's refusal streak");
 		free(c);
 	}

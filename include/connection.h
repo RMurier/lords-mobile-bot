@@ -398,10 +398,11 @@ typedef struct {
  * escalating tiers - worth calibrating against real results. */
 #define GATHER_MAX_TILES 256
 #define GATHER_DEFAULT_TROOP_CAPACITY 23.3
-// A refusal on one tile could genuinely be that one tile; this many *consecutive*
-// refusals across (necessarily) different tiles cannot be explained by "this tile is
-// taken" and points instead at the march itself (most likely: not enough troops of
-// the tier GATHER_DEFAULT_TROOP_CAPACITY assumed available - see the comment above).
+// Was assumed to point at the march itself (troops) rather than "tile taken", on the theory
+// that many different tiles being simultaneously taken was unlikely - confirmed wrong live for
+// high-level tiles specifically (manually checked: contested most of the time). Still worth a
+// warning past this many consecutive refusals, just without assuming which cause it is - see
+// the warning text in RecvGatherMarchResp.
 #define GATHER_REFUSAL_WARN_THRESHOLD 5
 // Upper bound on gather marches ever in flight at once (player.max_marches is a uint8_t in
 // practice well under this with any realistic VIP/buff level) - sizes the FIFO queue below.
@@ -777,31 +778,23 @@ typedef struct {
 // landing) - so keep retrying, just rarely.
 #define AUTOTRAIN_HARD_BLOCK_BACKOFF_MS    (30 * 60 * 1000)
 
-#define AUTOTRAIN_MAX_STEPS_PER_KIND 5
-
-typedef struct {
-	uint8_t  tier; // TIER_T1..TIER_T5
-	uint32_t cap;  // train this exact (kind, tier) up to this count
-} AutoTrainStep;
-
-/* One priority-ordered list of (tier, cap) steps PER kind (infantry, ranged, cavalry, siege -
- * each its own building/queue). E.g. infantry = [T2 up to 10M, T4 up to 5M]: fills T2 to 10M
- * first, then - once T2 is at 10M - moves on to T4, training it up to 5M more. A step is
- * skipped once its own tier already holds that many (c->troop.loaded required), which naturally
- * advances to the kind's next step without extra bookkeeping.
+/* Modeled directly on the game's own barracks/range/stable/workshop screen: one box per (kind,
+ * tier) pair - a fixed 4x5 grid (infantry/ranged/cavalry/siege x T1-T5), each an independent
+ * target; 0 = do not train that exact pair. For a given kind, AutoTrainTick always tries the
+ * lowest tier that is not yet at its own target and not backed off, in T1..T5 order - e.g.
+ * infantry T2=10M, T4=5M fills T2 to 10M first, then - once T2 is there - moves on to T4.
  *
  * Each of the 4 kinds trains through its own building and, as far as anything captured so far
  * shows, only ever has one order in flight at a time - see RecvTrainingStart's comment - hence
  * one busy flag per kind. Backoff after a refusal is indexed [kind][tier]: a refusal on one
  * tier of a kind (e.g. T4 locked by research) must not block a different, already-unlocked
- * tier of the same kind (e.g. T2) - AutoTrainTick's step loop naturally moves past a backed-off
- * step to the kind's next one, and naturally retries the earlier one again once its own backoff
+ * tier of the same kind (e.g. T2) - AutoTrainTick's loop naturally moves past a backed-off tier
+ * to the kind's next one, and naturally retries the earlier one again once its own backoff
  * expires. */
 typedef struct {
 	bool enabled;
 
-	AutoTrainStep steps[4][AUTOTRAIN_MAX_STEPS_PER_KIND]; // indexed by TroopKind
-	uint8_t       step_count[4];
+	uint32_t target[4][5];                       // [kind][tier]; 0 = do not train that pair
 
 	bool     kind_busy[4];                       // indexed by TroopKind
 	uint64_t retry_at[4][5];                     // [kind][tier] now_ms() backoff after a refusal

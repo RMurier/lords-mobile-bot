@@ -249,64 +249,14 @@ static bool ParseTroopKind(const char *s, uint8_t *out)
     return false;
 }
 
-static bool ParseTroopTier(const char *s, uint8_t *out)
+uint64_t parse_number_u64(const char *str); // command.c - accepts a plain number or one with a K/M/B suffix
+
+/* One box of the 4x5 grid (see AutoTrainSettings' comment): autotrain.<kind>_t<N> = target,
+ * accepts K/M/B suffixes like the bank/cargo_ship reserve settings (e.g. 10M). */
+static void SetAutoTrainTarget(Connection *c, uint8_t kind, uint8_t tier, const char *value)
 {
-    if (strcmp(s, "T1") == 0) { *out = TIER_T1; return true; }
-    if (strcmp(s, "T2") == 0) { *out = TIER_T2; return true; }
-    if (strcmp(s, "T3") == 0) { *out = TIER_T3; return true; }
-    if (strcmp(s, "T4") == 0) { *out = TIER_T4; return true; }
-    if (strcmp(s, "T5") == 0) { *out = TIER_T5; return true; }
-    return false;
+    c->autotrain.target[kind][tier] = (uint32_t)parse_number_u64(value);
 }
-
-/* "T2:10000000, T4:5000000" - one kind's priority-ordered list of (tier, cap) steps (see
- * AutoTrainSettings' comment): fills T2 up to 10M first, then T4 up to 5M more. Each tier at
- * most once per kind; up to AUTOTRAIN_MAX_STEPS_PER_KIND entries (the 5 tiers that exist). */
-static bool ParseAutoTrainSteps(Connection *c, uint8_t kind, const char *value)
-{
-    char buffer[256];
-    strncpy(buffer, value, sizeof(buffer));
-    buffer[sizeof(buffer) - 1] = '\0';
-
-    c->autotrain.step_count[kind] = 0;
-    bool seen[5] = {0};
-
-    for (char *token = strtok(buffer, ","); token; token = strtok(NULL, ",")) {
-        while (*token == ' ')
-            token++;
-        if (*token == '\0')
-            continue;
-
-        char tier_s[8], cap_s[16];
-        if (sscanf(token, "%7[^:]:%15s", tier_s, cap_s) != 2) {
-            printf("Invalid autotrain entry: %s (expected TIER:CAP, e.g. T2:10000000)\n", token);
-            return false;
-        }
-
-        uint8_t tier;
-        if (!ParseTroopTier(tier_s, &tier)) {
-            printf("Invalid autotrain tier: %s (expected T1-T5)\n", tier_s);
-            return false;
-        }
-        if (seen[tier]) {
-            printf("Duplicate autotrain tier: %s\n", tier_s);
-            return false;
-        }
-        if (c->autotrain.step_count[kind] >= AUTOTRAIN_MAX_STEPS_PER_KIND) {
-            printf("Too many autotrain steps (max %d)\n", AUTOTRAIN_MAX_STEPS_PER_KIND);
-            return false;
-        }
-
-        seen[tier] = true;
-        AutoTrainStep *step = &c->autotrain.steps[kind][c->autotrain.step_count[kind]++];
-        step->tier = tier;
-        step->cap = (uint32_t)strtoul(cap_s, NULL, 10);
-    }
-
-    return true;
-}
-
-uint64_t parse_number_u64(const char *str);
 
 static bool ParserConfig(Connection *c, const char *key, const char *value) {
 	// gateway server 
@@ -513,20 +463,24 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 
-	if (strcmp(key, "autotrain.infantry") == 0) {
-		return ParseAutoTrainSteps(c, TROOP_INFANTRY, value);
-	}
-
-	if (strcmp(key, "autotrain.ranged") == 0) {
-		return ParseAutoTrainSteps(c, TROOP_RANGED, value);
-	}
-
-	if (strcmp(key, "autotrain.cavalry") == 0) {
-		return ParseAutoTrainSteps(c, TROOP_CAVALRY, value);
-	}
-
-	if (strcmp(key, "autotrain.siege") == 0) {
-		return ParseAutoTrainSteps(c, TROOP_SIEGE, value);
+	// autotrain.<kind>_t<1-5> = target - one box of the 4x5 grid (see AutoTrainSettings' comment).
+	// A small table + loop instead of 20 near-identical strcmp blocks - still a single, obvious
+	// place to look, just without the copy-paste risk of typing out every combination by hand.
+	if (strncmp(key, "autotrain.", 10) == 0) {
+		static const struct { const char *name; uint8_t kind; } kinds[] = {
+			{ "infantry", TROOP_INFANTRY }, { "ranged", TROOP_RANGED },
+			{ "cavalry", TROOP_CAVALRY },   { "siege", TROOP_SIEGE },
+		};
+		const char *suffix = key + 10;
+		for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+			size_t len = strlen(kinds[i].name);
+			if (strncmp(suffix, kinds[i].name, len) != 0) continue;
+			const char *tier_part = suffix + len;
+			if (tier_part[0] != '_' || tier_part[1] != 't' || tier_part[3] != '\0') continue;
+			if (tier_part[2] < '1' || tier_part[2] > '5') continue;
+			SetAutoTrainTarget(c, kinds[i].kind, (uint8_t)(tier_part[2] - '1'), value);
+			return true;
+		}
 	}
 
 	if (strcmp(key, "gather.radius") == 0) {
