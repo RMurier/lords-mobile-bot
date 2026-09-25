@@ -126,6 +126,7 @@ typedef struct {
 	MarketItem items[4];
 	ResourceStock reserve;
 	MarketSettings settings;
+	uint8_t bag_topup_attempts; // safety net: stop retrying use_bag_rss top-ups after too many in a row
 } BlackMarket;
 
 typedef struct {
@@ -373,13 +374,18 @@ typedef struct {
     time_t last_online_gift_try;
 } ActivitySettings;
 
-/* Automatic resource-tile gathering. Tiles are known only from whatever
- * _MSG_RESP_UPDATE_MAPINFO(_PLUS) arrives on its own - live-tested twice, the
- * server never answers _MSG_REQUEST_MAPDATA sent by this bot (0 responses to 22,
- * then 23, correctly zoned and paced requests), unlike direct actions (marches,
- * resources...) which all work. Same wall the war feature hit; see its own header
- * comment. So, for now, this only gathers tiles a human happens to have shown the
- * account by opening the map - not a true hands-off scan.
+/* Automatic resource-tile gathering: scan the zones around the castle with
+ * _MSG_REQUEST_MAPDATA, one zone at a time. The first attempt at this (see git
+ * history) sent no active scan at all live: it always requested 4 zone slots,
+ * padding whichever it didn't have with a repeat of the first one - a shape
+ * that never appears in a real client's traffic (real captures always declare
+ * the true count - 1, 2 or 4 - and pad unused slots with zero, never a repeat).
+ * It also sent _MSG_REQUEST_OPEN_UI before scanning, on the assumption (from a
+ * single capture where the two happened to be close together) that it was a
+ * required precondition; a later capture shows the very first MAPDATA of a
+ * session going out - and answered - before any OPEN_UI at all, so it is not
+ * sent here. One zone per request is simpler to keep byte-identical to a real
+ * client than trying to reproduce its multi-zone batches.
  *
  * Sending a march to the best untargeted tile found (while a slot is free) uses
  * the game's own "low level first" auto troop selection (troop_type_id = 0 lets
@@ -427,8 +433,11 @@ typedef struct {
 typedef struct {
     bool     enabled;
     uint8_t  max_marches;   // out of player.max_marches, how many to use for gathering
+    uint16_t radius;        // tiles around the castle to scan
 
-    bool     scan_done;     // just gates the one-time "no active scan" warning below
+    bool     scan_done;
+    uint16_t scan_cursor;   // index into the zone rectangle being swept
+    uint64_t next_scan_at;  // now_ms() deadline: do not send the next RequestMapData before this
 
     uint8_t  active_marches; // gather marches this code has out right now (subset of player.current_marches)
     uint64_t next_march_at;  // now_ms() deadline: do not send another gather march before this

@@ -1551,7 +1551,7 @@ static void ResourceCommandHandler(
 		int used = BankMayUseBag(c, type) ? BagPlan(c, type, amount - available, plan) : -1;
 
 		if (used > 0) {
-			BagApply(c, plan, used);
+			BagApply(c, plan, used, type);
 			not_before = now_ms() + 3000; // wait for the resources to be credited
 		} else {
 			char available_str[20];

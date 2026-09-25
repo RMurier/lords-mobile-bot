@@ -2015,14 +2015,27 @@ bool CanSpendResource(Connection *c, ResourceType type)
 	return false;
 }
 
-/* cargo_ship.use_bag_rss: use bag items to cover what a trade lacks. Returns true when items were used. */
+/* cargo_ship.use_bag_rss: use bag items to cover what a trade lacks. Returns true when items were used.
+ * Capped at BAG_TOPUP_MAX_ATTEMPTS per market refresh: BagApply's optimistic credit should make the
+ * trade affordable after one round, so repeated attempts without ever completing the purchase mean
+ * something is genuinely wrong (a reserve that can never be met, a stale market item...) - better to
+ * stop and leave the rest of the bag alone than to keep draining it, which is exactly what an earlier
+ * version of this code did before that credit existed (see BagApply's own comment). */
+#define BAG_TOPUP_MAX_ATTEMPTS 5
+
 static bool TopUpFromBag(Connection *c, const MarketItem *item)
 {
 	ResourceType type = (ResourceType)item->resource_kind;
-	
+
 	if (!c->market.settings.use_bag_rss)
 		return false;
-	
+
+	if (c->market.bag_topup_attempts >= BAG_TOPUP_MAX_ATTEMPTS) {
+		LOGW("[MARKET] Trop de tentatives de complément depuis le sac pour du %s sans conclure "
+			"l'échange, on arrête pour ce cycle\n", GetResourceName(type));
+		return false;
+	}
+
 	uint64_t have    = GetResourceAmount(c, type);
 	uint64_t reserve = 0;
 	
@@ -2046,7 +2059,8 @@ static bool TopUpFromBag(Connection *c, const MarketItem *item)
 		return false;
 	
 	LOGI("[MARKET] Using %d kind(s) of %s items from the bag to cover a trade\n", used, GetResourceName(type));
-	BagApply(c, plan, used);
+	BagApply(c, plan, used, type);
+	c->market.bag_topup_attempts++;
 	c->market_bag_wait = time(NULL) + 3;
 	
 	return true;
@@ -2152,8 +2166,10 @@ void RecvBlackMarket_Buy(Connection *c, const uint8_t *data) {
 	
 	uint8_t new_trade_status = read_u8(data + offset); offset++;
 	uint8_t changed = new_trade_status ^ c->market.trade_status;
-	
-	for (int i = 0; i < 4; i++) 
+
+	c->market.bag_topup_attempts = 0; // a purchase went through: give the next slot its attempts back
+
+	for (int i = 0; i < 4; i++)
 	{
 		if (((changed >> i) & 1) == 1) 
 		{
@@ -2196,6 +2212,7 @@ void RecvBlackMarket_Data(Connection *c, const uint8_t *data) {
 	c->market.refresh_time = read_u64(data + offset); offset += 8;
 	c->market.trade_locks  = read_i8( data + offset); offset += 1;
 	c->market.trade_status = read_u8( data + offset); offset += 1;
+	c->market.bag_topup_attempts = 0; // fresh market cycle: give use_bag_rss its attempts back
 	
 	for (int i = 0; i < 4; i++) {
 		c->market.items[i].item_id        = read_u16(data + offset);  offset += 2;
@@ -3844,11 +3861,52 @@ void WarTick(Connection *c) {
 
 /* ------------------------------------------------------------------------
  * Automatic gathering. See GatherSettings' comment (connection.h) for the
- * whole picture, including why there is no active map scan here (confirmed
- * live: the server does not answer _MSG_REQUEST_MAPDATA sent by this bot, so
- * RequestOpenUI/RequestMapData were removed the same way the war feature
- * removed its own attempt rather than leave dead/misleading code behind).
+ * whole picture and for why the request below is shaped the way it is.
  * ------------------------------------------------------------------------ */
+
+/* One zone, sent as the sole real entry of the 4 the wire format reserves -
+ * matches every real capture: total payload always 45 bytes (4 header + 45 =
+ * the captured 49-byte packet) whether count is 1, 2 or 4, count truthful,
+ * unused zone slots zero (never a repeat of the real one). */
+void RequestMapData(Connection *c, uint16_t zone_id) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_MAPDATA); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_u8(c->data + c->size, 1); c->size += 1;          // count: one real zone
+	write_u16(c->data + c->size, zone_id); c->size += 2;
+	write_zero(c->data + c->size, 6);  c->size += 6;       // 3 unused zone slots
+	write_zero(c->data + c->size, 32); c->size += 32;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/* zone_id of the tile `index` steps into the square scan rectangle around the
+ * castle (row-major, width columns per row). Same formula as MapPosToPointCode
+ * (map_point.c): zone = (x >> 5) + (y >> 4) * 16 - confirmed against several
+ * real MAPDATA requests (adjacent zones a capture batched together always
+ * differ by exactly 1 or 16). Returns false past the last tile in the
+ * rectangle (scan complete). */
+static bool GatherZoneAt(Connection *c, uint16_t index, uint16_t *zone_out) {
+	map_pos_t castle = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
+	int radius = c->gather.radius > 0 ? c->gather.radius : 30;
+
+	int x_min = castle.x > radius ? castle.x - radius : 0;
+	int x_max = castle.x + radius < 511 ? castle.x + radius : 511;
+	int y_min = castle.y > radius ? castle.y - radius : 0;
+	int y_max = castle.y + radius < 1023 ? castle.y + radius : 1023;
+
+	int xz_min = x_min >> 5, xz_max = x_max >> 5;
+	int yz_min = y_min >> 4, yz_max = y_max >> 4;
+	int width = xz_max - xz_min + 1;
+	int height = yz_max - yz_min + 1;
+
+	if (index >= (uint16_t)(width * height)) return false;
+
+	int xz = xz_min + (index % width);
+	int yz = yz_min + (index / width);
+	*zone_out = (uint16_t)(xz + yz * 16);
+	return true;
+}
 
 void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count) {
 	if (MarchesPaused()) {
@@ -3965,17 +4023,20 @@ void GatherTick(Connection *c) {
 	if (c->player.max_marches == 0) return; // march data not loaded yet
 	if (MarchesPaused()) return;            // $recall: no march for a while
 
-	// Confirmed live, twice: the server never answers _MSG_REQUEST_MAPDATA sent by
-	// this bot (0 responses to 22, then 23, paced requests covering the right
-	// zones), unlike direct actions (marches, resources...) which all work. Same
-	// wall the war feature hit - see its own header comment. Tiles are therefore
-	// only ever known from whatever _MSG_RESP_UPDATE_MAPINFO(_PLUS) arrives on its
-	// own (e.g. a human opening the map on this account from time to time); there
-	// is no way, currently, to make this a true "no one has to touch anything" scan.
 	if (!c->gather.scan_done) {
-		c->gather.scan_done = true;
-		LOGW("[GATHER] Pas de scan actif (le serveur ne répond pas aux demandes du bot) : "
-			"seules les tuiles vues passivement seront récoltées\n");
+		if (now_ms() < c->gather.next_scan_at)
+			return;
+		c->gather.next_scan_at = GatherHumanDelay();
+
+		uint16_t zone;
+		if (GatherZoneAt(c, c->gather.scan_cursor, &zone)) {
+			RequestMapData(c, zone);
+			c->gather.scan_cursor++;
+		} else {
+			c->gather.scan_done = true;
+			LOGI("[GATHER] Scan terminé : %u tuile(s) trouvée(s) dans le rayon\n", c->gather.tile_count);
+		}
+		return;
 	}
 
 	time_t now = time(NULL);
@@ -6359,14 +6420,49 @@ int BagPlan(const Connection *c, ResourceType type, uint64_t need, BagUse out[BA
 	return written;
 }
 
-/* Uses the planned items. The server sends back the real quantities and the new resources. */
-void BagApply(Connection *c, const BagUse *plan, int count)
+/* _MSG_RESP_USEITEM (RecvUseItem) only ever updates the bag's own item count for a plain
+ * resource item - never c->resources.* - so callers that immediately re-check the stock
+ * (TopUpFromBag/CanAffordMarketItem) never see it move and retry forever, spending the whole
+ * bag a little at a time before giving up (only because the bag ran out, not because the
+ * trade succeeded - this is exactly what drained a 2B wood bag live). Credit the resource here
+ * instead, optimistically, from the known fixed value of each item (the same table BagPlan
+ * picked them from) - the next real RecvResources/RecvRefreshResources push overwrites it with
+ * the authoritative total anyway, so any drift here is short-lived. */
+static uint32_t SaturatingAddU32(uint32_t a, uint64_t b)
 {
+	uint64_t sum = (uint64_t)a + b;
+	return sum > UINT32_MAX ? UINT32_MAX : (uint32_t)sum;
+}
+
+static void AddResourceAmount(Connection *c, ResourceType type, uint64_t amount)
+{
+	switch (type) {
+		case RESOURCE_FOOD: c->resources.food = SaturatingAddU32(c->resources.food, amount); break;
+		case RESOURCE_ROCK: c->resources.rock = SaturatingAddU32(c->resources.rock, amount); break;
+		case RESOURCE_WOOD: c->resources.wood = SaturatingAddU32(c->resources.wood, amount); break;
+		case RESOURCE_ORE:  c->resources.ore  = SaturatingAddU32(c->resources.ore,  amount); break;
+		case RESOURCE_GOLD: c->resources.gold = SaturatingAddU32(c->resources.gold, amount); break;
+	}
+}
+
+/* Uses the planned items. The server sends back the real quantities and the new resources. */
+void BagApply(Connection *c, const BagUse *plan, int count, ResourceType type)
+{
+	int item_count;
+	const ResourceItem *items = ResourceItemsFor(type, &item_count);
+
 	for (int i = 0; i < count; i++) {
 		RequestSimpleUseItem(c, plan[i].item_id, plan[i].quantity);
 
 		if (c->items[plan[i].item_id].quantity >= plan[i].quantity)
 			c->items[plan[i].item_id].quantity -= plan[i].quantity;
+
+		for (int j = 0; j < item_count; j++) {
+			if (items[j].item_id == plan[i].item_id) {
+				AddResourceAmount(c, type, (uint64_t)plan[i].quantity * items[j].value);
+				break;
+			}
+		}
 	}
 }
 

@@ -312,6 +312,40 @@ int main(void)
 	CHECK(c->transfer.state == TRANSFER_IDLE && useitem_count == 0 && replied("(or) : 3.00M disponible"), "bag too small: nothing is used, message counts the bag");
 	free(c);
 
+	/* ---- black market: use_bag_rss must not drain the whole bag ------
+	 * A live bug: RecvUseItem never credited c->resources.* for a plain resource item, so
+	 * CanAffordMarketItem never became true after a bag top-up - EvaluateBlackMarket kept
+	 * retrying every 3s (BlackMarketTick) and BagApply kept "topping up" the same unmet need,
+	 * spending a little more of the bag each time, until a 2B wood bag was fully emptied
+	 * without ever completing the trade. BagApply now credits the resource itself. */
+	{
+		c = fresh("boss");
+		c->market.loaded = true;
+		c->market.settings.auto_trade = true;
+		c->market.settings.use_bag_rss = true;
+		c->market.settings.spend_wood = true;
+		c->market.items[0].resource_kind = RESOURCE_WOOD;
+		c->market.items[0].resource_count = 5000000;
+		c->items[TIMBER_5M].quantity = 2; // 10M available, only 5M needed: must not use both
+
+		reset_sent();
+		EvaluateBlackMarket(c);
+		CHECK(find_packet(_MSG_REQUEST_BLACKMARKET_BUY) < 0 && c->market_bag_wait > 0,
+			"market: not affordable yet, tops up from the bag and waits instead of buying");
+		CHECK(c->resources.wood == 5000000 && c->items[TIMBER_5M].quantity == 1,
+			"market: BagApply credits the resource immediately, using only the one item needed");
+		CHECK(c->market.bag_topup_attempts == 1, "market: one top-up attempt recorded");
+
+		c->market_bag_wait = 0; // simulate BlackMarketTick's 3s wait having elapsed
+		reset_sent();
+		EvaluateBlackMarket(c);
+		CHECK(find_packet(_MSG_REQUEST_BLACKMARKET_BUY) >= 0 && c->market.buy_pending,
+			"market: now affordable, buys instead of topping up from the bag again");
+		CHECK(c->items[TIMBER_5M].quantity == 1 && c->market.bag_topup_attempts == 1,
+			"market: the trade completed without ever touching the second wood item");
+		free(c);
+	}
+
 	/* ---- delivery distance ------------------------------------------- */
 	{
 		map_pos_t home = { 100, 100 }, near_pos = { 105, 104 }, far_pos = { 400, 100 };
@@ -1329,6 +1363,7 @@ static const uint8_t build_event_none[] = {
 		c->recall.pause_seconds = 300;
 		c->gather.enabled = true;
 		c->gather.max_marches = 1;
+		c->gather.scan_done = true; // this test is about the march, not the zone scan
 		c->player.max_marches = 6;
 		c->player.current_marches = 0;
 		c->gather.tile_count = 1;
@@ -1414,6 +1449,44 @@ static const uint8_t build_event_none[] = {
 		CHECK(strcmp(shown, "45 s") == 0, "recall: 45 seconds read as 45 s");
 
 		MarchesPauseEnd(); /* leave no pause behind for whatever runs after */
+	}
+
+	/* Automatic gathering: the active zone scan (RequestMapData), byte-for-byte matched against
+	 * real captures - see GatherSettings' comment (connection.h). radius=1 around the castle's own
+	 * zone (100,100 -> zone 99) covers exactly that one zone, so the scan is a single request. */
+	{
+		map_pos_t home = { 100, 100 };
+		uint16_t hz; uint8_t hp;
+		MapPosToPointCode(home, &hz, &hp);
+
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.radius = 1;
+		c->player.zone_id = hz; c->player.point_id = hp;
+		c->player.max_marches = 6;
+		c->player.current_marches = 0;
+
+		reset_sent();
+		c->gather.next_scan_at = 0;
+		GatherTick(c);
+		int k = find_packet(_MSG_REQUEST_MAPDATA);
+		CHECK(k >= 0 && find_packet(_MSG_REQUEST_OPEN_UI) < 0,
+			"gather: scans with MAPDATA directly, no OPEN_UI needed first");
+		CHECK(sent_size[k] == 49, "gather: MAPDATA is the captured 49-byte shape regardless of zone count");
+		CHECK(sent[k][8] == 1, "gather: count is the true number of zones (1), never hardcoded to 4");
+		uint16_t sent_zone = (uint16_t)(sent[k][9] | (sent[k][10] << 8));
+		CHECK(sent_zone == 99, "gather: requests the castle's own zone (100,100 -> zone 99)");
+		bool rest_zero = true;
+		for (int i = 11; i < 49; i++) if (sent[k][i] != 0) rest_zero = false;
+		CHECK(rest_zero, "gather: unused zone slots and padding are zero, never a repeat of the real zone");
+		CHECK(c->gather.scan_cursor == 1 && !c->gather.scan_done, "gather: scan_cursor advances, scan not done yet");
+
+		reset_sent();
+		c->gather.next_scan_at = 0;
+		GatherTick(c);
+		CHECK(find_packet(_MSG_REQUEST_MAPDATA) < 0 && c->gather.scan_done,
+			"gather: nothing left in a radius-1 rectangle, scan ends after the one zone");
+		free(c);
 	}
 
 	/* Guild bank: members deposit by sending resources to the bot, the bot keeps a balance per player, the
