@@ -240,6 +240,70 @@ static bool ParseAdminList(Connection *c, const char *value)
     return true;
 }
 
+static bool ParseTroopKind(const char *s, uint8_t *out)
+{
+    if (strcmp(s, "INFANTRY") == 0) { *out = TROOP_INFANTRY; return true; }
+    if (strcmp(s, "RANGED") == 0 || strcmp(s, "SNIPER") == 0) { *out = TROOP_RANGED; return true; }
+    if (strcmp(s, "CAVALRY") == 0) { *out = TROOP_CAVALRY; return true; }
+    if (strcmp(s, "SIEGE") == 0) { *out = TROOP_SIEGE; return true; }
+    return false;
+}
+
+static bool ParseTroopTier(const char *s, uint8_t *out)
+{
+    if (strcmp(s, "T1") == 0) { *out = TIER_T1; return true; }
+    if (strcmp(s, "T2") == 0) { *out = TIER_T2; return true; }
+    if (strcmp(s, "T3") == 0) { *out = TIER_T3; return true; }
+    if (strcmp(s, "T4") == 0) { *out = TIER_T4; return true; }
+    if (strcmp(s, "T5") == 0) { *out = TIER_T5; return true; }
+    return false;
+}
+
+/* "KIND:TIER:CAP, KIND:TIER:CAP, ..." in priority order - see AutoTrainSettings' comment for
+ * how the order is used (per kind, first unmet entry in this list wins). */
+static bool ParseAutoTrainTargets(Connection *c, const char *value)
+{
+    char buffer[1024];
+    strncpy(buffer, value, sizeof(buffer));
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    c->autotrain.target_count = 0;
+
+    for (char *token = strtok(buffer, ","); token; token = strtok(NULL, ",")) {
+        while (*token == ' ')
+            token++;
+        if (*token == '\0')
+            continue;
+
+        char kind_s[16], tier_s[8], cap_s[16];
+        if (sscanf(token, "%15[^:]:%7[^:]:%15s", kind_s, tier_s, cap_s) != 3) {
+            printf("Invalid autotrain.targets entry: %s (expected KIND:TIER:CAP)\n", token);
+            return false;
+        }
+
+        uint8_t kind, tier;
+        if (!ParseTroopKind(kind_s, &kind)) {
+            printf("Invalid autotrain.targets kind: %s (INFANTRY, RANGED, CAVALRY or SIEGE)\n", kind_s);
+            return false;
+        }
+        if (!ParseTroopTier(tier_s, &tier)) {
+            printf("Invalid autotrain.targets tier: %s (T1-T5)\n", tier_s);
+            return false;
+        }
+        if (c->autotrain.target_count >= AUTOTRAIN_MAX_TARGETS) {
+            printf("Too many autotrain.targets entries (max %d)\n", AUTOTRAIN_MAX_TARGETS);
+            return false;
+        }
+
+        AutoTrainTarget *t = &c->autotrain.targets[c->autotrain.target_count++];
+        t->kind = kind;
+        t->tier = tier;
+        t->cap = (uint32_t)strtoul(cap_s, NULL, 10);
+    }
+
+    return true;
+}
+
 uint64_t parse_number_u64(const char *str);
 
 static bool ParserConfig(Connection *c, const char *key, const char *value) {
@@ -440,6 +504,15 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 	if (strcmp(key, "gather.max_marches") == 0) {
 		c->gather.max_marches = (uint8_t)strtoul(value, NULL, 10);
 		return true;
+	}
+
+	if (strcmp(key, "autotrain.enabled") == 0) {
+		c->autotrain.enabled = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "autotrain.targets") == 0) {
+		return ParseAutoTrainTargets(c, value);
 	}
 
 if (strcmp(key, "protection.enabled") == 0) {

@@ -80,6 +80,8 @@ void BotTick(Connection *c)
 
 	GatherTick(c);
 
+	AutoTrainTick(c);
+
 	MigrationTick(c);
 	
 	StatusTick(c);
@@ -417,8 +419,17 @@ static SessionResult ProcessConnection(Connection *c)
 				case _MSG_RESP_BROCAST_NPC_WAR_BEGIN: 
 					RecvDarknestBroadcast(c, s->buffer + s->parse_pos + 4);
 					break;
-				case _MSG_RESP_ARMYGROUPINFO_: 
-					RecvArmyGroupInfo(c, s->buffer + s->parse_pos + 4);
+				case _MSG_RESP_ARMYGROUPINFO_:
+					RecvArmyGroupInfo(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_TRAINING_IMMEDIATELY:
+					RecvTroopTrainingImmediate(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_ADDSOLDIER_:
+					RecvAddSoldier(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_TRAINING_:
+					RecvTrainingStart(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_WATCHTOWER_LINEDETAIL: 
 					// RecvWatchTowerLineDetail(c, s->buffer + s->parse_pos + 4);

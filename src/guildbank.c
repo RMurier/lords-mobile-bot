@@ -229,9 +229,12 @@ bool GuildBankDeposit(Connection *c, uint32_t report_id, uint32_t report_time, c
 		return false;
 	GuildBankLoad(c);
 
-	for (uint32_t i = 0; i < g_seen_count; i++)
-		if (g_seen[i] == report_id)
+	for (uint32_t i = 0; i < g_seen_count; i++) {
+		if (g_seen[i] == report_id) {
+			LOGD("[BANK] Rapport %u déjà compté, ignoré\n", report_id);
 			return false;   // already counted: the game sends its reports again at every login
+		}
+	}
 
 	// remember it, dropping the oldest when the list is full
 	if (g_seen_count >= GUILDBANK_MAX_SEEN) {
@@ -242,6 +245,8 @@ bool GuildBankDeposit(Connection *c, uint32_t report_id, uint32_t report_time, c
 
 	if (report_time < g_activated) {
 		Save(c);
+		LOGI("[BANK] Livraison de %s (rapport %u) antérieure à la banque (%u < %u), non créditée\n",
+			sender, report_id, report_time, g_activated);
 		return false;   // older than the bank: not a deposit
 	}
 
@@ -379,5 +384,8 @@ void GuildBankTick(Connection *c)
 	if (now == last)
 		return;
 	last = now;
+	// the bank starts counting when the bot comes up with it enabled, not at the first delivery it happens to receive
+	// (which could then be dated the very second the bank was created and be taken for an older one)
+	GuildBankLoad(c);
 	GuildBankApplyEdits(c);
 }

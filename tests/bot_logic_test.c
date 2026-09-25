@@ -1340,6 +1340,78 @@ static const uint8_t build_event_none[] = {
 		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) < 0, "recall: the gathering request builder sends nothing during the pause either");
 		free(c);
 
+		/* gather never asks for more troops than the account actually has, once c->troop is loaded */
+		MarchesPauseEnd();
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 1;
+		c->player.max_marches = 6;
+		c->gather.tile_count = 1;
+		// amount=1000 / 23.3 + 1 = 44 troops by the uncapped formula
+		c->gather.tiles[0] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 2, .level = 3, .amount = 1000 };
+		c->troop.loaded = true;
+		c->troop.infantry[0] = 5; // only 5 troops recorded as free, whatever tier/kind they are
+		c->troop.total = 5;       // total is a separately maintained running sum, not derived - see TroopAdd
+		reset_sent();
+		c->gather.next_march_at = 1;
+		GatherTick(c);
+		int k = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
+		uint32_t sent_count_field = k >= 0
+			? (uint32_t)(sent[k][66] | sent[k][67] << 8 | sent[k][68] << 16 | sent[k][69] << 24) : 0;
+		CHECK(k >= 0 && sent_count_field == 5,
+			"gather: the troop count is capped to c->troop.total, not the tile-derived formula");
+
+		/* no troops recorded at all: nothing is sent, and the tile is left untargeted */
+		c->gather.tiles[0].targeted = false;
+		c->troop.infantry[0] = 0;
+		c->troop.total = 0;
+		c->gather.next_march_at = 1;
+		reset_sent();
+		GatherTick(c);
+		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) < 0 && !c->gather.tiles[0].targeted,
+			"gather: with zero troops recorded, no march is sent and the tile stays available");
+		free(c);
+
+		/* gather also subtracts troops already committed to marches still out, not just c->troop.total */
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 2;
+		c->player.max_marches = 6;
+		c->gather.tile_count = 2;
+		c->gather.tiles[0] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 1, .level = 5, .amount = 5000 };
+		c->gather.tiles[1] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 2, .level = 4, .amount = 5000 };
+		c->troop.loaded = true;
+		c->troop.infantry[0] = 100;
+		c->troop.total = 100;
+		reset_sent();
+		c->gather.next_march_at = 1;
+		GatherTick(c); // highest level tile first (5 before 4): takes all 100 available troops
+		k = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
+		uint32_t amt1 = k >= 0 ? (uint32_t)(sent[k][66] | sent[k][67] << 8 | sent[k][68] << 16 | sent[k][69] << 24) : 0;
+		CHECK(k >= 0 && amt1 == 100 && c->gather.troops_out == 100,
+			"gather: first march takes all available troops and troops_out tracks it");
+
+		reset_sent();
+		c->gather.next_march_at = 1;
+		GatherTick(c); // second tile: nothing left free to send
+		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) < 0 && !c->gather.tiles[1].targeted,
+			"gather: troops already out on the first march leave nothing free for a second one");
+
+		// that first march is refused: troops_out rolls back too, not just active_marches
+		uint8_t refuse[2] = { 2, 0 };
+		RecvGatherMarchResp(c, refuse, sizeof(refuse));
+		CHECK(c->gather.troops_out == 0, "gather: a refusal rolls troops_out back too");
+
+		// resend now succeeds (troops free again), then the march comes home and credits them back
+		c->gather.tiles[0].targeted = false;
+		reset_sent();
+		c->gather.next_march_at = 1;
+		GatherTick(c);
+		CHECK(c->gather.troops_out == 100, "gather: troops_out is tracked again after a fresh accepted send");
+		RecvGatherTroopHome(c, NULL, 0);
+		CHECK(c->gather.troops_out == 0, "gather: troops coming home are credited back to troops_out");
+		free(c);
+
 		/* a delivery already going on does not send its next march during the pause, and does after it */
 		MarchesPauseEnd();
 		c = fresh("boss");
@@ -1748,6 +1820,146 @@ static const uint8_t live_4[] = {
 		char cleanup[64];
 		snprintf(cleanup, sizeof(cleanup), "rm -rf %s", dir);
 		if (system(cleanup) != 0) { /* best effort */ }
+	}
+
+	/* The first deposits made to the bot by a player, from its own journal (debug dump of the three delivery reports it
+	 * received): Zyco sent 135,033 stone, then 926,000 ore twice. They were lost because the bank was not enabled in that
+	 * account's configuration, and the bank was created lazily at the first deposit, dated the same second. */
+	{
+		GuildBankReset();
+		char dir[] = "/tmp/lmbot_first_XXXXXX";
+		CHECK(mkdtemp(dir) != NULL, "first deposits: temporary folder");
+static const uint8_t first_0[] = {
+			0xee, 0xed, 0x00, 0x00, 0x00, 0x44, 0x9d, 0xb5, 0x6a, 0x00, 0x00, 0x00, 0x00, 0x01, 0x5a, 0x79,
+			0x63, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x79,
+			0x0f, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+static const uint8_t first_1[] = {
+			0xef, 0xed, 0x00, 0x00, 0x00, 0x5c, 0x9d, 0xb5, 0x6a, 0x00, 0x00, 0x00, 0x00, 0x01, 0x5a, 0x79,
+			0x63, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x21, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+static const uint8_t first_2[] = {
+			0xf0, 0xed, 0x00, 0x00, 0x00, 0x76, 0x9d, 0xb5, 0x6a, 0x00, 0x00, 0x00, 0x00, 0x01, 0x5a, 0x79,
+			0x63, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x21, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00
+		};
+
+		const uint8_t *first[3] = { first_0, first_1, first_2 };
+
+		/* disabled, as in that configuration: nothing is credited, nothing is created */
+		c = fresh("boss");
+		snprintf(c->bot.data_path, sizeof(c->bot.data_path), "%s/", dir);
+		c->server_time = 1790287100;
+		for (int i = 0; i < 3; i++)
+			RecvResHelpReport(c, first[i], 47);
+		CHECK(GuildBankAccountCount() == 0, "first deposits: with the bank disabled a delivery received credits nothing");
+		free(c);
+
+		/* enabled: the bank starts counting when the bot comes up (first tick), so what arrives after is counted */
+		GuildBankReset();
+		c = fresh("boss");
+		snprintf(c->bot.data_path, sizeof(c->bot.data_path), "%s/", dir);
+		c->guildbank.enabled = true;
+		c->server_time = 1790287172;   /* the same second as the first report */
+		GuildBankTick(c);
+		RecvResHelpReport(c, first[0], 47);
+		RecvResHelpReport(c, first[1], 47);
+		RecvResHelpReport(c, first[2], 47);
+		CHECK(GuildBankBalance("Zyco", RESOURCE_ROCK) == 135033, "first deposits: 135,033 stone credited, even dated the second the bank started");
+		CHECK(GuildBankBalance("Zyco", RESOURCE_ORE) == 1852000, "first deposits: two deliveries of 926,000 ore add up to 1,852,000");
+		CHECK(GuildBankAccountCount() == 1, "first deposits: one player");
+
+		/* the bot was started later: what was delivered before is not credited */
+		GuildBankReset();
+		c->server_time = 1790287500;
+		GuildBankReset();
+		{
+			char file[400];
+			snprintf(file, sizeof(file), "%s/guild_bank.txt", dir);
+			remove(file);
+		}
+		GuildBankTick(c);
+		RecvResHelpReport(c, first[0], 47);
+		CHECK(GuildBankAccountCount() == 0, "first deposits: a delivery dated before the bot started with the bank is not credited");
+		free(c);
+
+		GuildBankReset();
+		char cleanup[64];
+		snprintf(cleanup, sizeof(cleanup), "rm -rf %s", dir);
+		if (system(cleanup) != 0) { /* best effort */ }
+	}
+
+	/* ---- autotrain: priority order, per-kind independence, completion, refusal ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->troop.ranged[TIER_T2] = 1000;
+		c->troop.infantry[TIER_T2] = 500;
+		c->autotrain.enabled = true;
+		c->autotrain.target_count = 2;
+		c->autotrain.targets[0] = (AutoTrainTarget){ .kind = TROOP_RANGED, .tier = TIER_T2, .cap = 5000 };
+		c->autotrain.targets[1] = (AutoTrainTarget){ .kind = TROOP_INFANTRY, .tier = TIER_T2, .cap = 2000 };
+		reset_sent();
+
+		AutoTrainTick(c);
+		int k = find_packet(_MSG_REQUEST_TRAINING_);
+		uint32_t amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(k >= 0 && sent[k][8] == TROOP_RANGED && sent[k][9] == TIER_T2 && amount == 4000,
+			"autotrain: first tick trains the missing amount for the top-priority target");
+		CHECK(c->autotrain.kind_busy[TROOP_RANGED], "autotrain: ranged marked busy after sending its order");
+
+		reset_sent();
+		AutoTrainTick(c); // ranged already busy, and the pacing delay has not elapsed yet
+		CHECK(sent_count == 0, "autotrain: no new order while the pacing delay has not elapsed");
+
+		c->autotrain.next_action_at = 0; // simulate the pacing delay having elapsed
+		reset_sent();
+		AutoTrainTick(c);
+		k = find_packet(_MSG_REQUEST_TRAINING_);
+		amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(k >= 0 && sent[k][8] == TROOP_INFANTRY && sent[k][9] == TIER_T2 && amount == 1500,
+			"autotrain: ranged being busy does not block infantry's own target");
+
+		// training completes for ranged: RecvAddSoldier reports it, frees the kind, credits the count
+		uint8_t addsoldier[6] = { TROOP_RANGED, TIER_T2, 0xA0, 0x0F, 0x00, 0x00 }; // 4000 LE
+		RecvAddSoldier(c, addsoldier, sizeof(addsoldier));
+		CHECK(c->troop.ranged[TIER_T2] == 5000, "autotrain: RecvAddSoldier credits the trained amount");
+		CHECK(!c->autotrain.kind_busy[TROOP_RANGED], "autotrain: RecvAddSoldier frees the kind's queue");
+
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		k = find_packet(_MSG_REQUEST_TRAINING_);
+		CHECK(k < 0 || sent[k][8] != TROOP_RANGED, "autotrain: a target already at its cap is not retrained");
+
+		// refusal: RecvTrainingStart with a non-zero status frees the kind and arms a backoff
+		c->autotrain.kind_busy[TROOP_INFANTRY] = true;
+		uint8_t refuse[2] = { 3, TROOP_INFANTRY };
+		RecvTrainingStart(c, refuse, sizeof(refuse));
+		uint64_t short_backoff = c->autotrain.kind_retry_at[TROOP_INFANTRY];
+		CHECK(!c->autotrain.kind_busy[TROOP_INFANTRY] && short_backoff > 0,
+			"autotrain: a refusal frees the kind and arms a backoff");
+		CHECK(short_backoff < now_ms() + 5 * 60 * 1000,
+			"autotrain: the first refusals use a short backoff (assumed transient)");
+
+		// a target that is never going to succeed (e.g. the research for that tier is not
+		// done) must not be hammered forever at the short backoff - after enough refusals
+		// in a row the backoff grows a lot, without ever giving up on it for the whole run
+		for (int i = 0; i < AUTOTRAIN_HARD_BLOCK_THRESHOLD - 1; i++)
+			RecvTrainingStart(c, refuse, sizeof(refuse));
+		uint64_t long_backoff = c->autotrain.kind_retry_at[TROOP_INFANTRY];
+		CHECK(long_backoff > now_ms() + 5 * 60 * 1000,
+			"autotrain: enough consecutive refusals switch to a long backoff instead of retrying every minute forever");
+
+		// an accepted order resets the streak, so a later real transient refusal is not
+		// immediately treated as another hard block
+		uint8_t accept[2] = { 0, TROOP_INFANTRY };
+		RecvTrainingStart(c, accept, sizeof(accept));
+		CHECK(c->autotrain.kind_consecutive_refusals[TROOP_INFANTRY] == 0,
+			"autotrain: an accepted order resets the refusal streak");
+
+		free(c);
 	}
 
 	printf("%s\n", failures ? "SOME TESTS FAILED" : "ALL BOT LOGIC TESTS PASSED");

@@ -392,6 +392,14 @@ typedef struct {
  * escalating tiers - worth calibrating against real results. */
 #define GATHER_MAX_TILES 256
 #define GATHER_DEFAULT_TROOP_CAPACITY 23.3
+// A refusal on one tile could genuinely be that one tile; this many *consecutive*
+// refusals across (necessarily) different tiles cannot be explained by "this tile is
+// taken" and points instead at the march itself (most likely: not enough troops of
+// the tier GATHER_DEFAULT_TROOP_CAPACITY assumed available - see the comment above).
+#define GATHER_REFUSAL_WARN_THRESHOLD 5
+// Upper bound on gather marches ever in flight at once (player.max_marches is a uint8_t in
+// practice well under this with any realistic VIP/buff level) - sizes the FIFO queue below.
+#define GATHER_MAX_ACTIVE_MARCHES 16
 
 typedef enum {
     RESOURCE_KIND_FOOD  = 1,
@@ -433,9 +441,25 @@ typedef struct {
     uint8_t  active_marches; // gather marches this code has out right now (subset of player.current_marches)
     uint64_t next_march_at;  // now_ms() deadline: do not send another gather march before this
 
+    /* c->troop.total is never adjusted when a march leaves or comes home, so capping to it
+     * alone still lets the bot ask for troops that are already out on an earlier gather march.
+     * The server never tells us which march came home or how many troops it carried (its
+     * payload is undecoded - see RecvGatherTroopHome's comment), so this tracks it ourselves:
+     * a FIFO of the amount sent with each march still out. Best-effort, not exact, if returns
+     * do not arrive in the same order they were sent in - but a wrong guess here only means a
+     * request that gets refused (same failure mode as today), never anything destructive, and
+     * it is still strictly closer to reality than not tracking this at all. */
+    uint32_t troops_out;
+    uint32_t pending_amounts[GATHER_MAX_ACTIVE_MARCHES];
+    uint8_t  pending_head;
+    uint8_t  pending_count;
+
     GatherTile tiles[GATHER_MAX_TILES];
     uint16_t   tile_count;
     time_t     last_status_log; // throttles the periodic "N tiles known" log line
+
+    uint16_t consecutive_refusals; // resets on any accepted march; see GATHER_REFUSAL_WARN_THRESHOLD
+    bool     refusal_warned;       // one warning per streak, not one per refusal
 } GatherSettings;
 
 /* $join <tag> / $leave: at most one alliance operation in flight at a time, its
@@ -710,6 +734,39 @@ typedef struct {
 	uint32_t siege[4];
 	uint32_t t5_data[4];
 } TroopData;
+
+#define AUTOTRAIN_MAX_TARGETS 16
+#define AUTOTRAIN_REFUSAL_BACKOFF_MS       (60 * 1000)       // normal case: likely transient (resources, timing)
+#define AUTOTRAIN_HARD_BLOCK_THRESHOLD     5                 // this many refusals in a row -> stop assuming "transient"
+// e.g. the tier's research/building requirement is not met yet: retrying every minute would
+// never succeed and just spams logs, but the target can't be dropped outright either since the
+// requirement could be met later in the same run (research finishing, a building upgrade
+// landing) - so keep retrying, just rarely.
+#define AUTOTRAIN_HARD_BLOCK_BACKOFF_MS    (30 * 60 * 1000)
+
+typedef struct {
+	uint8_t  kind; // TroopKind
+	uint8_t  tier; // TIER_T1..TIER_T5
+	uint32_t cap;  // stop training this (kind, tier) once c->troop reaches this many
+} AutoTrainTarget;
+
+/* Each of the 4 kinds (infantry/ranged/cavalry/siege) trains through its own building
+ * (barracks/range/stable/workshop) and, as far as anything captured so far shows, only ever
+ * has one order in flight at a time - see RecvTrainingStart's comment. So this tracks one
+ * busy flag per kind, and walks `targets` in order for each kind independently: an entry is
+ * skipped once its cap is already met (c->troop.loaded required - see AutoTrainTick), which
+ * naturally moves on to that kind's next entry (e.g. T2 then T4) without extra bookkeeping. */
+typedef struct {
+	bool enabled;
+
+	AutoTrainTarget targets[AUTOTRAIN_MAX_TARGETS];
+	uint8_t         target_count;
+
+	bool     kind_busy[4];              // indexed by TroopKind
+	uint64_t kind_retry_at[4];          // now_ms() backoff after a refusal, per kind
+	uint16_t kind_consecutive_refusals[4]; // resets on any accepted order; see RecvTrainingStart
+	uint64_t next_action_at;            // now_ms(): at most one new training order per tick, paced like gather
+} AutoTrainSettings;
 
 typedef struct {
 	bool loaded;
@@ -1128,7 +1185,8 @@ typedef struct {
 	HyperSettings hyper;
 	
 	TroopData troop;
-	
+	AutoTrainSettings autotrain;
+
 	WoundedTroopData wounded;
 	
 	ProtectionSettings protection;

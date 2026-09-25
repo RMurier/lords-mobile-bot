@@ -3787,11 +3787,20 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 			matched++;
 			pos += WAR_RECORD_SIZE;
 		} else if (zone_id < WAR_ZONE_COUNT && c->gather.enabled && tag >= 1 && tag <= 5) {
-			GatherTile *t = GatherTrackTile(c, zone_id, point_id);
-			if (t) {
-				t->resource_kind = tag;
-				t->level  = read_u8(data + pos + 22);
-				t->amount = read_u32(data + pos + 23);
+			uint8_t  level  = read_u8(data + pos + 22);
+			uint32_t amount = read_u32(data + pos + 23);
+			// A real resource tile always has a level of 1-5 (see GatherTile's comment) and a
+			// positive stock. The byte-by-byte resync a few lines down can make tag land on
+			// 1..5 by coincidence inside unrelated data (e.g. a name), producing a "tile" with
+			// level 0 and a near-UINT32_MAX amount; skip it instead of tracking/overwriting a
+			// real tile with garbage - it would never be gatherable anyway.
+			if (level >= 1 && level <= 5 && amount > 0) {
+				GatherTile *t = GatherTrackTile(c, zone_id, point_id);
+				if (t) {
+					t->resource_kind = tag;
+					t->level  = level;
+					t->amount = amount;
+				}
 			}
 			matched++;
 			pos += WAR_RECORD_SIZE;
@@ -3868,6 +3877,35 @@ void RequestGatherRecall(Connection *c, uint32_t march_id) {
 	send_packet(c, true);
 }
 
+// FIFO of troops committed to gather marches still out - see GatherSettings' comment.
+static void GatherQueuePush(Connection *c, uint32_t amount) {
+	if (c->gather.pending_count >= GATHER_MAX_ACTIVE_MARCHES) return; // should not happen (bounded by player.max_marches well under this); drop rather than overflow
+	uint8_t idx = (uint8_t)((c->gather.pending_head + c->gather.pending_count) % GATHER_MAX_ACTIVE_MARCHES);
+	c->gather.pending_amounts[idx] = amount;
+	c->gather.pending_count++;
+	c->gather.troops_out += amount;
+}
+
+// Undo the optimistic push right after a march is refused - the troops never actually left,
+// so this removes the entry we JUST pushed (the back of the queue), not the oldest one.
+static void GatherQueuePopBack(Connection *c) {
+	if (c->gather.pending_count == 0) return;
+	c->gather.pending_count--;
+	uint8_t idx = (uint8_t)((c->gather.pending_head + c->gather.pending_count) % GATHER_MAX_ACTIVE_MARCHES);
+	uint32_t amount = c->gather.pending_amounts[idx];
+	c->gather.troops_out -= (c->gather.troops_out >= amount) ? amount : c->gather.troops_out;
+}
+
+// A march came home - credit back whichever amount was sent first (oldest still out). Not
+// necessarily THIS march's real amount (see GatherSettings' comment), but the best available.
+static void GatherQueuePopFront(Connection *c) {
+	if (c->gather.pending_count == 0) return;
+	uint32_t amount = c->gather.pending_amounts[c->gather.pending_head];
+	c->gather.pending_head = (uint8_t)((c->gather.pending_head + 1) % GATHER_MAX_ACTIVE_MARCHES);
+	c->gather.pending_count--;
+	c->gather.troops_out -= (c->gather.troops_out >= amount) ? amount : c->gather.troops_out;
+}
+
 void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size) {
 	if (size < 2) return;
 	uint8_t status = read_u8(data);
@@ -3876,9 +3914,20 @@ void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size) {
 	if (status != 0) {
 		LOGW("[GATHER] Marche refusée (code %u)\n", status);
 		if (c->gather.active_marches > 0) c->gather.active_marches--; // undo the optimistic count at send time
+		GatherQueuePopBack(c); // and undo the optimistic troops_out push from the same send
+
+		if (++c->gather.consecutive_refusals >= GATHER_REFUSAL_WARN_THRESHOLD && !c->gather.refusal_warned) {
+			c->gather.refusal_warned = true;
+			LOGW("[GATHER] %u refus consécutifs sur des tuiles différentes : ce n'est pas "
+				"\"tuile déjà prise\" (improbable pour autant de tuiles distinctes), plus probablement "
+				"pas assez de troupes du tier attendu pour le nombre envoyé (voir le commentaire de "
+				"GATHER_DEFAULT_TROOP_CAPACITY dans connection.h)\n", c->gather.consecutive_refusals);
+		}
 		return;
 	}
 
+	c->gather.consecutive_refusals = 0;
+	c->gather.refusal_warned = false;
 	c->player.current_marches++;
 	LOGD("[GATHER] Marche #%u acceptée\n", march_id);
 }
@@ -3902,6 +3951,7 @@ void RecvGatherTroopHome(Connection *c, const uint8_t *data, uint16_t size) {
 	(void)data; (void)size;
 	if (c->gather.active_marches > 0) c->gather.active_marches--;
 	if (c->player.current_marches > 0) c->player.current_marches--;
+	GatherQueuePopFront(c); // credit the troops back as available again
 	// Re-arm the pacing: whatever next_march_at held could be long past (a slot can
 	// free up after a march of several minutes), and firing the next march the
 	// instant that happens is exactly the "no delay" case GatherTick's arm-then-act
@@ -3990,16 +4040,40 @@ void GatherTick(Connection *c) {
 	GatherTile *t = GatherBestUntargeted(c);
 	if (!t) return;
 
-	uint32_t count = (uint32_t)(t->amount / GATHER_DEFAULT_TROOP_CAPACITY) + 1;
+	uint32_t raw_count = (uint32_t)(t->amount / GATHER_DEFAULT_TROOP_CAPACITY) + 1;
+	uint32_t count = raw_count;
+	uint32_t available = 0;
+	bool troop_capped = false;
+
+	// raw_count above has no idea how many troops the account actually has free - it is purely
+	// the tile's own stock divided by an unverified per-troop capacity constant (see its
+	// comment). c->troop.total minus troops_out (troops this code already committed to
+	// marches still out - see GatherSettings' comment) is a hard ceiling regardless of that
+	// formula's accuracy or of which tier/kind the server ends up drawing from (troop_type_id
+	// 0 = auto-pick - see RequestGatherMarch's comment): asking for more than what is free is
+	// guaranteed to fail. This does not fix the formula, just stops requests that cannot
+	// possibly succeed.
+	if (c->troop.loaded) {
+		available = c->troop.total > c->gather.troops_out ? c->troop.total - c->gather.troops_out : 0;
+		if (available == 0) return; // nothing free right now - leave the tile untargeted, try again later
+		if (count > available) { count = available; troop_capped = true; }
+	}
 
 	t->targeted = true;
 	c->gather.active_marches++;
 	c->gather.next_march_at = GatherHumanDelay(); // one march per delay, never several back to back
+	GatherQueuePush(c, count);
 	RequestGatherMarch(c, t->zone_id, t->point_id, 0, count);
 
 	map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
-	LOGI("[GATHER] Envoi de %u troupes vers X:%u Y:%u (niveau %u, %u en stock)\n",
-		count, pos.x, pos.y, t->level, t->amount);
+	if (troop_capped)
+		LOGI("[GATHER] Envoi de %u troupes (plafonne, %u demandees par le calcul) vers X:%u Y:%u "
+			"(niveau %u, %u en stock) - %u troupes libres sur %u au total\n",
+			count, raw_count, pos.x, pos.y, t->level, t->amount, available, c->troop.total);
+	else
+		LOGI("[GATHER] Envoi de %u troupes vers X:%u Y:%u (niveau %u, %u en stock)%s\n",
+			count, pos.x, pos.y, t->level, t->amount,
+			c->troop.loaded ? "" : " (troupes non chargees, aucun plafond applique)");
 }
 
 /* ------------------------------------------------------------------------
@@ -4210,36 +4284,192 @@ void RecvArmyGroupInfoLog(Connection *c) {
 	for (int i = 3; i >= 0; i--) {
 		printf("T%d Siege: %u\n", i + 1, c->troop.siege[i]);
 	}
-	
+
+	for (int i = 0; i < 4; i++) {
+		printf("T5 %s: %u\n", (const char*[]){"Infantry","Ranged","Cavalry","Siege"}[i], c->troop.t5_data[i]);
+	}
 }
 
-void RecvArmyGroupInfo(Connection *c, const uint8_t *data) {
+/* Confirmed from a capture: sent once, unsolicited, in the burst of "everything about
+ * your account" pushes right after login (alongside ITEMINFO, BUILDINGINFO, RESEARCHINFO...).
+ * Not seen answering any client request in that same capture - no _MSG_REQUEST_* near 2400
+ * exists in the bot's own request list either, and every client packet type in the capture
+ * already has a name in packet_map.h (i.e. nothing unidentified could be it). So, like the
+ * gather/war map data, treat this as a one-time snapshot from login time: nothing re-sends
+ * it as troops train/march/return, so c->troop drifts stale over a long session. */
+void RecvArmyGroupInfo(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 64) return;
+
 	uint16_t offset = 0;
-	
+	c->troop.total = 0; // was never reset: a second delivery (e.g. after a reconnect) used to add onto the old total forever
+
 	for (int index = 0; index < 4; index++) {
 		c->troop.infantry[index] = read_u32(data + offset); offset += 4;
 		c->troop.total += c->troop.infantry[index];
 	}
-	
+
 	for (int index = 0; index < 4; index++) {
 		c->troop.ranged[index] = read_u32(data + offset); offset += 4;
 		c->troop.total += c->troop.ranged[index];
 	}
-	
+
 	for (int index = 0; index < 4; index++) {
 		c->troop.cavalry[index] = read_u32(data + offset); offset += 4;
 		c->troop.total += c->troop.cavalry[index];
 	}
-	
+
 	for (int index = 0; index < 4; index++) {
 		c->troop.siege[index] = read_u32(data + offset); offset += 4;
 		c->troop.total += c->troop.siege[index];
 	}
-	
+
+	// T5 troops: a trailing 16 bytes the struct already had a field for (t5_data) but that
+	// nothing ever filled. Confirmed present in the capture (payload was 80 bytes, not 64).
+	// Kind order [infantry, ranged, cavalry, siege] inferred from the captured values
+	// (370182, 354172, 406000, 0): the account could train T5 infantry/ranged/cavalry but
+	// had T5 siege locked, consistent with the 4th slot = siege - though the field itself
+	// cannot tell "locked" apart from "unlocked but happens to have 0" (same 0 either way),
+	// so this is still an inference, just a better-supported one, not a confirmed field.
+	if (size >= 80) {
+		for (int index = 0; index < 4; index++) {
+			c->troop.t5_data[index] = read_u32(data + offset); offset += 4;
+			c->troop.total += c->troop.t5_data[index];
+		}
+	}
+
 	c->troop.loaded = true;
-	
+
 	// RecvArmyGroupInfoLog(c);
 	return;
+}
+
+// NULL for an out-of-range kind/tier (T5 is TIER_T5 = 4, stored separately in t5_data since
+// the other arrays are only [4] wide for T1-T4 - see TroopData's comment).
+static uint32_t *TroopBucket(Connection *c, uint8_t kind, uint8_t tier) {
+	uint32_t *bucket = NULL;
+	switch (kind) {
+		case TROOP_INFANTRY: bucket = c->troop.infantry; break;
+		case TROOP_RANGED:   bucket = c->troop.ranged;   break;
+		case TROOP_CAVALRY:  bucket = c->troop.cavalry;  break;
+		case TROOP_SIEGE:    bucket = c->troop.siege;    break;
+		default: return NULL;
+	}
+	if (tier <= TIER_T4) return &bucket[tier];
+	if (tier == TIER_T5) return &c->troop.t5_data[kind];
+	return NULL;
+}
+
+// Shared by every "N troops of this kind/tier were added" packet below. Also the one place
+// that knows a kind's training building just freed up - see AutoTrainSettings' comment.
+static void TroopAdd(Connection *c, uint8_t kind, uint8_t tier, uint32_t amount) {
+	if (kind < 4)
+		c->autotrain.kind_busy[kind] = false;
+
+	// Only add on top of a real baseline: without one (c->troop never loaded from
+	// _MSG_RESP_ARMYGROUPINFO_), applying just this delta would show a small "total" that
+	// looks complete but is missing everything the account already had before this event.
+	if (!c->troop.loaded) return;
+
+	uint32_t *bucket = TroopBucket(c, kind, tier);
+	if (!bucket) return;
+
+	*bucket += amount;
+	c->troop.total += amount;
+}
+
+/* Confirmed from a capture: instant-training 7226 T2 archers with gems answered with a
+ * 39-byte _MSG_RESP_TRAINING_IMMEDIATELY (2412) payload
+ *   00 14 22 0e 00 01 01 3a 1c 00 00 ea f0 ...
+ * where byte 0 is a status (0 = success, matching every other status-first response in this
+ * file), bytes 5-6 are kind/tier exactly as RequestTroopTraining sends them (01=TROOP_RANGED,
+ * 01=TIER_T2), and bytes 7-10 are the trained amount as a u32 LE: 0x00001c3a = 7226, matching
+ * exactly. Bytes 1-4 and everything past offset 11 are not decoded (28 bytes left; not needed
+ * to keep c->troop in sync). Only fires for the gem "finish now" button - see RecvAddSoldier
+ * for the packet that fires on every completion, gems or not. */
+void RecvTroopTrainingImmediate(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 11) return;
+	if (read_u8(data) != 0) return; // status: 0 = success
+
+	TroopAdd(c, read_u8(data + 5), read_u8(data + 6), read_u32(data + 7));
+}
+
+/* Confirmed from a capture of 3 trainings of the same 7226 T2 archers, finished 3 different
+ * ways (gem instant-finish, item speedup then a natural finish, twice): _MSG_RESP_ADDSOLDIER_
+ * (2409) fired once per training, each time regardless of how it finished, with an 18-byte
+ * payload starting `01 01 3a 1c 00 00 ...` every time - kind(1) + tier(1) + amount as u32 LE
+ * (0x00001c3a = 7226), no leading status byte (unsolicited push, not a direct request answer).
+ * The remaining 12 bytes are not decoded. This is the general "troops were added" signal -
+ * unlike _MSG_RESP_TRAINING_IMMEDIATELY, it also covers a training left to finish on its own. */
+void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 6) return;
+
+	TroopAdd(c, read_u8(data), read_u8(data + 1), read_u32(data + 2));
+}
+
+/* Confirmed from a capture: reply to our own _MSG_REQUEST_TRAINING_ (RequestTroopTraining),
+ * 39 bytes, seen 3 times (one per training queued), always starting
+ *   00 01 01 3a 1c 00 00 ...
+ * status(1)=0 success, kind(1), tier(1), amount(4) as u32 LE - same values queued, e.g. here
+ * RANGED/T2/7226. Only confirms the order was accepted; troops are not added yet (that is
+ * RecvAddSoldier / RecvTroopTrainingImmediate, later). Every capture sample had status 0 -
+ * a refusal's exact code is not confirmed, just that a non-zero byte means refused, same
+ * convention as every other status-first response in this file. */
+void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 2) return;
+
+	uint8_t status = read_u8(data);
+	uint8_t kind = read_u8(data + 1);
+	if (kind >= 4) return;
+
+	if (status != 0) {
+		c->autotrain.kind_busy[kind] = false;
+
+		uint16_t refusals = ++c->autotrain.kind_consecutive_refusals[kind];
+		if (refusals >= AUTOTRAIN_HARD_BLOCK_THRESHOLD) {
+			if (refusals == AUTOTRAIN_HARD_BLOCK_THRESHOLD)
+				LOGW("[AUTOTRAIN] %u refus consecutifs pour kind=%u : probablement un palier de "
+					"recherche ou de batiment non atteint pour ce niveau de troupe, pas juste un "
+					"manque de ressources temporaire - on repasse a un essai toutes les 30 minutes\n",
+					refusals, kind);
+			c->autotrain.kind_retry_at[kind] = now_ms() + AUTOTRAIN_HARD_BLOCK_BACKOFF_MS;
+		} else {
+			LOGW("[AUTOTRAIN] Entrainement refuse pour kind=%u (code %u)\n", kind, status);
+			c->autotrain.kind_retry_at[kind] = now_ms() + AUTOTRAIN_REFUSAL_BACKOFF_MS;
+		}
+		return;
+	}
+
+	c->autotrain.kind_consecutive_refusals[kind] = 0;
+	// kind_busy stays true (set when we sent the request) until RecvAddSoldier /
+	// RecvTroopTrainingImmediate reports the batch actually finished.
+}
+
+void AutoTrainTick(Connection *c) {
+	if (!c->autotrain.enabled) return;
+	if (!c->troop.loaded) return; // no real baseline yet (see TroopAdd's comment) - wait for the login snapshot
+
+	if (now_ms() < c->autotrain.next_action_at) return;
+
+	uint64_t now = now_ms();
+	for (uint8_t i = 0; i < c->autotrain.target_count; i++) {
+		AutoTrainTarget *t = &c->autotrain.targets[i];
+		if (t->kind >= 4) continue;
+		if (c->autotrain.kind_busy[t->kind]) continue; // that kind's building is already training - possibly this very target, possibly an earlier one in the list
+		if (now < c->autotrain.kind_retry_at[t->kind]) continue; // back off after a refusal
+
+		uint32_t *bucket = TroopBucket(c, t->kind, t->tier);
+		uint32_t current = bucket ? *bucket : 0;
+		if (current >= t->cap) continue; // this (kind, tier) is already filled - move on to this kind's next entry, if any
+
+		c->autotrain.kind_busy[t->kind] = true; // optimistic, mirrors gather's active_marches pattern
+		c->autotrain.next_action_at = GatherHumanDelay(); // one new order per tick, same pacing as gather
+		RequestTroopTraining(c, t->kind, t->tier, t->cap - current);
+
+		static const char *kind_names[] = {"infanterie", "distance", "cavalerie", "siege"};
+		LOGI("[AUTOTRAIN] Entrainement de %u troupes %s T%u (objectif %u)\n",
+			t->cap - current, kind_names[t->kind], t->tier + 1, t->cap);
+		return;
+	}
 }
 
 static const uint32_t troop_might[4] = {
@@ -5926,8 +6156,12 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 /* A delivery this bot received is a deposit into the guild bank (guildbank.h): the report names the sender and
  * gives the net amounts. Credits them once per report and tells the sender. */
 static void HandleDeposit(Connection *c, const uint8_t *data) {
-	if (!c->guildbank.enabled)
+	if (!c->guildbank.enabled) {
+		char who[14] = {0};
+		memcpy(who, data + 14, 13);
+		LOGI("[BANK] Livraison reçue de %s ignorée : la banque de guilde est désactivée (guildbank.enabled = true pour l'activer)\n", who);
 		return;
+	}
 
 	uint32_t id   = read_u32(data);
 	uint32_t when = read_u32(data + 5);

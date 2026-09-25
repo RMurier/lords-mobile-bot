@@ -91,10 +91,11 @@ void StatusWrite(Connection *c, bool connected)
 		(long long)c->production.food, (long long)c->production.rock, (long long)c->production.wood,
 		(long long)c->production.ore, (long long)c->production.gold);
 
-	fprintf(f, "\"troops\":{\"loaded\":%s,\"total\":%u,\"infantry\":%llu,\"cavalry\":%llu,\"ranged\":%llu,\"siege\":%llu},",
+	fprintf(f, "\"troops\":{\"loaded\":%s,\"total\":%u,\"infantry\":%llu,\"cavalry\":%llu,\"ranged\":%llu,\"siege\":%llu,\"t5\":%llu},",
 		c->troop.loaded ? "true" : "false", c->troop.total,
 		(unsigned long long)TroopSum(c->troop.infantry), (unsigned long long)TroopSum(c->troop.cavalry),
-		(unsigned long long)TroopSum(c->troop.ranged), (unsigned long long)TroopSum(c->troop.siege));
+		(unsigned long long)TroopSum(c->troop.ranged), (unsigned long long)TroopSum(c->troop.siege),
+		(unsigned long long)TroopSum(c->troop.t5_data));
 	fprintf(f, "\"wounded\":{\"loaded\":%s,\"total\":%u},",
 		c->wounded.loaded ? "true" : "false", c->wounded.troop.total);
 
