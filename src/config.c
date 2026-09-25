@@ -249,6 +249,47 @@ static bool ParseTroopKind(const char *s, uint8_t *out)
     return false;
 }
 
+/* "INFANTRY, RANGED, CAVALRY, SIEGE" - which kind's slot a gather march fills, tried in this
+ * order at send time (see GatherSettings' kind_priority comment): falls back to the next kind
+ * if the previous one has no troops free right now. Each kind at most once. */
+static bool ParseGatherKindPriority(Connection *c, const char *value)
+{
+    char buffer[128];
+    strncpy(buffer, value, sizeof(buffer));
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    c->gather.kind_priority_count = 0;
+    bool seen[4] = {0};
+
+    for (char *token = strtok(buffer, ","); token; token = strtok(NULL, ",")) {
+        while (*token == ' ')
+            token++;
+        char *end = token + strlen(token);
+        while (end > token && end[-1] == ' ')
+            *--end = '\0';
+        if (*token == '\0')
+            continue;
+
+        uint8_t kind;
+        if (!ParseTroopKind(token, &kind)) {
+            printf("Invalid gather.kind entry: %s (expected INFANTRY, RANGED, CAVALRY or SIEGE)\n", token);
+            return false;
+        }
+        if (seen[kind]) {
+            printf("Duplicate gather.kind entry: %s\n", token);
+            return false;
+        }
+        if (c->gather.kind_priority_count >= 4) {
+            printf("Too many gather.kind entries (max 4)\n");
+            return false;
+        }
+        seen[kind] = true;
+        c->gather.kind_priority[c->gather.kind_priority_count++] = kind;
+    }
+
+    return true;
+}
+
 uint64_t parse_number_u64(const char *str); // command.c - accepts a plain number or one with a K/M/B suffix
 
 /* One box of the 4x5 grid (see AutoTrainSettings' comment): autotrain.<kind>_t<N> = target,
@@ -489,13 +530,7 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 	}
 
 	if (strcmp(key, "gather.kind") == 0) {
-		uint8_t kind;
-		if (!ParseTroopKind(value, &kind)) {
-			printf("Invalid gather.kind: %s (expected INFANTRY, RANGED, CAVALRY or SIEGE)\n", value);
-			return false;
-		}
-		c->gather.kind = kind;
-		return true;
+		return ParseGatherKindPriority(c, value);
 	}
 
 	if (strcmp(key, "gather.max_troop_count") == 0) {
@@ -758,7 +793,11 @@ bool LoadConfig(Connection *c, const char *filename)
 	c->migration_scrolls_needed = 1;
 	c->gather.max_marches = 1;
 	c->gather.radius      = 30;
-	c->gather.kind        = TROOP_INFANTRY;
+	c->gather.kind_priority[0] = TROOP_INFANTRY;
+	c->gather.kind_priority[1] = TROOP_RANGED;
+	c->gather.kind_priority[2] = TROOP_CAVALRY;
+	c->gather.kind_priority[3] = TROOP_SIEGE;
+	c->gather.kind_priority_count = 4;
 	c->gather.pending_tile = GATHER_NO_PENDING_TILE;
 	c->recall.pause_seconds = 300; // $recall: no march for 5 minutes
 	c->notify.on_war = true; // preserves the old always-on-when-webhook-set war alert behavior

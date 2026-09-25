@@ -85,6 +85,11 @@ static Connection *fresh(const char *admins)
 	Connection *c = calloc(1, sizeof(*c));
 	c->sock = -1;
 	c->gather.pending_tile = GATHER_NO_PENDING_TILE;
+	c->gather.kind_priority[0] = TROOP_INFANTRY; // matches LoadConfig's default fallback chain
+	c->gather.kind_priority[1] = TROOP_RANGED;
+	c->gather.kind_priority[2] = TROOP_CAVALRY;
+	c->gather.kind_priority[3] = TROOP_SIEGE;
+	c->gather.kind_priority_count = 4;
 	c->bot.command_prefix = '$';
 	c->bot.command_input_mask = (1u << COMMAND_CHANNEL_GUILD) | (1u << COMMAND_CHANNEL_MAIL);
 	c->bot.command_output = COMMAND_CHANNEL_MAIL;
@@ -1437,6 +1442,31 @@ static const uint8_t build_event_none[] = {
 		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) < 0 && !c->gather.tiles[0].targeted
 			&& c->gather.active_marches == 0,
 			"gather: with zero troops recorded, no march is sent and the tile/slot are freed again");
+		CHECK(c->gather.next_march_at > now_ms() + 15000,
+			"gather: a troop shortage backs off for a while instead of re-picking the same tile every tick");
+		free(c);
+
+		/* gather.kind is a priority list: falls back to the next kind if the first has nothing free */
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 1;
+		c->gather.scan_done = true;
+		c->player.max_marches = 6;
+		c->gather.tile_count = 1;
+		c->gather.tiles[0] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 2, .level = 3, .amount = 1000 };
+		c->troop.loaded = true;
+		c->troop.infantry[0] = 0;   // top of the priority list: nothing free
+		c->troop.ranged[0] = 4000;  // next in the list: plenty free
+		reset_sent();
+		c->gather.next_march_at = 1;
+		GatherTick(c);
+		c->gather.march_send_at = 1;
+		GatherTick(c);
+		k = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
+		uint32_t ranged_amt = k >= 0 ? (uint32_t)(sent[k][38] | sent[k][39] << 8 | sent[k][40] << 16 | sent[k][41] << 24) : 0;
+		uint32_t infantry_amt = k >= 0 ? (uint32_t)(sent[k][22] | sent[k][23] << 8 | sent[k][24] << 16 | sent[k][25] << 24) : 0;
+		CHECK(k >= 0 && infantry_amt == 0 && ranged_amt > 0,
+			"gather: falls back to the next kind in priority order when the first has nothing free");
 		free(c);
 
 		/* gather also subtracts troops already committed to marches still out, not just c->troop.total */

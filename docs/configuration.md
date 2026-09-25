@@ -486,18 +486,23 @@ Scans the zones around the castle (one at a time) for resource tiles and sends g
 
 ```cfg
 gather.enabled = false
-gather.kind = INFANTRY
+gather.kind = INFANTRY, RANGED, CAVALRY, SIEGE
 gather.max_marches = 1
 gather.radius = 30
 gather.max_troop_count = 0
 ```
 
-A gather march only ever uses **one** troop kind at a time (`gather.kind`: `INFANTRY`, `RANGED`, `CAVALRY` or `SIEGE`) - confirmed
-from live captures, the request is 4 fixed slots (one per kind), not a single "pick a tier" field. Whichever kind you choose must
-have troops sitting idle whenever gathering runs, or every march is refused (code 2) no matter how many troops the account has in
-total. The troop *count* per march is still an experimental estimate (`GATHER_DEFAULT_TROOP_CAPACITY`, one captured sample) - it can
-ask for far more than you have; `gather.max_troop_count` (0 = no cap) and the account's own known troop total for the chosen kind
-both cap it, whichever is lower.
+A gather march only ever uses **one** troop kind at a time - confirmed from live captures, the request is 4 fixed slots (one per
+kind), not a single "pick a tier" field. `gather.kind` is a priority list: the first kind with troops actually free right now wins
+for that march, falling back to the next one otherwise (e.g. infantry first, ranged if infantry is out) - if every kind in the list
+is empty, the march waits (~30s backoff, logged) instead of retrying every tick. Which *tier* gets used within the chosen kind is
+left to the server's own auto-pick (confirmed live: it already picks the account's lowest available tier on its own, e.g. T2 when
+T1 is empty) - not something this bot chooses. The troop *count* per march is still an experimental estimate
+(`GATHER_DEFAULT_TROOP_CAPACITY`, one captured sample) - it can ask for far more than you have; `gather.max_troop_count` (0 = no
+cap) and the chosen kind's own known troop total both cap it, whichever is lower.
+
+Also skips any tile currently occupied (confirmed live: an occupied tile's map data embeds the occupier's name and alliance tag)
+- it is never targeted until it shows free again.
 
 `gather.max_marches` reserves that many of the account's total marches for gathering. `gather.radius` is how far around the castle
 (in tiles) to scan for resource tiles.

@@ -454,7 +454,16 @@ typedef struct {
     uint8_t  max_marches;   // out of player.max_marches, how many to use for gathering
     uint16_t radius;        // tiles around the castle to scan
     uint32_t max_troop_count; // never send more troops than this in one gather march (0 = no cap)
-    uint8_t  kind;          // TroopKind: which of the 4 troop-count slots RequestGatherMarch fills (default TROOP_INFANTRY)
+
+    /* Which of the 4 troop-count slots RequestGatherMarch fills, tried in this order: the
+     * first kind with troops actually free right now wins for that march (e.g. infantry
+     * first, fall back to ranged if infantry is out) - see GatherTick's comment. Tier choice
+     * within whichever kind is picked is left to the server's own auto-pick (troop_type_id/
+     * the per-slot tag - always 0 in every capture so far, and it picked this account's
+     * lowest available tier on its own, e.g. T2 when T1 was empty - so this is not
+     * reimplemented here; only which KIND to use is ours to decide). */
+    uint8_t  kind_priority[4];
+    uint8_t  kind_priority_count;
 
     bool     scan_done;
     uint16_t scan_cursor;   // index into the zone rectangle being swept

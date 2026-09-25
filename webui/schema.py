@@ -48,6 +48,7 @@ RESOURCES = [("food", "Nourriture"), ("rock", "Pierre"), ("wood", "Bois"), ("ore
 
 TROOP_TIERS = ["T1", "T2", "T3", "T4", "T5"]
 TROOP_KINDS_FR = [("infantry", "Infanterie"), ("ranged", "Distance"), ("cavalry", "Cavalerie"), ("siege", "Siège")]
+GATHER_KINDS = ["INFANTRY", "RANGED", "CAVALRY", "SIEGE"]
 
 
 def _bool(key, label, help="", default=False, depends=None):
@@ -281,12 +282,11 @@ CATEGORIES = [
                       "échantillon capturé.",
         "fields": [
             _bool("gather.enabled", "Activer la récolte automatique"),
-            {"key": "gather.kind", "label": "Type de troupe envoyé", "type": "select",
-             "options": [("INFANTRY", "Infanterie"), ("RANGED", "Distance"), ("CAVALRY", "Cavalerie"), ("SIEGE", "Siège")],
-             "default": "INFANTRY", "depends": "gather.enabled",
-             "help": "La marche de récolte n'utilise qu'un seul type de troupe à la fois. Choisissez-en un que "
-                     "vous gardez toujours disponible en nombre - la récolte est refusée sans ça (code 2), "
-                     "quel que soit le nombre total de troupes du compte."},
+            {"key": "gather.kind", "label": "Type de troupe envoyé (ordre de repli)", "type": "gather_kind_priority",
+             "default": "INFANTRY, RANGED, CAVALRY, SIEGE", "depends": "gather.enabled",
+             "help": "Une marche de récolte n'utilise qu'un seul type de troupe à la fois, mais si le premier "
+                     "de la liste n'a plus de troupes libres, le suivant est essayé automatiquement. "
+                     "Ex : INFANTRY, RANGED, CAVALRY, SIEGE."},
             {"key": "gather.max_marches", "label": "Marches réservées à la récolte", "type": "int",
              "min": 1, "max": 30, "default": "1", "depends": "gather.enabled",
              "help": "Sur le total de marches du compte, combien peuvent être utilisées pour la récolte en même temps."},
@@ -614,6 +614,16 @@ def validate(field, raw):
         if len(names) > 8:
             raise ValueError("Maximum 8 objets.")
         return ", ".join(names)
+
+    if kind == "gather_kind_priority":
+        kinds = [part.strip().upper() for part in text.split(",") if part.strip()]
+        if not kinds:
+            raise ValueError("Choisissez au moins un type de troupe.")
+        if any(k not in GATHER_KINDS for k in kinds):
+            raise ValueError("Type de troupe inconnu (INFANTRY, RANGED, CAVALRY ou SIEGE).")
+        if len(set(kinds)) != len(kinds):
+            raise ValueError("Un même type ne peut apparaître qu'une fois.")
+        return ", ".join(kinds)
 
     if kind == "names":
         names = []

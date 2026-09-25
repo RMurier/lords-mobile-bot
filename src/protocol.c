@@ -3957,6 +3957,8 @@ static bool GatherZoneAt(Connection *c, uint16_t index, uint16_t *zone_out) {
  * bot ever sent was therefore requesting `count` siege troops and 0 of everything else - most
  * likely why they were refused almost unconditionally (accounts rarely keep siege troops idle
  * for gathering) independently of whatever tier the server would have auto-picked. */
+static const char *TROOP_KIND_NAMES[4] = {"infanterie", "distance", "cavalerie", "siege"};
+
 void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint8_t kind, uint32_t troop_count) {
 	if (MarchesPaused()) {
 		LOGW("[RECALL] Marche de récolte non envoyée : marches suspendues\n");
@@ -4173,51 +4175,71 @@ void GatherTick(Connection *c) {
 		uint32_t count = raw_count;
 		uint32_t available = 0;
 		uint32_t kind_total = 0;
+		uint8_t  chosen_kind = c->gather.kind_priority_count ? c->gather.kind_priority[0] : TROOP_INFANTRY;
 		bool troop_capped = false;
+		bool have_kind = !c->troop.loaded; // no baseline yet: skip the whole check, same as before
 
 		// raw_count has no idea how many troops the account actually has free right now - it is
 		// purely the tile's stock divided by an unverified per-troop capacity constant, optionally
-		// capped by the admin's own known max_troop_count. The account's total of c->gather.kind
-		// (every tier of it combined) minus troops_out (this kind's troops already committed to
-		// marches still out - see GatherSettings' comment) is a hard ceiling on top of that -
-		// RequestGatherMarch now fills that exact kind's slot (see its comment), so this must
-		// check that same kind's troops, not the whole account's total across every kind.
+		// capped by the admin's own known max_troop_count. Try kind_priority in order and use the
+		// first kind that actually has troops free (its total, every tier combined, minus
+		// troops_out already committed to marches still out - see GatherSettings' comment) - e.g.
+		// fall back to ranged if infantry is out. Tier choice within that kind is left to the
+		// server's own auto-pick (see kind_priority's comment).
 		if (c->troop.loaded) {
-			const uint32_t *bucket;
-			switch (c->gather.kind) {
-				case TROOP_RANGED:  bucket = c->troop.ranged;  break;
-				case TROOP_CAVALRY: bucket = c->troop.cavalry; break;
-				case TROOP_SIEGE:   bucket = c->troop.siege;   break;
-				default:             bucket = c->troop.infantry; break;
+			for (uint8_t i = 0; i < c->gather.kind_priority_count && !have_kind; i++) {
+				uint8_t kind = c->gather.kind_priority[i];
+				const uint32_t *bucket;
+				switch (kind) {
+					case TROOP_RANGED:  bucket = c->troop.ranged;  break;
+					case TROOP_CAVALRY: bucket = c->troop.cavalry; break;
+					case TROOP_SIEGE:   bucket = c->troop.siege;   break;
+					default:             bucket = c->troop.infantry; break;
+				}
+				uint32_t total = bucket[0] + bucket[1] + bucket[2] + bucket[3] + c->troop.t5_data[kind];
+				uint32_t free_now = total > c->gather.troops_out ? total - c->gather.troops_out : 0;
+				if (free_now > 0) {
+					have_kind = true;
+					chosen_kind = kind;
+					kind_total = total;
+					available = free_now;
+				}
 			}
-			kind_total = bucket[0] + bucket[1] + bucket[2] + bucket[3] + c->troop.t5_data[c->gather.kind];
 
-			available = kind_total > c->gather.troops_out ? kind_total - c->gather.troops_out : 0;
-			if (available == 0) {
-				// Nothing free right now: this is our own shortage, not the tile's fault (unlike
-				// a server refusal) - free the tile and the march slot reserved for it in the
-				// target-picking step instead of burning both on a march that never goes out.
+			if (!have_kind) {
+				// Nothing free in any priority kind right now: this is our own shortage, not the
+				// tile's fault (unlike a server refusal) - free the tile and the march slot
+				// reserved for it in the target-picking step instead of burning both on a march
+				// that never goes out.
 				t->targeted = false;
 				if (c->gather.active_marches > 0) c->gather.active_marches--;
 				c->gather.pending_tile = GATHER_NO_PENDING_TILE;
+				// Without this, the tile stays the "best" pick and gets re-selected next tick,
+				// re-sending RequestMapAdvance for it every 1-2s forever with no visible sign
+				// why - this was silent before, easily mistaken for "stuck". A committed march
+				// only frees troops back up when it returns (minutes), so retrying every couple
+				// of seconds is pointless - back off, and say why once instead of every cycle.
+				c->gather.next_march_at = now_ms() + 30000 + (uint64_t)(rand() % 15000);
+				LOGW("[GATHER] Plus aucune troupe disponible dans les %u type(s) configures pour "
+					"l'instant - nouvel essai dans ~30s\n", c->gather.kind_priority_count);
 				return;
 			}
 			if (count > available) { count = available; troop_capped = true; }
 		}
 
-		RequestGatherMarch(c, t->zone_id, t->point_id, c->gather.kind, count);
+		RequestGatherMarch(c, t->zone_id, t->point_id, chosen_kind, count);
 		GatherQueuePush(c, count);
 		c->gather.pending_tile = GATHER_NO_PENDING_TILE;
 		c->gather.next_march_at = GatherHumanDelay(); // one march per delay, never several back to back
 
 		map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
 		if (troop_capped)
-			LOGI("[GATHER] Envoi de %u troupes (plafonne, %u demandees par le calcul) vers X:%u Y:%u "
+			LOGI("[GATHER] Envoi de %u troupes %s (plafonne, %u demandees par le calcul) vers X:%u Y:%u "
 				"(niveau %u, %u en stock) - %u troupes libres sur %u de ce type au total\n",
-				count, raw_count, pos.x, pos.y, t->level, t->amount, available, kind_total);
+				count, TROOP_KIND_NAMES[chosen_kind], raw_count, pos.x, pos.y, t->level, t->amount, available, kind_total);
 		else
-			LOGI("[GATHER] Envoi de %u troupes vers X:%u Y:%u (niveau %u, %u en stock)%s\n",
-				count, pos.x, pos.y, t->level, t->amount,
+			LOGI("[GATHER] Envoi de %u troupes %s vers X:%u Y:%u (niveau %u, %u en stock)%s\n",
+				count, TROOP_KIND_NAMES[chosen_kind], pos.x, pos.y, t->level, t->amount,
 				c->troop.loaded ? "" : " (troupes non chargees, aucun plafond applique)");
 		return;
 	}
@@ -4583,8 +4605,6 @@ void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size) {
 	TroopAdd(c, read_u8(data), read_u8(data + 1), read_u32(data + 2));
 }
 
-static const char *AUTOTRAIN_KIND_NAMES[4] = {"infanterie", "distance", "cavalerie", "siege"};
-
 /* Confirmed from a capture: reply to our own _MSG_REQUEST_TRAINING_ (RequestTroopTraining),
  * 39 bytes, seen 3 times (one per training queued), always starting
  *   00 01 01 3a 1c 00 00 ...
@@ -4624,10 +4644,10 @@ void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size) {
 			LOGW("[AUTOTRAIN] %u refus consecutifs pour %s T%u : probablement un palier de "
 				"recherche ou de batiment non atteint pour ce palier, pas juste un manque de "
 				"ressources temporaire - on repasse a un essai toutes les 30 minutes\n",
-				refusals, AUTOTRAIN_KIND_NAMES[kind], tier + 1);
+				refusals, TROOP_KIND_NAMES[kind], tier + 1);
 		c->autotrain.retry_at[kind][tier] = now_ms() + AUTOTRAIN_HARD_BLOCK_BACKOFF_MS;
 	} else {
-		LOGW("[AUTOTRAIN] Entrainement refuse pour %s T%u (code %u)\n", AUTOTRAIN_KIND_NAMES[kind], tier + 1, status);
+		LOGW("[AUTOTRAIN] Entrainement refuse pour %s T%u (code %u)\n", TROOP_KIND_NAMES[kind], tier + 1, status);
 		c->autotrain.retry_at[kind][tier] = now_ms() + AUTOTRAIN_REFUSAL_BACKOFF_MS;
 	}
 }
@@ -4656,7 +4676,7 @@ void AutoTrainTick(Connection *c) {
 			RequestTroopTraining(c, kind, tier, target - current);
 
 			LOGI("[AUTOTRAIN] Formation de %u troupes %s T%u (objectif %u)\n",
-				target - current, AUTOTRAIN_KIND_NAMES[kind], tier + 1, target);
+				target - current, TROOP_KIND_NAMES[kind], tier + 1, target);
 			return;
 		}
 	}
