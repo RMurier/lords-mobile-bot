@@ -5917,9 +5917,18 @@ void RecvSHelp(Connection *c, const uint8_t *data) {
 	// comment): without it, this march's accept response was arriving fast enough that the next
 	// one went out with no human delay at all - not_before alone did not fix it, since nothing
 	// here was setting it.
+	//
+	// 2-4s here, wider than the 1-2s used to find the target and send the FIRST march: a live
+	// 10M food delivery (3 marches needed) was kicked by the server with no error packet, no
+	// _MSG_LOGIN_LOGINERRORRESP, right after the SECOND march went out 1.971s after the first
+	// was accepted - looks like repeating the exact same short gap for consecutive marches to
+	// the same target gets flagged, even though that same gap is fine for the first one. Not
+	// confirmed as the fix (could still be a count-based heuristic rather than pure timing,
+	// which widening the delay would only push further out rather than remove) - the first
+	// march's own delay is left alone since it has never been the one observed failing.
 	if (c->transfer.remaining > 0) {
 		RequestMapAdvance(c, c->transfer.zone_id, c->transfer.point_id);
-		c->transfer.not_before = now_ms() + 1000 + (rand() % 1000);
+		c->transfer.not_before = now_ms() + 2000 + (rand() % 2000);
 	}
 
 	c->transfer.state = TRANSFER_SEND_MARCH;
@@ -6055,10 +6064,10 @@ void RecvHelp_Home(Connection *c, const uint8_t *data) {
 		// TRANSFER_SEND_MARCH, once the last march is accepted) - completing here as well is
 		// what notified twice.
 		if (c->transfer.remaining > 0) {
-			// Same pacing as after RecvSHelp: refresh "looking at the target" and wait
-			// before the next march.
+			// Same pacing as after RecvSHelp (see its comment: widened to 2-4s after a live
+			// disconnect on the 2nd march of a multi-march delivery).
 			RequestMapAdvance(c, c->transfer.zone_id, c->transfer.point_id);
-			c->transfer.not_before = now_ms() + 1000 + (rand() % 1000);
+			c->transfer.not_before = now_ms() + 2000 + (rand() % 2000);
 			c->transfer.state = TRANSFER_SEND_MARCH;
 		}
 
