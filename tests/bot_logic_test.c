@@ -1725,14 +1725,40 @@ static const uint8_t build_event_none[] = {
 		AbortTransfer(c);
 		c->transfer_queue_count = 0;
 
-		/* "all" here means everything the bot can give from its stock, not a balance */
+		/* "all" here means everything the bot can give from its stock, not a balance - and unlike
+		 * $admin<ressource>, $adminrss is allowed to dip into the members' deposits, so "all" is
+		 * the whole stock, not the stock minus the 300 gold boss has deposited. */
 		reset_sent();
 		say(c, "boss", "$adminrss 0 0 0 0 all Bob", COMMAND_CHANNEL_MAIL);
 		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].line_count == 1
-			&& c->transfer_queue[0].lines[0].type == RESOURCE_GOLD && c->transfer_queue[0].lines[0].amount == 100000000 - 300,
-			"adminrss: \"all\" takes everything available in the stock (100,000,000 minus the 300 boss deposited)");
+			&& c->transfer_queue[0].lines[0].type == RESOURCE_GOLD && c->transfer_queue[0].lines[0].amount == 100000000
+			&& c->transfer_queue[0].ignore_deposits,
+			"adminrss: \"all\" takes the whole stock, deposits included (100,000,000, not minus the 300 boss deposited)");
 		AbortTransfer(c);
 		c->transfer_queue_count = 0;
+
+		/* asking for more than the stock minus deposits still goes through - only the reserve, not
+		 * the deposits, can stop $adminrss */
+		reset_sent();
+		say(c, "boss", "$adminrss 0 0 0 0 200000000 Bob", COMMAND_CHANNEL_MAIL);   /* > the 100M in stock */
+		CHECK(c->transfer_queue_count == 0 && replied("Ressources insuffisantes"),
+			"adminrss: still rejected once the request exceeds the raw stock itself");
+		reset_sent();
+		say(c, "boss", "$adminrss 0 0 0 0 99999900 Bob", COMMAND_CHANNEL_MAIL);   /* > stock - 300 deposited, <= stock */
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].lines[0].amount == 99999900,
+			"adminrss: dips into the 300 gold members have deposited without being blocked");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		/* the reserve still holds $adminrss back, unlike the deposits */
+		c->bank.reserve.gold = 1000;
+		reset_sent();
+		say(c, "boss", "$adminrss 0 0 0 0 all Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].lines[0].amount == 100000000 - 1000,
+			"adminrss: \"all\" still respects the configured reserve (1000 gold kept back)");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+		c->bank.reserve.gold = 0;
 
 		snprintf(c->alliance_member.member[c->alliance_member.count++].name, 14, "%s", "Little Zyco");
 		reset_sent();

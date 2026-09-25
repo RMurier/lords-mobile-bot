@@ -25,7 +25,7 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$bal <player>` | administrators (guild bank on) | Shows another player's balance |
 | `$rss <food> <stone> <wood> <ore> <gold>` | every guild member (guild bank on) | Withdraws several resources from your own balance in one command; `0` skips a resource, `all` takes the whole balance of that one resource, e.g. `$rss 0 0 0 0 all` for every gold deposited. They are sent in priority order regardless of the order typed: gold, ore, wood, stone, then food last |
 | `$adminfood <player> <amount>` | administrators | Sends food from the bot's stock to that player; same with `adminstone`, `adminwood`, `adminore`, `admingold` |
-| `$adminrss <food> <stone> <wood> <ore> <gold> <player>` | administrators | Same as `$rss` (including `all`, meaning everything available in the stock for that resource), from the bot's stock to another player, e.g. `$adminrss 0 0 0 0 all Bob` |
+| `$adminrss <food> <stone> <wood> <ore> <gold> <player>` | administrators | Same as `$rss` (including `all`, meaning everything available in the stock for that resource), from the bot's stock to another player, e.g. `$adminrss 0 0 0 0 all Bob`. Unlike `$admin<resource>`, this one is allowed to dip into what the members have deposited - only the reserve (`bank.reserve_*`) still holds it back |
 | `$adminall <player>` | administrators | Sends everything currently available to that player, all five resources at once, in the same priority order as `$adminrss`. Unlike every other resource command, this one also sends what is normally kept as the reserve (`bank.reserve.*`) - meant for emptying the bank into another bot before a migration. The guild members' deposits are never touched |
 | `$bank bal` | administrators | Sends the bank, bag and total balance of each resource, in `command.output`'s channel |
 | `$bank bal chat` | administrators | Same, forced into alliance chat regardless of `command.output` |
@@ -221,7 +221,9 @@ per player** instead of giving resources away:
   `$bal Bob`.
 - **Giving from the stock**: `$adminfood <player> <amount>` (and the other resources) sends from the bot's own stock, above the reserve
   (`bank.reserve_*`) **and above what the members have deposited**, never touching either. The name may hold spaces, the amount is the last
-  word (`$adminstone Little Zyco 5M`). Errors go to the administrator. The bag's resource items are not used.
+  word (`$adminstone Little Zyco 5M`). Errors go to the administrator. The bag's resource items are not used. `$adminrss` is the one
+  exception: it is allowed to send what the members have deposited too - only the reserve still blocks it, not what the guild would be
+  short to reimburse everyone.
 - **One delivery at a time**: the others wait in a queue of 16, in order, and are told their place. `$stop` also removes a request that
   is still waiting. Only one request per player: asking again replaces the one waiting; while one of yours is running, another is refused.
 - **Only guild members**: the check uses the member list the bot received (refreshed when somebody is not in it, at most every 30 s).

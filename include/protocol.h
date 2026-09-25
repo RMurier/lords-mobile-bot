@@ -150,7 +150,7 @@ void     AbortTransfer(Connection *c);
 bool     TransferQueuePush(Connection *c, const TransferRequest *request);
 int      TransferQueuePosition(const Connection *c, const char *requester);
 bool     TransferQueueRemove(Connection *c, const char *requester);
-uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balance, bool ignore_reserve);
+uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balance, bool ignore_reserve, bool ignore_deposits);
 void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size);
 void RecvGatheringEvent(Connection *c, const uint8_t *data, uint16_t size);
 void RecvGatherReturnResp(Connection *c, const uint8_t *data, uint16_t size);

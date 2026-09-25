@@ -990,7 +990,7 @@ static bool ParseGrossAmount(const Connection *c, const char *player_name, const
 	ResourceType type, bool from_balance, uint32_t *out)
 {
 	if (strcmp(str, "all") == 0) {
-		uint64_t gross = from_balance ? GuildBankBalance(player_name, type) : StockAvailable(c, type, false, false);
+		uint64_t gross = from_balance ? GuildBankBalance(player_name, type) : StockAvailable(c, type, false, false, true);
 		if (gross > UINT32_MAX)
 			return false;
 		*out = (uint32_t)gross;
@@ -1133,7 +1133,7 @@ static void GuildWithdrawCommand(Connection *c, const char *player_name, const c
 		return;
 	}
 
-	uint32_t stock = StockAvailable(c, type, true, false);
+	uint32_t stock = StockAvailable(c, type, true, false, false);
 	if (gross > stock) {
 		char in_stock[32];
 		FormatExact(stock, in_stock, sizeof(in_stock));
@@ -1234,7 +1234,7 @@ static void AdminResourceCommand(Connection *c, const char *player_name, bool is
 			return;
 	}
 
-	uint32_t available = StockAvailable(c, type, false, false);
+	uint32_t available = StockAvailable(c, type, false, false, false);
 	if (gross > available) {
 		char have[32];
 		FormatExact(available, have, sizeof(have));
@@ -1250,9 +1250,11 @@ static void AdminResourceCommand(Connection *c, const char *player_name, bool is
 }
 
 /* $adminrss <food> <stone> <wood> <ore> <gold> <pseudo>: like $admin<ressource>, but sends up to
- * five resources to the same player in one command - gives from the bot's stock, never from the
- * members' deposits. 0 skips a resource; they leave in priority order (BuildPriorityLines), not
- * the order they are typed in. */
+ * five resources to the same player in one command - gives from the bot's stock, and unlike
+ * $admin<ressource> it is allowed to dip into the members' deposits: what the guild is short to
+ * reimburse everyone is not this command's problem, only an empty stock (below the reserve) blocks
+ * it. 0 skips a resource; they leave in priority order (BuildPriorityLines), not the order they are
+ * typed in. */
 static void AdminRssCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
 {
 	if (!is_admin) {
@@ -1307,18 +1309,18 @@ static void AdminRssCommand(Connection *c, const char *player_name, bool is_admi
 	}
 
 	for (uint8_t i = 0; i < line_count; i++) {
-		uint32_t available = StockAvailable(c, lines[i].type, false, false);
+		uint32_t available = StockAvailable(c, lines[i].type, false, false, true);
 		if (lines[i].amount > available) {
 			char have[32];
 			FormatExact(available, have, sizeof(have));
 			BotReply(c, player_name, "Ressources insuffisantes",
-				"Ressources insuffisantes (%s) : %s disponible, sans toucher à la réserve ni aux dépôts des membres.",
+				"Ressources insuffisantes (%s) : %s disponible, sans toucher à la réserve.",
 				ResourceLabel(lines[i].type), have);
 			return;
 		}
 	}
 
-	TransferRequest request = { .line_count = line_count, .from_balance = false };
+	TransferRequest request = { .line_count = line_count, .from_balance = false, .ignore_deposits = true };
 	memcpy(request.lines, lines, sizeof(lines));
 	snprintf(request.requester, sizeof(request.requester), "%s", player_name);
 	snprintf(request.target, sizeof(request.target), "%s", start);
@@ -1381,7 +1383,7 @@ static void RssCommand(Connection *c, const char *player_name, const char *args)
 			return;
 		}
 
-		uint32_t stock = StockAvailable(c, type, true, false);
+		uint32_t stock = StockAvailable(c, type, true, false, false);
 		if (lines[i].amount > stock) {
 			char in_stock[32];
 			FormatExact(stock, in_stock, sizeof(in_stock));
@@ -1436,7 +1438,7 @@ static void AdminAllCommand(Connection *c, const char *player_name, bool is_admi
 
 	uint32_t gross[5];
 	for (size_t i = 0; i < RESOURCE_COMMAND_COUNT; i++)
-		gross[RESOURCE_COMMANDS[i].type] = StockAvailable(c, RESOURCE_COMMANDS[i].type, false, true);
+		gross[RESOURCE_COMMANDS[i].type] = StockAvailable(c, RESOURCE_COMMANDS[i].type, false, true, false);
 
 	TransferLine lines[TRANSFER_BATCH_MAX];
 	uint8_t line_count = BuildPriorityLines(gross, lines);

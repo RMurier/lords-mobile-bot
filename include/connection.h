@@ -1012,6 +1012,9 @@ typedef struct {
     bool     ignore_reserve; /* $adminall: send everything, the configured reserve included - never set for from_balance (a
                                * member's own deposit is never the bot's reserve to respect) or for anything else */
 
+    bool     ignore_deposits; /* $adminrss: the admin can dip into what members have deposited - only an empty stock
+                                * blocks it. Never set for from_balance or for $admin<resource>/$adminall. */
+
     TransferState state;
 } ResourceTransfer;
 
@@ -1023,6 +1026,7 @@ typedef struct {
     uint8_t      line_count;
     bool         from_balance;   // taken from the requester's guild balance, else from the stock
     bool         ignore_reserve; // $adminall: see ResourceTransfer's own field
+    bool         ignore_deposits; // $adminrss: see ResourceTransfer's own field
 } TransferRequest;
 
 #define TRANSFER_QUEUE_MAX 16

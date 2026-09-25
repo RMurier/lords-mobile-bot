@@ -5555,9 +5555,11 @@ bool TransferQueueRemove(Connection *c, const char *requester)
 
 /* Amount of a resource the bot may give away from its stock: what is above the reserve and, with a guild bank,
  * above what the members have deposited. ignore_reserve ($adminall) still respects the deposits - those are
- * never the bot's to give, migration or not - it only skips the reserve itself. Meaningless with from_balance
- * (a member's own deposit was never reserve-guarded), so it is ignored in that case. */
-uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balance, bool ignore_reserve)
+ * never the bot's to give, migration or not - it only skips the reserve itself. ignore_deposits ($adminrss)
+ * is the other way round: the admin can dip into the members' deposits, only the reserve still holds it back.
+ * Meaningless with from_balance (a member's own deposit was never reserve- or deposit-guarded), so both are
+ * ignored in that case. */
+uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balance, bool ignore_reserve, bool ignore_deposits)
 {
 	uint32_t current = 0, reserve = 0;
 
@@ -5573,10 +5575,9 @@ uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balanc
 	uint64_t kept;
 	if (from_balance)
 		kept = 0;                                    // a member takes their own money back: the reserve is not theirs to respect
-	else if (ignore_reserve)
-		kept = (uint64_t)(c->guildbank.enabled ? GuildBankTotal(type) : 0);
 	else
-		kept = (uint64_t)reserve + (c->guildbank.enabled ? GuildBankTotal(type) : 0);   // the deposits are not the bot's to give
+		kept = (ignore_reserve ? 0 : (uint64_t)reserve) +
+			(ignore_deposits || !c->guildbank.enabled ? 0 : (uint64_t)GuildBankTotal(type));
 
 	return current > kept ? (uint32_t)(current - kept) : 0;
 }
@@ -5599,7 +5600,7 @@ static void StartNextTransfer(Connection *c)
 		bool ok = true;
 		for (uint8_t i = 0; i < r.line_count && ok; i++) {
 			ResourceType type = r.lines[i].type;
-			uint32_t available = StockAvailable(c, type, r.from_balance, r.ignore_reserve);
+			uint32_t available = StockAvailable(c, type, r.from_balance, r.ignore_reserve, r.ignore_deposits);
 			if (r.from_balance) {
 				uint64_t balance = GuildBankBalance(r.requester, type);
 				if (balance < available)
@@ -5627,6 +5628,7 @@ static void StartNextTransfer(Connection *c)
 		c->transfer.resource_type = r.lines[0].type;
 		c->transfer.from_balance = r.from_balance;
 		c->transfer.ignore_reserve = r.ignore_reserve;
+		c->transfer.ignore_deposits = r.ignore_deposits;
 		snprintf(c->transfer.target_name, sizeof(c->transfer.target_name), "%s", r.target);
 		snprintf(c->transfer.issued_name, sizeof(c->transfer.issued_name), "%s", r.requester);
 		if (r.from_balance)
@@ -5669,9 +5671,11 @@ uint32_t CalculateTransferAmount(Connection *c)
 	}
 	
 	/* Keep reserved resources (and, with a guild bank, the members' deposits) - unless this
-	 * delivery is $adminall's, which is allowed to dip into the reserve too. */
+	 * delivery is $adminall's, which is allowed to dip into the reserve too, or $adminrss's,
+	 * which is allowed to dip into the deposits too. */
 	(void)reserve;
-	uint32_t available = StockAvailable(c, c->transfer.resource_type, c->transfer.from_balance, c->transfer.ignore_reserve);
+	uint32_t available = StockAvailable(c, c->transfer.resource_type, c->transfer.from_balance,
+		c->transfer.ignore_reserve, c->transfer.ignore_deposits);
 	if (available == 0 || current == 0)
 		return 0;
 
