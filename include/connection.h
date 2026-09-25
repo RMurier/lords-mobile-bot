@@ -432,6 +432,15 @@ typedef struct {
      * update for this tile, so it clears again once the occupier leaves. */
     bool     occupied;
     char     occupied_by[13];
+
+    /* Same record carries a kingdom_id(2) right after alliance_tag, at offset+20 - confirmed
+     * on the sibling WAR_RECORD_TAG record (tag=8) at that exact offset, and it exactly fills
+     * the gap between alliance_tag(+17,3) and level(+22) for this record too. The game pushes
+     * tiles from other kingdoms passively (e.g. alliance rally-point tracking); zone_id/point_id
+     * alone are not globally unique across kingdoms, so without this a foreign tile can decode
+     * to a nonsensical local X/Y and get gathered as if it were real. Tracked only to compare
+     * against c->player.current_kingdom_id in RecvMapInfoPlus. */
+    uint16_t kingdom_id;
 } GatherTile;
 
 /* $recall (command.c): every march is taken back, then the bot sends none for pause_seconds. The pause deadline

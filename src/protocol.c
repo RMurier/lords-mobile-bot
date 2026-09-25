@@ -3794,9 +3794,11 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 
 	// Bulk snapshot: several record kinds back to back, all 51 bytes wide, sharing a
 	// zone(2) + point(1) + tag(1) header. tag=8 is a player point (see WarTick's
-	// header comment); tag=1..5 is a resource tile (GatherResourceKind), with a
-	// level byte and a 4-byte amount at fixed offsets instead of a name. Anything
-	// else is skipped one byte at a time to resync, since its width is not decoded.
+	// header comment): name(13)@+4, alliance_tag(3)@+17, kingdom_id(2)@+20. tag=1..5 is a
+	// resource tile (GatherResourceKind): same name/tag/kingdom_id fields at the same
+	// offsets (name embeds the current occupier when the tile isn't free - see GatherTile's
+	// comment), then a level byte and a 4-byte amount at +22/+23. Anything else is skipped
+	// one byte at a time to resync, since its width is not decoded.
 	if (size < 3 + WAR_RECORD_SIZE) {
 		LOGD("[WAR] map data reçue, taille=%u (trop petite pour un seul record de %u : format non reconnu)\n",
 			size, WAR_RECORD_SIZE);
@@ -3821,6 +3823,7 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 			matched++;
 			pos += WAR_RECORD_SIZE;
 		} else if (zone_id < WAR_ZONE_COUNT && c->gather.enabled && tag >= 1 && tag <= 5) {
+			uint16_t kingdom_id = read_u16(data + pos + 20);
 			uint8_t  level  = read_u8(data + pos + 22);
 			uint32_t amount = read_u32(data + pos + 23);
 			// A real resource tile always has a level of 1-5 (see GatherTile's comment) and a
@@ -3828,12 +3831,20 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 			// 1..5 by coincidence inside unrelated data (e.g. a name), producing a "tile" with
 			// level 0 and a near-UINT32_MAX amount; skip it instead of tracking/overwriting a
 			// real tile with garbage - it would never be gatherable anyway.
-			if (level >= 1 && level <= 5 && amount > 0) {
+			//
+			// Also reject tiles from a different kingdom (see GatherTile.kingdom_id): the game
+			// pushes those passively (e.g. alliance rally-point tracking in another kingdom) and
+			// zone_id/point_id are not globally unique across kingdoms, so a foreign tile can
+			// decode to a bogus local X/Y (e.g. right next to the map origin) and get gathered
+			// as if it were real - matches refusal patterns seen against such tiles.
+			if (level >= 1 && level <= 5 && amount > 0 &&
+			    kingdom_id == c->player.current_kingdom_id) {
 				GatherTile *t = GatherTrackTile(c, zone_id, point_id);
 				if (t) {
 					t->resource_kind = tag;
 					t->level  = level;
 					t->amount = amount;
+					t->kingdom_id = kingdom_id;
 
 					// Confirmed live: a tile currently being gathered by someone embeds that
 					// player's name (13 bytes) and alliance tag (3 bytes) at the exact offsets

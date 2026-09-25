@@ -2401,6 +2401,41 @@ static const uint8_t first_2[] = {
 		free(c);
 	}
 
+	/* ---- gather: a resource tile pushed from a different kingdom is not tracked ---- */
+	{
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->player.current_kingdom_id = 13; // home kingdom, matches the user's real report
+
+		uint8_t buf[3 + 51 * 2];
+		memset(buf, 0, sizeof(buf));
+
+		// point 5: same kingdom (13) - must be tracked
+		uint8_t *r0 = buf + 3;
+		r0[0] = 100; r0[1] = 0; r0[2] = 5; r0[3] = 3;
+		r0[20] = 13; r0[21] = 0; // kingdom_id = 13
+		r0[22] = 4;
+		r0[23] = 0x68; r0[24] = 0x6b; r0[25] = 0x0e; r0[26] = 0x00; // 945000
+
+		// point 6: foreign kingdom (2000) - must be rejected, even though level/amount look real
+		uint8_t *r1 = buf + 3 + 51;
+		r1[0] = 100; r1[1] = 0; r1[2] = 6; r1[3] = 3;
+		r1[20] = 0xD0; r1[21] = 0x07; // kingdom_id = 2000
+		r1[22] = 1;
+		r1[23] = 0x60; r1[24] = 0x0e; r1[25] = 0x03; r1[26] = 0x00; // 200000
+
+		RecvMapInfoPlus(c, buf, sizeof(buf));
+
+		bool found5 = false, found6 = false;
+		for (int i = 0; i < c->gather.tile_count; i++) {
+			if (c->gather.tiles[i].point_id == 5) found5 = true;
+			if (c->gather.tiles[i].point_id == 6) found6 = true;
+		}
+		CHECK(found5, "gather: a tile whose kingdom_id matches the player's own kingdom is tracked");
+		CHECK(!found6, "gather: a tile pushed from a different kingdom is not tracked");
+		free(c);
+	}
+
 	printf("%s\n", failures ? "SOME TESTS FAILED" : "ALL BOT LOGIC TESTS PASSED");
 	return failures ? 1 : 0;
 }
