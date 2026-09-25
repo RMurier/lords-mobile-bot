@@ -662,7 +662,7 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 	if (c->guildbank.enabled) {
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "%c<ressource> <montant>|all - retirer votre solde, ex. %cfood 1M\n", p, p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n,
-			"%crss <food> <stone> <wood> <ore> <gold> - retirer plusieurs ressources d'un coup (0 = aucune), ex. %crss 0 0 0 0 5M\n", p, p);
+			"%crss <food> <stone> <wood> <ore> <gold> - retirer plusieurs ressources d'un coup (0 = aucune, all = tout), ex. %crss 0 0 0 0 5M\n", p, p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "%cbal - votre solde (les dépôts se font en envoyant des ressources au bot)\n", p);
 	}
 	n += (size_t)snprintf(text + n, sizeof(text) - n, "%cstop - annuler votre livraison en cours\n", p);
@@ -673,7 +673,7 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin list|add <joueur>|remove <joueur> - gérer les administrateurs", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cadmin<ressource> <joueur> <montant> - envoyer depuis le stock, ex. %cadminfood Bob 5M", p, p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n,
-			"\n%cadminrss <food> <stone> <wood> <ore> <gold> <joueur> - envoyer plusieurs ressources d'un coup (0 = aucune), ex. %cadminrss 0 0 0 0 5M Bob", p, p);
+			"\n%cadminrss <food> <stone> <wood> <ore> <gold> <joueur> - envoyer plusieurs ressources d'un coup (0 = aucune, all = tout), ex. %cadminrss 0 0 0 0 5M Bob", p, p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n,
 			"\n%cadminall <joueur> - vider le stock (réserve incluse) sur ce joueur, ex. %cadminall Bob (utile avant une migration)", p, p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crecall - rappeler toutes les troupes, aucune marche ensuite pendant un moment", p);
@@ -982,10 +982,21 @@ static uint64_t GrossUp(const Connection *c, uint64_t net)
 	return net;
 }
 
-/* $adminrss/$rss: one field of the command line. 0 means "skip this resource" (not an error) -
- * only a non-zero amount that overflows once grossed up is rejected. */
-static bool ParseGrossAmount(const Connection *c, const char *str, uint32_t *out)
+/* $adminrss/$rss: one field of the command line. 0 means "skip this resource" (not an error).
+ * "all" (like the single-resource commands' own $gold all) means everything currently available
+ * for that resource - the requester's balance for $rss, the bot's stock for $adminrss. Otherwise
+ * a non-zero amount that overflows once grossed up is rejected. */
+static bool ParseGrossAmount(const Connection *c, const char *player_name, const char *str,
+	ResourceType type, bool from_balance, uint32_t *out)
 {
+	if (strcmp(str, "all") == 0) {
+		uint64_t gross = from_balance ? GuildBankBalance(player_name, type) : StockAvailable(c, type, false, false);
+		if (gross > UINT32_MAX)
+			return false;
+		*out = (uint32_t)gross;
+		return true;
+	}
+
 	uint64_t net = parse_number_u64(str);
 	if (net == 0) {
 		*out = 0;
@@ -1255,7 +1266,7 @@ static void AdminRssCommand(Connection *c, const char *player_name, bool is_admi
 	int consumed = 0;
 	if (sscanf(args, " %31s %31s %31s %31s %31s%n", food_s, stone_s, wood_s, ore_s, gold_s, &consumed) != 5) {
 		BotReply(c, player_name, "Envoi",
-			"Usage : %cadminrss <food> <stone> <wood> <ore> <gold> <pseudo>, ex. %cadminrss 0 0 0 0 5M Bob (0 = rien de cette ressource)",
+			"Usage : %cadminrss <food> <stone> <wood> <ore> <gold> <pseudo>, ex. %cadminrss 0 0 0 0 5M Bob (0 = rien, all = tout de cette ressource)",
 			c->bot.command_prefix, c->bot.command_prefix);
 		return;
 	}
@@ -1276,7 +1287,7 @@ static void AdminRssCommand(Connection *c, const char *player_name, bool is_admi
 	const char *fields[5] = { food_s, stone_s, wood_s, ore_s, gold_s };
 	uint32_t gross[5];
 	for (int i = 0; i < 5; i++) {
-		if (!ParseGrossAmount(c, fields[i], &gross[i])) {
+		if (!ParseGrossAmount(c, player_name, fields[i], RESOURCE_COMMANDS[i].type, false, &gross[i])) {
 			BotReply(c, player_name, "Envoi", "Montant invalide : %s.", RESOURCE_COMMANDS[i].label);
 			return;
 		}
@@ -1334,7 +1345,7 @@ static void RssCommand(Connection *c, const char *player_name, const char *args)
 	char food_s[32], stone_s[32], wood_s[32], ore_s[32], gold_s[32];
 	if (sscanf(args, " %31s %31s %31s %31s %31s", food_s, stone_s, wood_s, ore_s, gold_s) != 5) {
 		BotReply(c, player_name, "Retrait",
-			"Usage : %crss <food> <stone> <wood> <ore> <gold>, ex. %crss 0 0 0 0 5M (0 = rien de cette ressource)",
+			"Usage : %crss <food> <stone> <wood> <ore> <gold>, ex. %crss 0 0 0 0 5M (0 = rien, all = tout de cette ressource)",
 			c->bot.command_prefix, c->bot.command_prefix);
 		return;
 	}
@@ -1342,7 +1353,7 @@ static void RssCommand(Connection *c, const char *player_name, const char *args)
 	const char *fields[5] = { food_s, stone_s, wood_s, ore_s, gold_s };
 	uint32_t gross[5];
 	for (int i = 0; i < 5; i++) {
-		if (!ParseGrossAmount(c, fields[i], &gross[i])) {
+		if (!ParseGrossAmount(c, player_name, fields[i], RESOURCE_COMMANDS[i].type, true, &gross[i])) {
 			BotReply(c, player_name, "Retrait", "Montant invalide : %s.", RESOURCE_COMMANDS[i].label);
 			return;
 		}

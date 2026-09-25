@@ -1702,6 +1702,15 @@ static const uint8_t build_event_none[] = {
 		say(c, "boss", "$rss 0 0 0 0 1000000", COMMAND_CHANNEL_MAIL);   /* boss only has 300 gold deposited */
 		CHECK(c->transfer_queue_count == 0 && replied("insuffisant"), "rss: a single resource above the balance rejects the whole command");
 
+		/* "all", like the single-resource commands' own $gold all: the whole balance, no need to know the exact number */
+		reset_sent();
+		say(c, "boss", "$rss 0 0 0 0 all", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].line_count == 1
+			&& c->transfer_queue[0].lines[0].type == RESOURCE_GOLD && c->transfer_queue[0].lines[0].amount == 300,
+			"rss: \"all\" takes the whole balance of that resource (boss has 300 gold deposited)");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
 		/* $adminrss: same ordering, admin-only, from the bot's stock, name can hold spaces */
 		reset_sent();
 		say(c, "eve", "$adminrss 0 0 0 0 1M Bob", COMMAND_CHANNEL_MAIL);
@@ -1713,6 +1722,15 @@ static const uint8_t build_event_none[] = {
 			&& c->transfer_queue[0].lines[0].type == RESOURCE_ROCK && c->transfer_queue[0].lines[0].amount == 50
 			&& !c->transfer_queue[0].from_balance && strcmp(c->transfer_queue[0].target, "Bob") == 0,
 			"adminrss: a single non-zero resource among five gives from the stock, never the balance");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		/* "all" here means everything the bot can give from its stock, not a balance */
+		reset_sent();
+		say(c, "boss", "$adminrss 0 0 0 0 all Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].line_count == 1
+			&& c->transfer_queue[0].lines[0].type == RESOURCE_GOLD && c->transfer_queue[0].lines[0].amount == 100000000 - 300,
+			"adminrss: \"all\" takes everything available in the stock (100,000,000 minus the 300 boss deposited)");
 		AbortTransfer(c);
 		c->transfer_queue_count = 0;
 
