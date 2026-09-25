@@ -3767,7 +3767,7 @@ void NotifyDiscord(Connection *c, const char *message) {
 		LOGE("[NOTIFY] Échec de l'envoi au webhook Discord (curl absent, réseau bloqué ou webhook invalide ; code %d)\n", rc);
 }
 
-static bool GatherZoneInRange(Connection *c, uint16_t zone_id);
+static bool GatherTileInRange(Connection *c, uint16_t zone_id, uint8_t point_id);
 
 void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 	if (!c->war.enabled && !c->gather.enabled) return;
@@ -3834,13 +3834,13 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 			// level 0 and a near-UINT32_MAX amount; skip it instead of tracking/overwriting a
 			// real tile with garbage - it would never be gatherable anyway.
 			//
-			// Also reject anything outside the scan's own rectangle (see GatherZoneInRange's
+			// Also reject anything outside gather.radius of the castle (see GatherTileInRange's
 			// comment - NOT a kingdom_id check, an earlier version of this filtered on that
 			// field and it turned out to mean something else entirely, silently dropping every
 			// free tile): the game pushes tiles passively (e.g. alliance rally-point tracking
 			// elsewhere) whose zone_id/point_id can collide with the local scan's numbering and
-			// decode to a bogus local X/Y (e.g. right next to the map origin).
-			if (level >= 1 && level <= 5 && amount > 0 && GatherZoneInRange(c, zone_id)) {
+			// decode to a bogus local X/Y (e.g. right next to the map origin, or just far away).
+			if (level >= 1 && level <= 5 && amount > 0 && GatherTileInRange(c, zone_id, point_id)) {
 				GatherTile *t = GatherTrackTile(c, zone_id, point_id);
 				if (t) {
 					t->resource_kind = tag;
@@ -3928,30 +3928,32 @@ void RequestMapData(Connection *c, uint16_t zone_id) {
 	send_packet(c, true);
 }
 
-/* Is zone_id inside the same scan rectangle GatherZoneAt sweeps (own castle position ±
- * gather.radius)? Confirmed live (capture) that GatherTile.kingdom_id is NOT "which kingdom
- * this tile is in" as an earlier version of this code assumed: a genuinely free tile decodes
- * kingdom_id=0 (no occupier to report a kingdom for), while an occupied one decodes the
- * occupier's real kingdom - filtering on it against the player's own kingdom silently dropped
- * every free tile and kept only occupied ones, making the account's own kingdom look 100%
- * occupied when most of it was simply never tracked at all. This zone-bounds check replaces
- * that filter, using only already-trusted data (the same rectangle math as the active scan)
- * instead of a field whose meaning was misread. */
-static bool GatherZoneInRange(Connection *c, uint16_t zone_id) {
+/* Is this tile within gather.radius tiles of the castle - the exact per-tile distance, not just
+ * "its zone overlaps the scan rectangle"? Confirmed live (capture) that GatherTile.kingdom_id is
+ * NOT "which kingdom this tile is in" as an earlier version of this code assumed: a genuinely
+ * free tile decodes kingdom_id=0 (no occupier to report a kingdom for), while an occupied one
+ * decodes the occupier's real kingdom - filtering on it against the player's own kingdom silently
+ * dropped every free tile and kept only occupied ones, making the account's own kingdom look 100%
+ * occupied when most of it was simply never tracked at all. This range check replaces that filter.
+ *
+ * An earlier version of this range check only tested whether zone_id's own 32x16-tile block
+ * overlapped the scan rectangle (same block math as GatherZoneAt), not the tile's own position -
+ * a zone one tile inside the rectangle's edge still lets EVERY tile in that whole 32x16 block
+ * through, up to ~31/~15 tiles past the intended radius on top of it. Reported live: marches sent
+ * to tiles far outside the configured gather.radius, while closer free tiles existed and were
+ * never picked because GatherBestUntargeted has no idea of distance at all (see its own comment) -
+ * this exact-position check is what actually keeps gathering inside gather.radius as documented. */
+static bool GatherTileInRange(Connection *c, uint16_t zone_id, uint8_t point_id) {
 	map_pos_t castle = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
+	map_pos_t tile   = getTileMapPosbyPointCode(zone_id, point_id);
 	int radius = c->gather.radius > 0 ? c->gather.radius : 30;
 
-	int x_min = castle.x > radius ? castle.x - radius : 0;
-	int x_max = castle.x + radius < 511 ? castle.x + radius : 511;
-	int y_min = castle.y > radius ? castle.y - radius : 0;
-	int y_max = castle.y + radius < 1023 ? castle.y + radius : 1023;
+	int dx = (int)tile.x - (int)castle.x;
+	int dy = (int)tile.y - (int)castle.y;
+	if (dx < 0) dx = -dx;
+	if (dy < 0) dy = -dy;
 
-	int xz_min = x_min >> 5, xz_max = x_max >> 5;
-	int yz_min = y_min >> 4, yz_max = y_max >> 4;
-
-	int xz = zone_id % 16;
-	int yz = zone_id / 16;
-	return xz >= xz_min && xz <= xz_max && yz >= yz_min && yz <= yz_max;
+	return dx <= radius && dy <= radius;
 }
 
 /* zone_id of the tile `index` steps into the square scan rectangle around the
@@ -4188,16 +4190,37 @@ void RecvGatherReportInfo(Connection *c, const uint8_t *data, uint16_t size) {
 		amt, kind, level, kingdom_id, zone_id, point_id);
 }
 
-/* Highest level first (faster gathering, fewer marches for the same total - see
- * docs.gathering), ties broken by amount. */
+/* Nearest to the castle first, ties broken by level (higher first), then by amount - reported
+ * live: with level as the primary key, marches went out to the farthest tile of the best level
+ * within gather.radius even when a closer, only-slightly-lower-level tile sat right next to the
+ * castle, which for a march that has to travel there and back means a much longer round trip for
+ * a marginal stock gain. Distance first keeps the troops close to home; among tiles at the same
+ * distance, still prefer the higher level (fewer marches for the same total - see docs.gathering).
+ * All tiles considered here are already within gather.radius (see GatherTileInRange) - this only
+ * orders among that already-bounded set. */
 static GatherTile *GatherBestUntargeted(Connection *c) {
+	map_pos_t castle = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
 	GatherTile *best = NULL;
+	uint32_t best_dist = 0;
+
 	for (uint16_t i = 0; i < c->gather.tile_count; i++) {
 		GatherTile *t = &c->gather.tiles[i];
 		if (t->targeted) continue;
 		if (t->occupied) continue; // someone else is already gathering it - see GatherTile's comment
-		if (!best || t->level > best->level || (t->level == best->level && t->amount > best->amount))
+
+		map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
+		int dx = (int)pos.x - (int)castle.x;
+		int dy = (int)pos.y - (int)castle.y;
+		uint32_t dist = (uint32_t)(dx * dx + dy * dy);
+
+		bool better = !best
+			|| dist < best_dist
+			|| (dist == best_dist && t->level > best->level)
+			|| (dist == best_dist && t->level == best->level && t->amount > best->amount);
+		if (better) {
 			best = t;
+			best_dist = dist;
+		}
 	}
 	return best;
 }
