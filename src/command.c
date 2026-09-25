@@ -677,6 +677,8 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 		n += (size_t)snprintf(text + n, sizeof(text) - n,
 			"\n%cadminall <joueur> - vider le stock (réserve incluse) sur ce joueur, ex. %cadminall Bob (utile avant une migration)", p, p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crecall - rappeler toutes les troupes, aucune marche ensuite pendant un moment", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cheal - soigner tous les blessés à l'infirmerie", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crevive - ressusciter tous les morts au sanctuaire (gratuit, nécessite d'attendre)", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate <royaume> <x> <y> - migrer vers un autre royaume", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cjoin <tag> - rejoindre une guilde (tag sur 3 caractères)", p);
@@ -744,6 +746,56 @@ static void RecallCommand(Connection *c, const char *player_name, bool is_admin)
 	}
 }
 
+/* $heal: heal every wounded troop at once (see RequestHealingTroop's comment). */
+static void HealCommand(Connection *c, const char *player_name, bool is_admin)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent lancer le soin.");
+		return;
+	}
+
+	if (!c->wounded.loaded) {
+		BotReply(c, player_name, "Infirmerie", "Pas encore de données de l'infirmerie reçues du serveur.");
+		return;
+	}
+
+	if (c->wounded.troop.total == 0) {
+		BotReply(c, player_name, "Infirmerie", "Aucun blessé à soigner.");
+		return;
+	}
+
+	char amt[20];
+	format_number2(c->wounded.troop.total, amt, sizeof(amt));
+	RequestHealingTroop(c);
+	BotReply(c, player_name, "Infirmerie", "Soin lancé pour %s troupe(s) blessée(s).", amt);
+}
+
+/* $revive: start a free (wait-only) sanctuary resurrection for every dead troop at once (see
+ * RequestValhallaDivineRevive's comment) - not the points-based "instant" revival. */
+static void ReviveCommand(Connection *c, const char *player_name, bool is_admin)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent lancer une résurrection.");
+		return;
+	}
+
+	if (!c->valhalla.loaded) {
+		BotReply(c, player_name, "Sanctuaire", "Pas encore de données du sanctuaire reçues du serveur.");
+		return;
+	}
+
+	uint32_t total = c->valhalla.dead[0] + c->valhalla.dead[1] + c->valhalla.dead[2] + c->valhalla.dead[3];
+	if (total == 0) {
+		BotReply(c, player_name, "Sanctuaire", "Aucun mort à ressusciter.");
+		return;
+	}
+
+	char amt[20];
+	format_number2(total, amt, sizeof(amt));
+	RequestValhallaDivineRevive(c);
+	BotReply(c, player_name, "Sanctuaire", "Résurrection (attente gratuite) lancée pour %s troupe(s).", amt);
+}
+
 static void StopTransfer(Connection *c, const char *player_name, bool is_admin)
 {
 	// a request that is still waiting its turn is cancelled first: nothing was sent, nothing was debited
@@ -795,6 +847,16 @@ void command_handler(Connection *c, const char *player_name, const char *message
 
 	if (IsCommand(message, "recall", &args)) {
 		RecallCommand(c, player_name, is_admin);
+		return;
+	}
+
+	if (IsCommand(message, "heal", &args)) {
+		HealCommand(c, player_name, is_admin);
+		return;
+	}
+
+	if (IsCommand(message, "revive", &args)) {
+		ReviveCommand(c, player_name, is_admin);
 		return;
 	}
 

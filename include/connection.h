@@ -836,6 +836,17 @@ typedef struct {
 	uint total_time;
 } WoundedTroopData;
 
+/* Dead troops waiting in the sanctuary, one total per TroopKind (not broken down by tier -
+ * the game doesn't either for this screen). Confirmed live: _MSG_RESP_VALHALLA_INFO (9402)
+ * carries these 4 counts as 4-byte values at a fixed 16-byte stride (offset 88, 104, 120, 136
+ * in TroopKind order) - the rest of that 200-byte packet (points balance, an unrelated pending-
+ * job timestamp, etc.) is not decoded. These exact same numbers are what a real
+ * _MSG_REQUEST_VALHALLA_DIVINE_REVIVE capture sent back verbatim to revive everyone at once. */
+typedef struct {
+	bool     loaded;
+	uint32_t dead[4]; // indexed by TroopKind
+} ValhallaInfo;
+
 
 
 typedef struct {
@@ -1274,6 +1285,7 @@ typedef struct {
 	TrainingSlot training[4]; // indexed by TroopKind - see TrainingSlot's comment
 
 	WoundedTroopData wounded;
+	ValhallaInfo valhalla;
 	
 	ProtectionSettings protection;
 	

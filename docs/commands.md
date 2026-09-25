@@ -34,6 +34,8 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$admin add <player>` | administrators | Adds an administrator |
 | `$admin remove <player>` | administrators | Removes an administrator added in game |
 | `$recall` | administrators | Takes every march back, then the bot sends no march for 5 minutes (`recall.pause_seconds`) |
+| `$heal` | administrators | Heals every wounded troop at once (same as "heal all" in the infirmary) |
+| `$revive` | administrators | Starts a free, wait-only sanctuary resurrection for every dead troop at once. Not the points-based "instant" resurrection - that one is not implemented yet |
 | `$relocate random` | administrators | Moves the castle to a place chosen by the game (uses a random relocator) |
 | `$relocate <x> <y>` | administrators | Moves the castle to these coordinates in the current kingdom (uses an advanced relocator) |
 | `$migrate <kingdom> <x> <y>` | administrators | Migrates the castle to another kingdom at these coordinates |

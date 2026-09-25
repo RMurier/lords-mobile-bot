@@ -102,6 +102,9 @@ void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size);
 void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size);
 void AutoTrainTick(Connection *c);
 void RecvWoundedTroopData(Connection *c, const uint8_t *data);
+void RecvValhallaInfo(Connection *c, const uint8_t *data, uint16_t size);
+void RequestHealingTroop(Connection *c);
+void RequestValhallaDivineRevive(Connection *c);
 
 void RecvRefreshResources(Connection *c, const uint8_t *data);
 

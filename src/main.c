@@ -476,8 +476,11 @@ static SessionResult ProcessConnection(Connection *c)
 				case _MSG_RESP_ADDCONFLICT_LINE: 
 					RecvAddConflictLine(c, s->buffer + s->parse_pos + 4);
 					break;
-				case _MSG_HOSPITAL_HOSPITALINFO: 
+				case _MSG_HOSPITAL_HOSPITALINFO:
 					RecvWoundedTroopData(c, s->buffer + s->parse_pos + 4);
+					break;
+				case _MSG_RESP_VALHALLA_INFO:
+					RecvValhallaInfo(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_UPDATE_MAPINFO_PLUS:
 					RecvMapInfoPlus(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);

@@ -2436,6 +2436,86 @@ static const uint8_t first_2[] = {
 		free(c);
 	}
 
+	/* ---- $heal: heals every wounded troop at once ---- */
+	{
+		c = fresh("boss");
+		c->wounded.loaded = true;
+		c->wounded.troop.infantry[0] = 11558; c->wounded.troop.total += 11558;
+		c->wounded.troop.ranged[0]   = 11557; c->wounded.troop.total += 11557;
+		c->wounded.troop.cavalry[0]  = 11557; c->wounded.troop.total += 11557;
+		// siege left at 0, matching the real capture
+
+		reset_sent();
+		say(c, "eve", "$heal", COMMAND_CHANNEL_MAIL);
+		CHECK(find_packet(_MSG_REQUEST_HEALINGTROOP) < 0, "heal: a non-administrator cannot trigger it");
+
+		reset_sent();
+		say(c, "boss", "$heal", COMMAND_CHANNEL_MAIL);
+		int idx = find_packet(_MSG_REQUEST_HEALINGTROOP);
+		CHECK(idx >= 0, "heal: an administrator triggers _MSG_REQUEST_HEALINGTROOP");
+		if (idx >= 0) {
+			const uint8_t *p = (const uint8_t*)sent[idx] + 4; // payload start
+			uint32_t infantry = (uint32_t)p[8]  | (uint32_t)p[9]  << 8 | (uint32_t)p[10] << 16 | (uint32_t)p[11] << 24;
+			uint32_t ranged   = (uint32_t)p[24] | (uint32_t)p[25] << 8 | (uint32_t)p[26] << 16 | (uint32_t)p[27] << 24;
+			uint32_t cavalry  = (uint32_t)p[40] | (uint32_t)p[41] << 8 | (uint32_t)p[42] << 16 | (uint32_t)p[43] << 24;
+			uint32_t siege    = (uint32_t)p[56] | (uint32_t)p[57] << 8 | (uint32_t)p[58] << 16 | (uint32_t)p[59] << 24;
+			CHECK(infantry == 11558 && ranged == 11557 && cavalry == 11557 && siege == 0,
+				"heal: the 4 per-kind wounded totals land in the confirmed slot offsets (8/24/40/56)");
+		}
+		free(c);
+	}
+
+	/* ---- $revive: starts a free (divine) resurrection for every dead troop at once ---- */
+	{
+		c = fresh("boss");
+		c->valhalla.loaded = true;
+		c->valhalla.dead[TROOP_INFANTRY] = 259821;
+		c->valhalla.dead[TROOP_RANGED]   = 388779;
+		c->valhalla.dead[TROOP_CAVALRY]  = 601400;
+		c->valhalla.dead[TROOP_SIEGE]    = 0;
+
+		reset_sent();
+		say(c, "eve", "$revive", COMMAND_CHANNEL_MAIL);
+		CHECK(find_packet(_MSG_REQUEST_VALHALLA_DIVINE_REVIVE) < 0, "revive: a non-administrator cannot trigger it");
+
+		reset_sent();
+		say(c, "boss", "$revive", COMMAND_CHANNEL_MAIL);
+		int idx = find_packet(_MSG_REQUEST_VALHALLA_DIVINE_REVIVE);
+		CHECK(idx >= 0, "revive: an administrator triggers _MSG_REQUEST_VALHALLA_DIVINE_REVIVE");
+		if (idx >= 0) {
+			const uint8_t *p = (const uint8_t*)sent[idx] + 4;
+			uint32_t infantry = (uint32_t)p[8]  | (uint32_t)p[9]  << 8 | (uint32_t)p[10] << 16 | (uint32_t)p[11] << 24;
+			uint32_t ranged   = (uint32_t)p[24] | (uint32_t)p[25] << 8 | (uint32_t)p[26] << 16 | (uint32_t)p[27] << 24;
+			uint32_t cavalry  = (uint32_t)p[40] | (uint32_t)p[41] << 8 | (uint32_t)p[42] << 16 | (uint32_t)p[43] << 24;
+			CHECK(infantry == 259821 && ranged == 388779 && cavalry == 601400,
+				"revive: the 4 per-kind dead totals land in the confirmed slot offsets, matching a real capture");
+		}
+
+		reset_sent();
+		c->valhalla.dead[0] = c->valhalla.dead[1] = c->valhalla.dead[2] = c->valhalla.dead[3] = 0;
+		say(c, "boss", "$revive", COMMAND_CHANNEL_MAIL);
+		CHECK(find_packet(_MSG_REQUEST_VALHALLA_DIVINE_REVIVE) < 0, "revive: nothing sent when there is nobody to revive");
+		free(c);
+	}
+
+	/* ---- RecvValhallaInfo: decodes the 4 per-kind dead-troop totals at their confirmed offsets ---- */
+	{
+		c = fresh("boss");
+		uint8_t buf[200];
+		memset(buf, 0, sizeof(buf));
+		buf[88]  = 0xed; buf[89] = 0xf6; buf[90] = 0x03; // 259821, TROOP_INFANTRY
+		buf[104] = 0xab; buf[105] = 0xee; buf[106] = 0x05; // 388779, TROOP_RANGED
+		buf[120] = 0x38; buf[121] = 0x2d; buf[122] = 0x09; // 601400, TROOP_CAVALRY
+		// TROOP_SIEGE slot (offset 136) left at 0, matching the real capture
+
+		RecvValhallaInfo(c, buf, sizeof(buf));
+		CHECK(c->valhalla.loaded, "RecvValhallaInfo: marks itself loaded");
+		CHECK(c->valhalla.dead[TROOP_INFANTRY] == 259821 && c->valhalla.dead[TROOP_RANGED] == 388779
+			&& c->valhalla.dead[TROOP_CAVALRY] == 601400 && c->valhalla.dead[TROOP_SIEGE] == 0,
+			"RecvValhallaInfo: the 4 per-kind dead totals decode at the confirmed 16-byte stride from offset 88");
+		free(c);
+	}
+
 	printf("%s\n", failures ? "SOME TESTS FAILED" : "ALL BOT LOGIC TESTS PASSED");
 	return failures ? 1 : 0;
 }

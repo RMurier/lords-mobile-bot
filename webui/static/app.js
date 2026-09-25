@@ -747,6 +747,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     gold: `<circle cx="12" cy="12" r="9.5" fill="#f2b81c" stroke="#a87a08" stroke-width="1.2"/><circle cx="12" cy="12" r="6.6" fill="none" stroke="#b8860b" stroke-width="1"/><path d="M12 7.5v9M9.6 10.2c0-1.3 1-1.9 2.4-1.9s2.4.6 2.4 1.7-1 1.5-2.4 1.9-2.4.7-2.4 1.9 1 1.8 2.4 1.8 2.4-.6 2.4-1.9" fill="none" stroke="#8a6206" stroke-width="1.1" stroke-linecap="round"/>`,
     gems: `<path d="M7 3.5h10l4 5-9 12.5L3 8.5z" fill="#37b4e8" stroke="#1a6f96" stroke-width="1" stroke-linejoin="round"/><path d="M3 8.5h18M8.5 8.5 12 21l3.5-12.5M7 3.5l1.5 5M17 3.5l-1.5 5" fill="none" stroke="#e8f8ff" stroke-width=".9" opacity=".8"/>`,
     shield: `<path d="M12 2.5 20 5.5v6.2c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V5.5z" fill="#3b6fd6" stroke="#1f3f8f" stroke-width="1.2" stroke-linejoin="round"/><path d="M12 5 17.5 7v4.7c0 3.4-2.2 6-5.5 7.3z" fill="#7fa6ff" opacity=".7"/>`,
+    antiscout: `<path d="M2 12s4-6.5 10-6.5S22 12 22 12s-4 6.5-10 6.5S2 12 2 12z" fill="none" stroke="#5c6473" stroke-width="1.4" stroke-linejoin="round"/><circle cx="12" cy="12" r="3.2" fill="#7d4b22" stroke="#5c6473" stroke-width=".8"/><path d="M3.5 3.5l17 17" stroke="#d94b4b" stroke-width="1.6" stroke-linecap="round"/>`,
     power: `<path d="M13.5 2 5 13.5h6L9.5 22 19 9.5h-6.2z" fill="#f2b81c" stroke="#a87a08" stroke-width="1" stroke-linejoin="round"/>`,
     kills: `<path d="M12 3C7.6 3 4.5 6 4.5 10c0 2.3 1 3.7 2.5 4.7V18h10v-3.3c1.5-1 2.5-2.4 2.5-4.7 0-4-3.1-7-7.5-7z" fill="#e6e8ee" stroke="#6b7385" stroke-width="1.1" stroke-linejoin="round"/><circle cx="9" cy="10.5" r="1.9" fill="#3a4152"/><circle cx="15" cy="10.5" r="1.9" fill="#3a4152"/><path d="M10 18v3M12 18v3M14 18v3" stroke="#6b7385" stroke-width="1.2" stroke-linecap="round"/>`,
     vip: `<path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5z" fill="#f2b81c" stroke="#a87a08" stroke-width="1.1" stroke-linejoin="round"/><circle cx="3" cy="8" r="1.4" fill="#f2b81c"/><circle cx="12" cy="5" r="1.4" fill="#f2b81c"/><circle cx="21" cy="8" r="1.4" fill="#f2b81c"/>`,
@@ -808,6 +809,21 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     return `<p class="help">${icon("clock", 14)} En cours de formation : ${pills}</p>`;
   }
 
+  // Manual heal-all / revive-all buttons ($heal, $revive - see docs/commands.md): each is a
+  // fire-and-forget admin command sent through the chat/send endpoint, enabled only while
+  // there is actually something to act on.
+  function quickActionsHtml(wounded, valhalla) {
+    const woundedCount = wounded && wounded.loaded ? wounded.total : 0;
+    const deadCount = valhalla && valhalla.loaded ? valhalla.dead_total : 0;
+    if (!wounded?.loaded && !valhalla?.loaded) return "";
+    return `<div class="inline" style="gap:8px;margin-top:10px">
+      <button class="btn" data-act="quick-command" data-cmd="$heal" ${woundedCount ? "" : "disabled"}>
+        ${icon("wounded", 16)} Soigner${woundedCount ? ` (${num(woundedCount)})` : ""}</button>
+      <button class="btn" data-act="quick-command" data-cmd="$revive" ${deadCount ? "" : "disabled"}>
+        ${icon("total", 16)} Ressusciter${deadCount ? ` (${num(deadCount)})` : ""}</button>
+    </div>`;
+  }
+
   function gameHtml(game) {
     if (!game) return `<div class="card"><p class="help">Chargement…</p></div>`;
     if (!game.available) {
@@ -825,6 +841,14 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       const left = Math.max(0, sh.remaining - (game.age + elapsed));
       shield = `<span class="pill ${left < 3600 ? "warn" : "ok"}" data-shield-left="${sh.remaining - game.age}">${fmtDuration(left)} restantes</span>
         <span class="help"> · bouclier ${SHIELDS[sh.item_id] || "#" + sh.item_id}</span>`;
+    }
+    const as = d.antiscout;
+    let antiscout;
+    if (!as.loaded) antiscout = `<span class="pill">inconnu</span>`;
+    else if (!as.active) antiscout = `<span class="pill bad">aucun anti-espion</span>`;
+    else {
+      const left = Math.max(0, as.remaining - (game.age + elapsed));
+      antiscout = `<span class="pill ${left < 3600 ? "warn" : "ok"}" data-antiscout-left="${as.remaining - game.age}">${fmtDuration(left)} restantes</span>`;
     }
     const state = game.live ? `<span class="pill ok">En ligne</span>`
       : game.running ? `<span class="pill warn">Bot démarré, hors ligne (reconnexion…)</span>` : `<span class="pill">Bot arrêté</span>`;
@@ -852,6 +876,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       </div>
       <div class="card"><div class="statgrid">
         ${stat("shield", "Bouclier", shield)}
+        ${stat("antiscout", "Anti-espion", antiscout)}
         ${stat("kills", "Kills", num(d.kills))}
         ${stat("gems", "Gemmes", num(d.gems))}
         ${stat("vip", "VIP", `${d.vip_level} <span class="help">(${num(d.vip_points)} pts)</span>`)}
@@ -865,6 +890,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
           ${troop("total", "Total", num(t.total))}${troop("infantry", "Infanterie", short(t.infantry))}${troop("cavalry", "Cavalerie", short(t.cavalry))}
           ${troop("ranged", "Tireurs", short(t.ranged))}${troop("siege", "Siège", short(t.siege))}
           ${d.wounded.loaded ? troop("wounded", "Blessés", num(d.wounded.total)) : ""}</div>
+          ${quickActionsHtml(d.wounded, d.valhalla)}
           ${troopTierTable(d.troops_by_tier)}${trainingRow(d.training)}${autotrainProgress(d.autotrain)}`
           : `<p class="help">Pas encore reçues du serveur.</p>`}</div>`;
   }
@@ -875,7 +901,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     // the shield countdown moves every second without asking the server again
     S.gameTick = setInterval(() => {
       const box = $("#game");
-      if (box && S.game && S.game.available && S.game.data.shield.active) box.innerHTML = gameHtml(S.game);
+      if (box && S.game && S.game.available && (S.game.data.shield.active || S.game.data.antiscout.active)) box.innerHTML = gameHtml(S.game);
     }, 1000);
   }
 
@@ -942,6 +968,23 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     } finally {
       input.disabled = false;
       input.focus();
+    }
+  }
+
+  // Fire-and-forget admin command (heal/revive buttons on the Statut page): reuses the same
+  // chat/send endpoint as the chat tab - the bot's own command_handler does the rest and
+  // answers by mail, visible in the chat log.
+  async function quickCommand(el) {
+    const message = el.dataset.cmd;
+    if (!message || el.disabled) return;
+    el.disabled = true;
+    try {
+      await api("POST", `/api/accounts/${enc(S.id)}/chat/send`, { message });
+      toast(`${message} envoyé`, "ok");
+    } catch (error) {
+      toast(error.message, "err");
+    } finally {
+      el.disabled = false;
     }
   }
 
@@ -1342,6 +1385,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     "capture-stop": () => captureStop(),
     "capture-cancel": () => captureCancel(),
     "chat-send": () => chatSend(),
+    "quick-command": (el) => quickCommand(el),
     "bank-edit": (el) => { S.bankEdit = el.dataset.name; renderBank(); const input = $(".bank-input"); if (input) { input.focus(); input.select(); } },
     "bank-save": () => bankSave(),
     "bank-cancel": () => { S.bankEdit = null; renderBank(); },

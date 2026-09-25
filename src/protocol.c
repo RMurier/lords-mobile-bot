@@ -4004,6 +4004,53 @@ void RequestGatherRecall(Connection *c, uint32_t march_id) {
 	send_packet(c, true);
 }
 
+/* Shared by RequestHealingTroop and RequestValhallaDivineRevive: both captured requests are
+ * byte-for-byte the same shape - seq_id(4) + 4 reserved bytes, then one 16-byte slot per
+ * TroopKind ([4-byte count][12 reserved bytes]), then 12 trailing reserved bytes (84 bytes
+ * total). Only the message type and the 4 counts differ between the two. */
+static void SendTroopCountRequest(Connection *c, uint16_t msg_type, const uint32_t counts[4]) {
+	c->size = 2;
+	write_u16(c->data + c->size, msg_type); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;
+	write_zero(c->data + c->size, 4); c->size += 4;
+
+	for (uint8_t slot = 0; slot < 4; slot++) {
+		write_u32(c->data + c->size, counts[slot]); c->size += 4;
+		write_zero(c->data + c->size, 12); c->size += 12;
+	}
+
+	write_zero(c->data + c->size, 12); c->size += 12;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+static uint32_t SumTiers4(const uint32_t *tiers) {
+	return tiers[0] + tiers[1] + tiers[2] + tiers[3];
+}
+
+/* $heal (command.c): heals every wounded troop at once, exactly like tapping "heal all" in the
+ * infirmary - confirmed live (capture5.pcapng) that the request just echoes back the per-kind
+ * wounded totals _MSG_HOSPITAL_HOSPITALINFO already gave the client. */
+void RequestHealingTroop(Connection *c) {
+	uint32_t counts[4] = {
+		SumTiers4(c->wounded.troop.infantry),
+		SumTiers4(c->wounded.troop.ranged),
+		SumTiers4(c->wounded.troop.cavalry),
+		SumTiers4(c->wounded.troop.siege),
+	};
+	SendTroopCountRequest(c, _MSG_REQUEST_HEALINGTROOP, counts);
+}
+
+/* $revive (command.c): starts a free (wait-only) sanctuary resurrection for every dead troop at
+ * once - confirmed live the same way as RequestHealingTroop, using _MSG_RESP_VALHALLA_INFO's
+ * per-kind dead totals (see ValhallaInfo's comment) instead of the wounded ones. This is the
+ * "just wait" revival the user described, not the points-based "instant" one - that one's
+ * request references an already-in-progress job by a field this session could not confirm the
+ * origin of, so it is intentionally not implemented yet (would need a dedicated capture). */
+void RequestValhallaDivineRevive(Connection *c) {
+	SendTroopCountRequest(c, _MSG_REQUEST_VALHALLA_DIVINE_REVIVE, c->valhalla.dead);
+}
+
 // FIFO of troops committed to gather marches still out - see GatherSettings' comment.
 static void GatherQueuePush(Connection *c, uint32_t amount) {
 	if (c->gather.pending_count >= GATHER_MAX_ACTIVE_MARCHES) return; // should not happen (bounded by player.max_marches well under this); drop rather than overflow
@@ -4827,8 +4874,19 @@ void RecvWoundedTroopData(Connection *c, const uint8_t *data) {
 	c->wounded.total_time  = read_u32(data + offset); offset += 4;
 	
 	c->wounded.loaded = true;
-	
+
 	// WoundedTroopDataLog(c);
+}
+
+/* See ValhallaInfo's comment (connection.h): only the 4 per-kind dead-troop totals are
+ * decoded here, at their confirmed fixed offsets. */
+void RecvValhallaInfo(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 140) return;
+
+	for (int kind = 0; kind < 4; kind++)
+		c->valhalla.dead[kind] = read_u32(data + 88 + kind * 16);
+
+	c->valhalla.loaded = true;
 }
 
 void RecvDarknestBroadcast(Connection *c, const uint8_t *data) {

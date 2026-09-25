@@ -65,6 +65,9 @@ void StatusWrite(Connection *c, bool connected)
 	const ShieldInfo *sh = &c->shield_info;
 	uint64_t shield_end = sh->active ? sh->begin_time + sh->duration : 0;
 	int64_t shield_left = (shield_end > c->server_time) ? (int64_t)(shield_end - c->server_time) : 0;
+	const AntiScoutInfo *as = &c->antiscout_info;
+	uint64_t antiscout_end = as->active ? as->begin_time + as->duration : 0;
+	int64_t antiscout_left = (antiscout_end > c->server_time) ? (int64_t)(antiscout_end - c->server_time) : 0;
 	map_pos_t pos = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
 
 	fprintf(f, "{\"written_at\":%lld,\"connected\":%s,\"server_time\":%llu,",
@@ -81,6 +84,10 @@ void StatusWrite(Connection *c, bool connected)
 	fprintf(f, "\"shield\":{\"loaded\":%s,\"active\":%s,\"item_id\":%u,\"end\":%llu,\"remaining\":%lld},",
 		sh->loaded ? "true" : "false", sh->active ? "true" : "false", sh->item_id,
 		(unsigned long long)shield_end, (long long)shield_left);
+
+	fprintf(f, "\"antiscout\":{\"loaded\":%s,\"active\":%s,\"item_id\":%u,\"end\":%llu,\"remaining\":%lld},",
+		as->loaded ? "true" : "false", as->active ? "true" : "false", as->item_id,
+		(unsigned long long)antiscout_end, (long long)antiscout_left);
 
 	fprintf(f, "\"resources\":{\"food\":%u,\"rock\":%u,\"wood\":%u,\"ore\":%u,\"gold\":%u},",
 		c->resources.food, c->resources.rock, c->resources.wood, c->resources.ore, c->resources.gold);
@@ -137,6 +144,10 @@ void StatusWrite(Connection *c, bool connected)
 
 	fprintf(f, "\"wounded\":{\"loaded\":%s,\"total\":%u},",
 		c->wounded.loaded ? "true" : "false", c->wounded.troop.total);
+
+	uint64_t dead_total = (uint64_t)c->valhalla.dead[0] + c->valhalla.dead[1] + c->valhalla.dead[2] + c->valhalla.dead[3];
+	fprintf(f, "\"valhalla\":{\"loaded\":%s,\"dead_total\":%llu},",
+		c->valhalla.loaded ? "true" : "false", (unsigned long long)dead_total);
 
 	fprintf(f, "\"alliance\":{\"rank\":%d,\"members\":%u,\"member_names\":[", (int)c->RoleAlliance.Rank, c->alliance_member.count);
 	for (uint32_t i = 0; i < c->alliance_member.count && i < MAX_ALLIANCE_MEMBER; i++) {
