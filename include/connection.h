@@ -967,24 +967,41 @@ typedef struct {
     time_t   deadline;
 } Migration;
 
+/* One resource of a $adminrss/$rss batch: up to TRANSFER_BATCH_MAX resources sent one after another
+ * to the same target, in a fixed priority order (see BuildPriorityLines() in command.c) - gold first,
+ * food last, since food is the one the recipient is least likely to be short on. */
+#define TRANSFER_BATCH_MAX 5
+
+typedef struct {
+    ResourceType type;
+    uint32_t     amount;   // GROSS amount: the delivery tax is already added
+} TransferLine;
+
 typedef struct {
 	char issued_name[13]; // Who initiated resource command?
     char target_name[13]; // Who will receive resource?
 
     ResourceType resource_type;
     ResourceStock resource;
-    
+
     time_t timeout;
-    
+
     uint8_t max_marches;
     uint8_t cur_marches;
-    
+
     uint32_t amount;
     uint32_t remaining;
 
+    /* $adminrss/$rss: the resources still to come after this one. resource_type/amount/remaining
+     * above always describe lines[line_index], the one currently being delivered - single-resource
+     * commands ($food, $adminfood...) just set line_count = 1 and never touch line_index. */
+    TransferLine lines[TRANSFER_BATCH_MAX];
+    uint8_t      line_count;
+    uint8_t      line_index;
+
     uint16_t zone_id;
     uint8_t point_id;
-    
+
     uint64_t not_before; /* now_ms() deadline: do not start before this (bag credit wait, human pacing) */
 
     /* Guild bank (guildbank.h): the marches of a withdrawal are debited from balance_owner's balance as they leave. */
@@ -999,8 +1016,8 @@ typedef struct {
 typedef struct {
     char         requester[13];  // who asked, told about the result
     char         target[13];     // who receives
-    ResourceType type;
-    uint32_t     amount;         // GROSS amount to send: the delivery tax is already added
+    TransferLine lines[TRANSFER_BATCH_MAX];
+    uint8_t      line_count;
     bool         from_balance;   // taken from the requester's guild balance, else from the stock
 } TransferRequest;
 

@@ -5580,42 +5580,55 @@ uint32_t StockAvailable(const Connection *c, ResourceType type, bool from_balanc
 /* Starts the next waiting request once the delivery in progress is over. */
 static void StartNextTransfer(Connection *c)
 {
+	static const char *kind_names[] = {"nourriture", "pierre", "bois", "minerai", "or"};
+
 	while (c->transfer_queue_count > 0) {
 		TransferRequest r = c->transfer_queue[0];
 		memmove(&c->transfer_queue[0], &c->transfer_queue[1],
 			(size_t)(c->transfer_queue_count - 1) * sizeof(c->transfer_queue[0]));
 		c->transfer_queue_count--;
 
-		uint32_t available = StockAvailable(c, r.type, r.from_balance);
-		if (r.from_balance) {
-			uint64_t balance = GuildBankBalance(r.requester, r.type);
-			if (balance < available)
-				available = (uint32_t)balance;
+		// The stock or a balance may have changed while this request waited: check every
+		// resource of the batch ($adminrss/$rss can carry several) before starting any of it,
+		// so a delivery never starts on the resources it can honor and only then hits one it
+		// cannot, part way through.
+		bool ok = true;
+		for (uint8_t i = 0; i < r.line_count && ok; i++) {
+			ResourceType type = r.lines[i].type;
+			uint32_t available = StockAvailable(c, type, r.from_balance);
+			if (r.from_balance) {
+				uint64_t balance = GuildBankBalance(r.requester, type);
+				if (balance < available)
+					available = (uint32_t)balance;
+			}
+			if (r.lines[i].amount > available) {
+				char have[20];
+				format_number2(available, have, sizeof(have));
+				const char *label = (type <= RESOURCE_GOLD) ? kind_names[type] : "?";
+				BotReply(c, r.requester, "Livraison impossible",
+					"Votre demande ne peut plus être honorée (%s disponible pour %s), elle est annulée.",
+					have, label);
+				ok = false;
+			}
 		}
-
-		uint64_t not_before = 0;
-		if (r.amount > available) {
-			// the stock or the balance changed while it waited: tell them instead of sending less in silence
-			char have[20];
-			format_number2(available, have, sizeof(have));
-			BotReply(c, r.requester, "Livraison impossible",
-				"Votre demande ne peut plus être honorée (%s disponible), elle est annulée.", have);
+		if (!ok)
 			continue;
-		}
 
 		memset(&c->transfer, 0, sizeof(c->transfer));
-		c->transfer.amount = r.amount;
-		c->transfer.remaining = r.amount;
-		c->transfer.resource_type = r.type;
-		c->transfer.not_before = not_before;
+		memcpy(c->transfer.lines, r.lines, sizeof(r.lines));
+		c->transfer.line_count = r.line_count;
+		c->transfer.line_index = 0;
+		c->transfer.amount = r.lines[0].amount;
+		c->transfer.remaining = r.lines[0].amount;
+		c->transfer.resource_type = r.lines[0].type;
 		c->transfer.from_balance = r.from_balance;
 		snprintf(c->transfer.target_name, sizeof(c->transfer.target_name), "%s", r.target);
 		snprintf(c->transfer.issued_name, sizeof(c->transfer.issued_name), "%s", r.requester);
 		if (r.from_balance)
 			snprintf(c->transfer.balance_owner, sizeof(c->transfer.balance_owner), "%s", r.requester);
 		c->transfer.state = TRANSFER_FIND_TARGET;
-		LOGI("[BANK] Livraison de %u pour %s (destinataire %s), %u demande(s) encore en file\n",
-			r.amount, r.requester, r.target, c->transfer_queue_count);
+		LOGI("[BANK] Livraison de %u pour %s (destinataire %s, %u ressource(s)), %u demande(s) encore en file\n",
+			r.lines[0].amount, r.requester, r.target, r.line_count, c->transfer_queue_count);
 		return;
 	}
 }
@@ -5828,6 +5841,24 @@ void ResourceTransferTick(Connection *c)
 						"Envoi terminé : %u de %s envoyés à %s, environ %llu reçus après la taxe de %.1f%%.",
 						c->transfer.amount, label, c->transfer.target_name, (unsigned long long)net, tax);
 			}
+
+			// $adminrss/$rss: more resources still to go to the same target - move to the next
+			// one instead of going idle. Re-finds the target first (TRANSFER_FIND_TARGET), same
+			// as between two marches of the same resource, for the same reason (see RecvSHelp's
+			// comment): nothing about switching resource should look different to the server
+			// than switching marches.
+			if (c->transfer.remaining == 0 && c->transfer.line_index + 1 < c->transfer.line_count) {
+				c->transfer.line_index++;
+				TransferLine next = c->transfer.lines[c->transfer.line_index];
+				c->transfer.resource_type = next.type;
+				c->transfer.amount = next.amount;
+				c->transfer.remaining = next.amount;
+				c->transfer.in_flight = 0;
+				c->transfer.not_before = now_ms() + 2000 + (rand() % 2000);
+				c->transfer.state = TRANSFER_FIND_TARGET;
+				break;
+			}
+
 			c->transfer.state = TRANSFER_IDLE;
 			break;
 		case TRANSFER_FAILED:

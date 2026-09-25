@@ -23,7 +23,9 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$gold <amount>` | same, for gold | |
 | `$bal` | every guild member (guild bank on) | Shows your balance: what you deposited by sending resources to the bot |
 | `$bal <player>` | administrators (guild bank on) | Shows another player's balance |
+| `$rss <food> <stone> <wood> <ore> <gold>` | every guild member (guild bank on) | Withdraws several resources from your own balance in one command; `0` skips a resource, e.g. `$rss 0 0 0 0 5M` for gold only. They are sent in priority order regardless of the order typed: gold, ore, wood, stone, then food last |
 | `$adminfood <player> <amount>` | administrators | Sends food from the bot's stock to that player; same with `adminstone`, `adminwood`, `adminore`, `admingold` |
+| `$adminrss <food> <stone> <wood> <ore> <gold> <player>` | administrators | Same as `$rss`, from the bot's stock to another player, e.g. `$adminrss 0 0 0 0 5M Bob` |
 | `$bank bal` | administrators | Sends the bank, bag and total balance of each resource, in `command.output`'s channel |
 | `$bank bal chat` | administrators | Same, forced into alliance chat regardless of `command.output` |
 | `$bank bal mail` | administrators | Same, forced into mail regardless of `command.output` |

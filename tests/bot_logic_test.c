@@ -1505,7 +1505,7 @@ static const uint8_t build_event_none[] = {
 		CHECK(c->transfer_queue_count == 0 && replied("vide"), "guild bank: an administrator takes back their own balance like everybody, not the stock");
 
 		say(c, "Zyco", "$stone 500k", COMMAND_CHANNEL_MAIL);
-		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].amount == 526316 && c->transfer_queue[0].from_balance,
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].lines[0].amount == 526316 && c->transfer_queue[0].from_balance,
 			"guild bank: 500k asked is 526,316 sent so that 500k arrives after the 5% tax");
 		ResourceTransferTick(c);
 		CHECK(c->transfer.state == TRANSFER_WAIT_TARGET && c->transfer.from_balance && strcmp(c->transfer.balance_owner, "Zyco") == 0,
@@ -1556,7 +1556,7 @@ static const uint8_t build_event_none[] = {
 
 		/* all: the whole balance, whatever the tax */
 		say(c, "Zyco", "$stone all", COMMAND_CHANNEL_MAIL);
-		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].amount == GuildBankBalance("Zyco", RESOURCE_ROCK),
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].lines[0].amount == GuildBankBalance("Zyco", RESOURCE_ROCK),
 			"guild bank: 'all' takes the whole balance");
 		TransferQueueRemove(c, "Zyco");
 
@@ -1627,6 +1627,104 @@ static const uint8_t build_event_none[] = {
 			"guild bank: a debit above the balance changes nothing, one within it works");
 		free(c);
 
+		GuildBankReset();
+		char cleanup[64];
+		snprintf(cleanup, sizeof(cleanup), "rm -rf %s", dir);
+		if (system(cleanup) != 0) { /* best effort */ }
+	}
+
+	/* $rss / $adminrss: several resources in one command, sent in priority order (gold, ore, wood,
+	 * stone, then food last) regardless of the order typed, 0 skips a resource. */
+	{
+		char dir[] = "/tmp/lmbot_rss_XXXXXX";
+		CHECK(mkdtemp(dir) != NULL, "rss: temporary folder");
+		GuildBankReset();
+		MarchesPauseEnd();
+
+		c = fresh("boss");
+		snprintf(c->bot.data_path, sizeof(c->bot.data_path), "%s/", dir);
+		c->guildbank.enabled = true;
+		c->server_time = 1000;
+		c->bank.delivery_tax_percent = 0.0;   /* keep the amounts round: tax math is covered elsewhere */
+		c->resources.food = c->resources.rock = c->resources.wood = c->resources.ore = c->resources.gold = 100000000;
+		const char *members[] = { "boss", "Bob" };
+		for (int i = 0; i < 2; i++)
+			snprintf(c->alliance_member.member[c->alliance_member.count++].name, 14, "%s", members[i]);
+		GuildBankCredit(c, "boss", RESOURCE_ROCK, 100);
+		GuildBankCredit(c, "boss", RESOURCE_ORE, 200);
+		GuildBankCredit(c, "boss", RESOURCE_GOLD, 300);
+
+		/* usage and "all zero" are both rejected without touching the queue */
+		reset_sent();
+		say(c, "boss", "$rss", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Usage"), "rss: no arguments at all is rejected with the usage");
+		reset_sent();
+		say(c, "boss", "$rss 0 0 0 0 0", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Rien à retirer"), "rss: every amount at 0 is rejected, nothing queued");
+
+		/* stone, ore and gold requested (in that typed order): sent gold first, then ore, then stone last - food and wood skipped */
+		reset_sent();
+		say(c, "boss", "$rss 0 100 0 200 300", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].line_count == 3
+			&& c->transfer_queue[0].lines[0].type == RESOURCE_GOLD && c->transfer_queue[0].lines[0].amount == 300
+			&& c->transfer_queue[0].lines[1].type == RESOURCE_ORE  && c->transfer_queue[0].lines[1].amount == 200
+			&& c->transfer_queue[0].lines[2].type == RESOURCE_ROCK && c->transfer_queue[0].lines[2].amount == 100,
+			"rss: queued in priority order (gold, ore, stone), not the order typed, food and wood skipped (0)");
+
+		ResourceTransferTick(c);
+		CHECK(c->transfer.line_count == 3 && c->transfer.line_index == 0
+			&& c->transfer.resource_type == RESOURCE_GOLD && c->transfer.amount == 300,
+			"rss: the delivery starts on the highest priority resource (gold)");
+
+		/* gold's delivery completes: line_index advances to ore instead of going idle */
+		c->transfer.zone_id = 1; c->transfer.point_id = 2; c->transfer.remaining = 0; c->transfer.state = TRANSFER_COMPLETE;
+		reset_sent();
+		ResourceTransferTick(c);
+		CHECK(c->transfer.state == TRANSFER_FIND_TARGET && c->transfer.line_index == 1
+			&& c->transfer.resource_type == RESOURCE_ORE && c->transfer.amount == 200 && c->transfer.not_before > now_ms(),
+			"rss: gold done, moves on to ore (re-finding the target) instead of completing the whole request");
+
+		/* ore's delivery completes too: advances to the last line (stone) */
+		c->transfer.remaining = 0; c->transfer.state = TRANSFER_COMPLETE;
+		ResourceTransferTick(c);
+		CHECK(c->transfer.state == TRANSFER_FIND_TARGET && c->transfer.line_index == 2
+			&& c->transfer.resource_type == RESOURCE_ROCK && c->transfer.amount == 100,
+			"rss: ore done, moves on to stone (the last line)");
+
+		/* stone's delivery completes: nothing left, goes idle this time */
+		c->transfer.remaining = 0; c->transfer.state = TRANSFER_COMPLETE;
+		ResourceTransferTick(c);
+		CHECK(c->transfer.state == TRANSFER_IDLE, "rss: stone done, nothing left in the batch: the delivery is over");
+		AbortTransfer(c);
+
+		/* insufficient balance on any one resource cancels the whole request, not just that resource */
+		reset_sent();
+		say(c, "boss", "$rss 0 0 0 0 1000000", COMMAND_CHANNEL_MAIL);   /* boss only has 300 gold deposited */
+		CHECK(c->transfer_queue_count == 0 && replied("insuffisant"), "rss: a single resource above the balance rejects the whole command");
+
+		/* $adminrss: same ordering, admin-only, from the bot's stock, name can hold spaces */
+		reset_sent();
+		say(c, "eve", "$adminrss 0 0 0 0 1M Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 0 && replied("Seuls les administrateurs"), "adminrss: a stranger cannot use it");
+
+		reset_sent();
+		say(c, "boss", "$adminrss 0 50 0 0 0 Bob", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && c->transfer_queue[0].line_count == 1
+			&& c->transfer_queue[0].lines[0].type == RESOURCE_ROCK && c->transfer_queue[0].lines[0].amount == 50
+			&& !c->transfer_queue[0].from_balance && strcmp(c->transfer_queue[0].target, "Bob") == 0,
+			"adminrss: a single non-zero resource among five gives from the stock, never the balance");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		snprintf(c->alliance_member.member[c->alliance_member.count++].name, 14, "%s", "Little Zyco");
+		reset_sent();
+		say(c, "boss", "$adminrss 0 0 0 0 100 Little Zyco", COMMAND_CHANNEL_MAIL);
+		CHECK(c->transfer_queue_count == 1 && strcmp(c->transfer_queue[0].target, "Little Zyco") == 0,
+			"adminrss: the player name (after the five amounts) can hold spaces");
+		AbortTransfer(c);
+		c->transfer_queue_count = 0;
+
+		free(c);
 		GuildBankReset();
 		char cleanup[64];
 		snprintf(cleanup, sizeof(cleanup), "rm -rf %s", dir);
