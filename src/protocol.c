@@ -3917,7 +3917,21 @@ static bool GatherZoneAt(Connection *c, uint16_t index, uint16_t *zone_out) {
 	return true;
 }
 
-void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count) {
+/* Confirmed from 2 live captures (one march of pure infantry, one of infantry+ranged+cavalry+
+ * siege together, both otherwise byte-identical): the payload is NOT a single (type, count)
+ * pair - it is 4 fixed 16-byte troop slots, one per TroopKind in its enum order (infantry,
+ * ranged, cavalry, siege), each shaped [2 bytes, always 0 in every sample so far - meaning
+ * unconfirmed, possibly a tier selector never seen non-zero yet][4-byte count][10 bytes zero,
+ * 8 for the last slot]. The mixed-kind capture had all 4 non-zero counts each in their own
+ * slot at a fixed stride of 16 bytes (offsets 18/34/50/66 from the payload start), matching
+ * exactly what the game reported sending for each kind.
+ *
+ * The PREVIOUS version of this function wrote troop_count at payload offset 66 - which this
+ * layout shows is the SIEGE slot, regardless of the caller's intent. Every gather march this
+ * bot ever sent was therefore requesting `count` siege troops and 0 of everything else - most
+ * likely why they were refused almost unconditionally (accounts rarely keep siege troops idle
+ * for gathering) independently of whatever tier the server would have auto-picked. */
+void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint8_t kind, uint32_t troop_count) {
 	if (MarchesPaused()) {
 		LOGW("[RECALL] Marche de récolte non envoyée : marches suspendues\n");
 		return;
@@ -3926,11 +3940,15 @@ void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint1
 	c->size = 2;
 	write_u16(c->data + c->size, _MSG_REQUEST_TROOPMARCH_NOTATK); c->size += 2;
 	write_u32(c->data + c->size, ++c->protocol.seq_id); c->size += 4;      // payload offset 0
-	write_zero(c->data + c->size, 42); c->size += 42;                     // -> payload offset 46
-	write_u16(c->data + c->size, troop_type_id); c->size += 2;            // 0 = let the server auto-pick
-	write_zero(c->data + c->size, 14); c->size += 14;                     // -> payload offset 62
-	write_u32(c->data + c->size, troop_count); c->size += 4;
-	write_zero(c->data + c->size, 12); c->size += 12;                     // -> payload offset 78
+	write_zero(c->data + c->size, 12); c->size += 12;                     // -> payload offset 16
+
+	for (uint8_t slot = 0; slot < 4; slot++) {
+		write_zero(c->data + c->size, 2); c->size += 2;                    // per-slot tag: unconfirmed meaning, 0 in every sample
+		write_u32(c->data + c->size, slot == kind ? troop_count : 0); c->size += 4;
+		uint32_t tail = (slot == 3) ? 8 : 10;
+		write_zero(c->data + c->size, tail); c->size += tail;
+	}
+
 	write_u16(c->data + c->size, zone_id); c->size += 2;
 	write_u8 (c->data + c->size, point_id); c->size += 1;
 	write_zero(c->data + c->size, 26); c->size += 26;                     // pad to the captured 107-byte payload
@@ -4120,16 +4138,27 @@ void GatherTick(Connection *c) {
 
 		uint32_t count = raw_count;
 		uint32_t available = 0;
+		uint32_t kind_total = 0;
 		bool troop_capped = false;
 
 		// raw_count has no idea how many troops the account actually has free right now - it is
 		// purely the tile's stock divided by an unverified per-troop capacity constant, optionally
-		// capped by the admin's own known max_troop_count. c->troop.total minus troops_out (troops
-		// this code already committed to marches still out - see GatherSettings' comment) is a
-		// hard ceiling on top of that regardless of which tier/kind the server ends up drawing
-		// from (troop_type_id 0 = auto-pick - see RequestGatherMarch's comment).
+		// capped by the admin's own known max_troop_count. The account's total of c->gather.kind
+		// (every tier of it combined) minus troops_out (this kind's troops already committed to
+		// marches still out - see GatherSettings' comment) is a hard ceiling on top of that -
+		// RequestGatherMarch now fills that exact kind's slot (see its comment), so this must
+		// check that same kind's troops, not the whole account's total across every kind.
 		if (c->troop.loaded) {
-			available = c->troop.total > c->gather.troops_out ? c->troop.total - c->gather.troops_out : 0;
+			const uint32_t *bucket;
+			switch (c->gather.kind) {
+				case TROOP_RANGED:  bucket = c->troop.ranged;  break;
+				case TROOP_CAVALRY: bucket = c->troop.cavalry; break;
+				case TROOP_SIEGE:   bucket = c->troop.siege;   break;
+				default:             bucket = c->troop.infantry; break;
+			}
+			kind_total = bucket[0] + bucket[1] + bucket[2] + bucket[3] + c->troop.t5_data[c->gather.kind];
+
+			available = kind_total > c->gather.troops_out ? kind_total - c->gather.troops_out : 0;
 			if (available == 0) {
 				// Nothing free right now: this is our own shortage, not the tile's fault (unlike
 				// a server refusal) - free the tile and the march slot reserved for it in the
@@ -4142,7 +4171,7 @@ void GatherTick(Connection *c) {
 			if (count > available) { count = available; troop_capped = true; }
 		}
 
-		RequestGatherMarch(c, t->zone_id, t->point_id, 0, count);
+		RequestGatherMarch(c, t->zone_id, t->point_id, c->gather.kind, count);
 		GatherQueuePush(c, count);
 		c->gather.pending_tile = GATHER_NO_PENDING_TILE;
 		c->gather.next_march_at = GatherHumanDelay(); // one march per delay, never several back to back
@@ -4150,8 +4179,8 @@ void GatherTick(Connection *c) {
 		map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
 		if (troop_capped)
 			LOGI("[GATHER] Envoi de %u troupes (plafonne, %u demandees par le calcul) vers X:%u Y:%u "
-				"(niveau %u, %u en stock) - %u troupes libres sur %u au total\n",
-				count, raw_count, pos.x, pos.y, t->level, t->amount, available, c->troop.total);
+				"(niveau %u, %u en stock) - %u troupes libres sur %u de ce type au total\n",
+				count, raw_count, pos.x, pos.y, t->level, t->amount, available, kind_total);
 		else
 			LOGI("[GATHER] Envoi de %u troupes vers X:%u Y:%u (niveau %u, %u en stock)%s\n",
 				count, pos.x, pos.y, t->level, t->amount,
@@ -4520,6 +4549,8 @@ void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size) {
 	TroopAdd(c, read_u8(data), read_u8(data + 1), read_u32(data + 2));
 }
 
+static const char *AUTOTRAIN_KIND_NAMES[4] = {"infanterie", "distance", "cavalerie", "siege"};
+
 /* Confirmed from a capture: reply to our own _MSG_REQUEST_TRAINING_ (RequestTroopTraining),
  * 39 bytes, seen 3 times (one per training queued), always starting
  *   00 01 01 3a 1c 00 00 ...
@@ -4527,41 +4558,44 @@ void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size) {
  * RANGED/T2/7226. Only confirms the order was accepted; troops are not added yet (that is
  * RecvAddSoldier / RecvTroopTrainingImmediate, later). Every capture sample had status 0 -
  * a refusal's exact code is not confirmed, just that a non-zero byte means refused, same
- * convention as every other status-first response in this file. */
+ * convention as every other status-first response in this file.
+ *
+ * Fires for ANY accepted/refused training, autotrain's or a human's in game - the backoff
+ * below is keyed by [kind][tier] precisely so a refusal here (e.g. T4 locked by research)
+ * only ever affects that one tier of that one kind, never a different, perfectly usable one. */
 void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size) {
-	if (size < 2) return;
+	if (size < 7) return;
 
 	uint8_t status = read_u8(data);
 	uint8_t kind = read_u8(data + 1);
-	if (kind >= 4) return;
+	uint8_t tier = read_u8(data + 2);
+	uint32_t amount = read_u32(data + 3);
+	if (kind >= 4 || tier > TIER_T5) return;
 
-	if (status == 0 && size >= 7) {
+	if (status == 0) {
 		c->training[kind].active = true;
-		c->training[kind].tier   = read_u8(data + 2);
-		c->training[kind].amount = read_u32(data + 3);
-	}
-
-	if (status != 0) {
-		c->autotrain.kind_busy[kind] = false;
-
-		uint16_t refusals = ++c->autotrain.kind_consecutive_refusals[kind];
-		if (refusals >= AUTOTRAIN_HARD_BLOCK_THRESHOLD) {
-			if (refusals == AUTOTRAIN_HARD_BLOCK_THRESHOLD)
-				LOGW("[AUTOTRAIN] %u refus consecutifs pour kind=%u : probablement un palier de "
-					"recherche ou de batiment non atteint pour ce niveau de troupe, pas juste un "
-					"manque de ressources temporaire - on repasse a un essai toutes les 30 minutes\n",
-					refusals, kind);
-			c->autotrain.kind_retry_at[kind] = now_ms() + AUTOTRAIN_HARD_BLOCK_BACKOFF_MS;
-		} else {
-			LOGW("[AUTOTRAIN] Entrainement refuse pour kind=%u (code %u)\n", kind, status);
-			c->autotrain.kind_retry_at[kind] = now_ms() + AUTOTRAIN_REFUSAL_BACKOFF_MS;
-		}
+		c->training[kind].tier   = tier;
+		c->training[kind].amount = amount;
+		c->autotrain.consecutive_refusals[kind][tier] = 0;
+		// kind_busy stays true (set when we sent the request) until RecvAddSoldier /
+		// RecvTroopTrainingImmediate reports the batch actually finished.
 		return;
 	}
 
-	c->autotrain.kind_consecutive_refusals[kind] = 0;
-	// kind_busy stays true (set when we sent the request) until RecvAddSoldier /
-	// RecvTroopTrainingImmediate reports the batch actually finished.
+	c->autotrain.kind_busy[kind] = false; // only meaningful if this bot was the one waiting; harmless otherwise
+
+	uint16_t refusals = ++c->autotrain.consecutive_refusals[kind][tier];
+	if (refusals >= AUTOTRAIN_HARD_BLOCK_THRESHOLD) {
+		if (refusals == AUTOTRAIN_HARD_BLOCK_THRESHOLD)
+			LOGW("[AUTOTRAIN] %u refus consecutifs pour %s T%u : probablement un palier de "
+				"recherche ou de batiment non atteint pour ce palier, pas juste un manque de "
+				"ressources temporaire - on repasse a un essai toutes les 30 minutes\n",
+				refusals, AUTOTRAIN_KIND_NAMES[kind], tier + 1);
+		c->autotrain.retry_at[kind][tier] = now_ms() + AUTOTRAIN_HARD_BLOCK_BACKOFF_MS;
+	} else {
+		LOGW("[AUTOTRAIN] Entrainement refuse pour %s T%u (code %u)\n", AUTOTRAIN_KIND_NAMES[kind], tier + 1, status);
+		c->autotrain.retry_at[kind][tier] = now_ms() + AUTOTRAIN_REFUSAL_BACKOFF_MS;
+	}
 }
 
 void AutoTrainTick(Connection *c) {
@@ -4571,24 +4605,26 @@ void AutoTrainTick(Connection *c) {
 	if (now_ms() < c->autotrain.next_action_at) return;
 
 	uint64_t now = now_ms();
-	for (uint8_t i = 0; i < c->autotrain.target_count; i++) {
-		AutoTrainTarget *t = &c->autotrain.targets[i];
-		if (t->kind >= 4) continue;
-		if (c->autotrain.kind_busy[t->kind]) continue; // that kind's building is already training - possibly this very target, possibly an earlier one in the list
-		if (now < c->autotrain.kind_retry_at[t->kind]) continue; // back off after a refusal
+	for (uint8_t kind = 0; kind < 4; kind++) {
+		if (c->autotrain.kind_busy[kind]) continue; // already training something
 
-		uint32_t *bucket = TroopBucket(c, t->kind, t->tier);
-		uint32_t current = bucket ? *bucket : 0;
-		if (current >= t->cap) continue; // this (kind, tier) is already filled - move on to this kind's next entry, if any
+		for (uint8_t i = 0; i < c->autotrain.step_count[kind]; i++) {
+			AutoTrainStep *step = &c->autotrain.steps[kind][i];
+			if (step->tier > TIER_T5) continue;
+			if (now < c->autotrain.retry_at[kind][step->tier]) continue; // this step's tier is backed off - try the kind's next step
 
-		c->autotrain.kind_busy[t->kind] = true; // optimistic, mirrors gather's active_marches pattern
-		c->autotrain.next_action_at = GatherHumanDelay(); // one new order per tick, same pacing as gather
-		RequestTroopTraining(c, t->kind, t->tier, t->cap - current);
+			uint32_t *bucket = TroopBucket(c, kind, step->tier);
+			uint32_t current = bucket ? *bucket : 0;
+			if (current >= step->cap) continue; // this step is already filled - move on to the kind's next one
 
-		static const char *kind_names[] = {"infanterie", "distance", "cavalerie", "siege"};
-		LOGI("[AUTOTRAIN] Entrainement de %u troupes %s T%u (objectif %u)\n",
-			t->cap - current, kind_names[t->kind], t->tier + 1, t->cap);
-		return;
+			c->autotrain.kind_busy[kind] = true; // optimistic, mirrors gather's active_marches pattern
+			c->autotrain.next_action_at = GatherHumanDelay(); // one new order per tick, same pacing as gather
+			RequestTroopTraining(c, kind, step->tier, step->cap - current);
+
+			LOGI("[AUTOTRAIN] Formation de %u troupes %s T%u (objectif %u)\n",
+				step->cap - current, AUTOTRAIN_KIND_NAMES[kind], step->tier + 1, step->cap);
+			return;
+		}
 	}
 }
 

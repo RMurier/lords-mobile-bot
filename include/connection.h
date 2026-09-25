@@ -445,6 +445,7 @@ typedef struct {
     uint8_t  max_marches;   // out of player.max_marches, how many to use for gathering
     uint16_t radius;        // tiles around the castle to scan
     uint32_t max_troop_count; // never send more troops than this in one gather march (0 = no cap)
+    uint8_t  kind;          // TroopKind: which of the 4 troop-count slots RequestGatherMarch fills (default TROOP_INFANTRY)
 
     bool     scan_done;
     uint16_t scan_cursor;   // index into the zone rectangle being swept
@@ -768,37 +769,44 @@ typedef struct {
 	uint32_t amount;
 } TrainingSlot;
 
-#define AUTOTRAIN_MAX_TARGETS 16
 #define AUTOTRAIN_REFUSAL_BACKOFF_MS       (60 * 1000)       // normal case: likely transient (resources, timing)
 #define AUTOTRAIN_HARD_BLOCK_THRESHOLD     5                 // this many refusals in a row -> stop assuming "transient"
 // e.g. the tier's research/building requirement is not met yet: retrying every minute would
-// never succeed and just spams logs, but the target can't be dropped outright either since the
+// never succeed and just spams logs, but the tier can't be dropped outright either since the
 // requirement could be met later in the same run (research finishing, a building upgrade
 // landing) - so keep retrying, just rarely.
 #define AUTOTRAIN_HARD_BLOCK_BACKOFF_MS    (30 * 60 * 1000)
 
-typedef struct {
-	uint8_t  kind; // TroopKind
-	uint8_t  tier; // TIER_T1..TIER_T5
-	uint32_t cap;  // stop training this (kind, tier) once c->troop reaches this many
-} AutoTrainTarget;
+#define AUTOTRAIN_MAX_STEPS_PER_KIND 5
 
-/* Each of the 4 kinds (infantry/ranged/cavalry/siege) trains through its own building
- * (barracks/range/stable/workshop) and, as far as anything captured so far shows, only ever
- * has one order in flight at a time - see RecvTrainingStart's comment. So this tracks one
- * busy flag per kind, and walks `targets` in order for each kind independently: an entry is
- * skipped once its cap is already met (c->troop.loaded required - see AutoTrainTick), which
- * naturally moves on to that kind's next entry (e.g. T2 then T4) without extra bookkeeping. */
+typedef struct {
+	uint8_t  tier; // TIER_T1..TIER_T5
+	uint32_t cap;  // train this exact (kind, tier) up to this count
+} AutoTrainStep;
+
+/* One priority-ordered list of (tier, cap) steps PER kind (infantry, ranged, cavalry, siege -
+ * each its own building/queue). E.g. infantry = [T2 up to 10M, T4 up to 5M]: fills T2 to 10M
+ * first, then - once T2 is at 10M - moves on to T4, training it up to 5M more. A step is
+ * skipped once its own tier already holds that many (c->troop.loaded required), which naturally
+ * advances to the kind's next step without extra bookkeeping.
+ *
+ * Each of the 4 kinds trains through its own building and, as far as anything captured so far
+ * shows, only ever has one order in flight at a time - see RecvTrainingStart's comment - hence
+ * one busy flag per kind. Backoff after a refusal is indexed [kind][tier]: a refusal on one
+ * tier of a kind (e.g. T4 locked by research) must not block a different, already-unlocked
+ * tier of the same kind (e.g. T2) - AutoTrainTick's step loop naturally moves past a backed-off
+ * step to the kind's next one, and naturally retries the earlier one again once its own backoff
+ * expires. */
 typedef struct {
 	bool enabled;
 
-	AutoTrainTarget targets[AUTOTRAIN_MAX_TARGETS];
-	uint8_t         target_count;
+	AutoTrainStep steps[4][AUTOTRAIN_MAX_STEPS_PER_KIND]; // indexed by TroopKind
+	uint8_t       step_count[4];
 
-	bool     kind_busy[4];              // indexed by TroopKind
-	uint64_t kind_retry_at[4];          // now_ms() backoff after a refusal, per kind
-	uint16_t kind_consecutive_refusals[4]; // resets on any accepted order; see RecvTrainingStart
-	uint64_t next_action_at;            // now_ms(): at most one new training order per tick, paced like gather
+	bool     kind_busy[4];                       // indexed by TroopKind
+	uint64_t retry_at[4][5];                     // [kind][tier] now_ms() backoff after a refusal
+	uint16_t consecutive_refusals[4][5];         // [kind][tier], resets on any accepted order for that pair
+	uint64_t next_action_at;        // now_ms(): at most one new training order per tick, paced like gather
 } AutoTrainSettings;
 
 typedef struct {

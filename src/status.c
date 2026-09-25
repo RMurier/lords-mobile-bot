@@ -118,6 +118,21 @@ void StatusWrite(Connection *c, bool connected)
 				k ? "," : "", kind_keys[k], t->active ? "true" : "false", t->tier + 1, t->amount);
 		}
 		fprintf(f, "],");
+
+		// Autotrain's own view: per kind, each configured (tier, cap) step with that exact
+		// tier's current count - same numbers the per-type config lines are about.
+		fprintf(f, "\"autotrain\":{\"enabled\":%s,\"kinds\":[", c->autotrain.enabled ? "true" : "false");
+		for (int k = 0; k < 4; k++) {
+			fprintf(f, "%s{\"kind\":\"%s\",\"steps\":[", k ? "," : "", kind_keys[k]);
+			for (int i = 0; i < c->autotrain.step_count[k]; i++) {
+				AutoTrainStep *step = &c->autotrain.steps[k][i];
+				uint32_t current = step->tier <= TIER_T4 ? kind_tiers[k][step->tier] : c->troop.t5_data[k];
+				fprintf(f, "%s{\"tier\":%u,\"cap\":%u,\"current\":%u}",
+					i ? "," : "", step->tier + 1, step->cap, current);
+			}
+			fprintf(f, "]}");
+		}
+		fprintf(f, "]},");
 	}
 
 	fprintf(f, "\"wounded\":{\"loaded\":%s,\"total\":%u},",

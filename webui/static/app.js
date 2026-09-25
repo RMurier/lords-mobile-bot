@@ -779,6 +779,24 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       <tbody>${rows}</tbody></table>`;
   }
 
+  // The autotrain config's own per-type lines, one progress bar per (kind, tier) step, in the
+  // order they are trained (a kind's next step only starts once the previous one hits its cap).
+  function autotrainProgress(autotrain) {
+    if (!autotrain || !autotrain.enabled) return "";
+    const rows = [];
+    for (const k of autotrain.kinds || []) {
+      for (const step of k.steps || []) {
+        const pct = Math.min(100, (step.current / step.cap) * 100);
+        const done = step.current >= step.cap;
+        rows.push(`<div class="atrow"><span class="atlabel">${icon(k.kind, 18)} ${TROOP_KIND_LABELS[k.kind] || k.kind} T${step.tier}</span>
+          <div class="atbar"><div class="atfill${done ? " done" : ""}" style="width:${pct}%"></div></div>
+          <span class="atval">${short(step.current)} / ${short(step.cap)}</span></div>`);
+      }
+    }
+    if (!rows.length) return "";
+    return `<div class="atwrap">${rows.join("")}</div>`;
+  }
+
   // What each kind's building is currently training, whichever started it (autotrain or a
   // human in game) - see TrainingSlot's comment (src/protocol.c) for why there is no ETA.
   function trainingRow(training) {
@@ -846,7 +864,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
           ${troop("total", "Total", num(t.total))}${troop("infantry", "Infanterie", short(t.infantry))}${troop("cavalry", "Cavalerie", short(t.cavalry))}
           ${troop("ranged", "Tireurs", short(t.ranged))}${troop("siege", "Siège", short(t.siege))}
           ${d.wounded.loaded ? troop("wounded", "Blessés", num(d.wounded.total)) : ""}</div>
-          ${troopTierTable(d.troops_by_tier)}${trainingRow(d.training)}`
+          ${troopTierTable(d.troops_by_tier)}${trainingRow(d.training)}${autotrainProgress(d.autotrain)}`
           : `<p class="help">Pas encore reçues du serveur.</p>`}</div>`;
   }
 

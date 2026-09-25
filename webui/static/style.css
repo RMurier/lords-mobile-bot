@@ -344,6 +344,13 @@ code { font-family: var(--mono); background: var(--surface-2); padding: 1px 6px;
 .ttiers tbody tr:nth-child(odd) { background: var(--surface-2); }
 .ttiers td { font-variant-numeric: tabular-nums; }
 .ttiers .ico { vertical-align: -3px; }
+.atwrap { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.atrow { display: flex; align-items: center; gap: 10px; }
+.atlabel { flex: 0 0 120px; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.atbar { flex: 1; height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.atfill { height: 100%; background: var(--warn); border-radius: 999px; }
+.atfill.done { background: var(--ok); }
+.atval { flex: 0 0 auto; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); min-width: 110px; text-align: right; }
 .tab-technical { margin-left: auto; font-weight: 500; font-size: 13px; }
 h2.subhead { font-size: 16px; margin: 26px 0 6px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 h2.subhead:first-of-type { margin-top: 18px; }

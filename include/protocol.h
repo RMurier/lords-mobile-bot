@@ -129,7 +129,7 @@ void WarTick(Connection *c);
 void NotifyDiscord(Connection *c, const char *message);
 
 void RequestMapData(Connection *c, uint16_t zone_id);
-void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint16_t troop_type_id, uint32_t troop_count);
+void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint8_t kind, uint32_t troop_count);
 void RequestGatherRecall(Connection *c, uint32_t march_id);
 
 /* $recall: take every march back, then send none for recall.pause_seconds (5 minutes by default). The pause

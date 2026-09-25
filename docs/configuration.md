@@ -480,6 +480,55 @@ cargo_ship.reserve_gold = 10M
 
 ---
 
+## Automatic Gathering
+
+Scans the zones around the castle (one at a time) for resource tiles and sends gather marches to them.
+
+```cfg
+gather.enabled = false
+gather.kind = INFANTRY
+gather.max_marches = 1
+gather.radius = 30
+gather.max_troop_count = 0
+```
+
+A gather march only ever uses **one** troop kind at a time (`gather.kind`: `INFANTRY`, `RANGED`, `CAVALRY` or `SIEGE`) - confirmed
+from live captures, the request is 4 fixed slots (one per kind), not a single "pick a tier" field. Whichever kind you choose must
+have troops sitting idle whenever gathering runs, or every march is refused (code 2) no matter how many troops the account has in
+total. The troop *count* per march is still an experimental estimate (`GATHER_DEFAULT_TROOP_CAPACITY`, one captured sample) - it can
+ask for far more than you have; `gather.max_troop_count` (0 = no cap) and the account's own known troop total for the chosen kind
+both cap it, whichever is lower.
+
+`gather.max_marches` reserves that many of the account's total marches for gathering. `gather.radius` is how far around the castle
+(in tiles) to scan for resource tiles.
+
+---
+
+## Automatic Training
+
+Trains troops toward a target for each kind, one priority-ordered step at a time.
+
+```cfg
+autotrain.enabled = false
+autotrain.infantry = T2:10000000, T4:5000000
+autotrain.ranged =
+autotrain.cavalry =
+autotrain.siege =
+```
+
+Each of the four kinds (`infantry`, `ranged`, `cavalry`, `siege`) has its own building/queue and its own line: a comma-separated
+list of `TIER:CAP` steps (`T1`-`T5`), tried in the order given. A step is skipped once its own tier already holds that many troops,
+which moves on to that kind's next step (e.g. fill `T2` to 10M, then `T4` to 5M more). Leaving a line empty (or unset) means that
+kind is never auto-trained. A tier that keeps getting refused (e.g. the research for it is not done yet) backs off automatically
+instead of retrying every tick - a few times a minute at first, then once every 30 minutes if it still fails, without ever giving up
+on it for the session (the research could finish later).
+
+**Speeding up a training queue with items, cheaply:** research/observation from live play - use **one 50% reduction item first**,
+then fill the remainder of the timer with **25% items**. Using several 50% items back to back wastes more of each one's reduction
+than mixing in 25% items for the tail end.
+
+---
+
 ## Future Configuration
 
 The following features are planned or under development:

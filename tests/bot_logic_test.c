@@ -1409,10 +1409,12 @@ static const uint8_t build_event_none[] = {
 		c->gather.march_send_at = 1; // skip the human-pacing wait between the look and the march
 		GatherTick(c);
 		int k = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
+		// gather.kind defaults to TROOP_INFANTRY, whose count sits at offset 22 - see
+		// RequestGatherMarch's comment for the real 4-slot layout confirmed from captures.
 		uint32_t sent_count_field = k >= 0
-			? (uint32_t)(sent[k][66] | sent[k][67] << 8 | sent[k][68] << 16 | sent[k][69] << 24) : 0;
+			? (uint32_t)(sent[k][22] | sent[k][23] << 8 | sent[k][24] << 16 | sent[k][25] << 24) : 0;
 		CHECK(k >= 0 && sent_count_field == 5,
-			"gather: the troop count is capped to c->troop.total, not the tile-derived formula");
+			"gather: the troop count is capped to that kind's troops, not the tile-derived formula");
 
 		free(c);
 
@@ -1455,7 +1457,7 @@ static const uint8_t build_event_none[] = {
 		c->gather.march_send_at = 1;
 		GatherTick(c); // then takes all 100 available troops
 		k = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
-		uint32_t amt1 = k >= 0 ? (uint32_t)(sent[k][66] | sent[k][67] << 8 | sent[k][68] << 16 | sent[k][69] << 24) : 0;
+		uint32_t amt1 = k >= 0 ? (uint32_t)(sent[k][22] | sent[k][23] << 8 | sent[k][24] << 16 | sent[k][25] << 24) : 0;
 		CHECK(k >= 0 && amt1 == 100 && c->gather.troops_out == 100,
 			"gather: first march takes all available troops and troops_out tracks it");
 
@@ -1618,8 +1620,10 @@ static const uint8_t build_event_none[] = {
 		GatherTick(c);
 		int m = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
 		CHECK(m >= 0 && c->gather.pending_tile == GATHER_NO_PENDING_TILE, "gather: the march follows, pending tile cleared");
-		uint32_t sent_troops = (uint32_t)sent[m][66] | ((uint32_t)sent[m][67] << 8)
-			| ((uint32_t)sent[m][68] << 16) | ((uint32_t)sent[m][69] << 24);
+		// gather.kind defaults to TROOP_INFANTRY, whose count sits at offset 22 - see
+		// RequestGatherMarch's comment for the real 4-slot layout confirmed from captures.
+		uint32_t sent_troops = (uint32_t)sent[m][22] | ((uint32_t)sent[m][23] << 8)
+			| ((uint32_t)sent[m][24] << 16) | ((uint32_t)sent[m][25] << 24);
 		CHECK(sent_troops == 500000, "gather: troop count capped at gather.max_troop_count instead of the raw 44M+ formula result");
 		free(c);
 	}
@@ -2210,36 +2214,44 @@ static const uint8_t first_2[] = {
 		if (system(cleanup) != 0) { /* best effort */ }
 	}
 
-	/* ---- autotrain: priority order, per-kind independence, completion, refusal ---- */
+	/* ---- autotrain: per-(kind,tier) steps, per-kind independence ---- */
 	{
 		c = fresh("boss");
 		c->troop.loaded = true;
 		c->troop.ranged[TIER_T2] = 1000;
 		c->troop.infantry[TIER_T2] = 500;
 		c->autotrain.enabled = true;
-		c->autotrain.target_count = 2;
-		c->autotrain.targets[0] = (AutoTrainTarget){ .kind = TROOP_RANGED, .tier = TIER_T2, .cap = 5000 };
-		c->autotrain.targets[1] = (AutoTrainTarget){ .kind = TROOP_INFANTRY, .tier = TIER_T2, .cap = 2000 };
+		c->autotrain.step_count[TROOP_RANGED] = 1;
+		c->autotrain.steps[TROOP_RANGED][0] = (AutoTrainStep){ .tier = TIER_T2, .cap = 5000 };
+		c->autotrain.step_count[TROOP_INFANTRY] = 1;
+		c->autotrain.steps[TROOP_INFANTRY][0] = (AutoTrainStep){ .tier = TIER_T2, .cap = 2000 };
 		reset_sent();
 
+		// Both kinds need action; AutoTrainTick sends at most one order per call (like gather,
+		// one action per tick) but which kind goes first is just loop order, not a designed
+		// priority between kinds (only tiers are prioritized, per kind - see the next test) -
+		// so this checks it is one of the two expected orders, not a specific one.
 		AutoTrainTick(c);
 		int k = find_packet(_MSG_REQUEST_TRAINING_);
 		uint32_t amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
-		CHECK(k >= 0 && sent[k][8] == TROOP_RANGED && sent[k][9] == TIER_T2 && amount == 4000,
-			"autotrain: first tick trains the missing amount for the top-priority target");
-		CHECK(c->autotrain.kind_busy[TROOP_RANGED], "autotrain: ranged marked busy after sending its order");
+		bool first_is_ranged = k >= 0 && sent[k][8] == TROOP_RANGED && sent[k][9] == TIER_T2 && amount == 4000;
+		bool first_is_infantry = k >= 0 && sent[k][8] == TROOP_INFANTRY && sent[k][9] == TIER_T2 && amount == 1500;
+		CHECK(first_is_ranged || first_is_infantry,
+			"autotrain: first tick trains the missing amount toward one kind's total target");
+		uint8_t first_kind = first_is_ranged ? TROOP_RANGED : TROOP_INFANTRY;
+		uint8_t second_kind = first_is_ranged ? TROOP_INFANTRY : TROOP_RANGED;
+		CHECK(c->autotrain.kind_busy[first_kind], "autotrain: that kind is marked busy after sending its order");
 
 		reset_sent();
-		AutoTrainTick(c); // ranged already busy, and the pacing delay has not elapsed yet
+		AutoTrainTick(c); // first_kind already busy, and the pacing delay has not elapsed yet
 		CHECK(sent_count == 0, "autotrain: no new order while the pacing delay has not elapsed");
 
 		c->autotrain.next_action_at = 0; // simulate the pacing delay having elapsed
 		reset_sent();
 		AutoTrainTick(c);
 		k = find_packet(_MSG_REQUEST_TRAINING_);
-		amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
-		CHECK(k >= 0 && sent[k][8] == TROOP_INFANTRY && sent[k][9] == TIER_T2 && amount == 1500,
-			"autotrain: ranged being busy does not block infantry's own target");
+		CHECK(k >= 0 && sent[k][8] == second_kind,
+			"autotrain: the first kind being busy does not block the other kind's own target");
 
 		// training completes for ranged: RecvAddSoldier reports it, frees the kind, credits the count
 		uint8_t addsoldier[6] = { TROOP_RANGED, TIER_T2, 0xA0, 0x0F, 0x00, 0x00 }; // 4000 LE
@@ -2251,34 +2263,54 @@ static const uint8_t first_2[] = {
 		reset_sent();
 		AutoTrainTick(c);
 		k = find_packet(_MSG_REQUEST_TRAINING_);
-		CHECK(k < 0 || sent[k][8] != TROOP_RANGED, "autotrain: a target already at its cap is not retrained");
+		CHECK(k < 0 || sent[k][8] != TROOP_RANGED, "autotrain: a kind already at its total target is not retrained");
+		free(c);
+	}
 
-		// refusal: RecvTrainingStart with a non-zero status frees the kind and arms a backoff
-		c->autotrain.kind_busy[TROOP_INFANTRY] = true;
-		uint8_t refuse[2] = { 3, TROOP_INFANTRY };
-		RecvTrainingStart(c, refuse, sizeof(refuse));
-		uint64_t short_backoff = c->autotrain.kind_retry_at[TROOP_INFANTRY];
-		CHECK(!c->autotrain.kind_busy[TROOP_INFANTRY] && short_backoff > 0,
-			"autotrain: a refusal frees the kind and arms a backoff");
-		CHECK(short_backoff < now_ms() + 5 * 60 * 1000,
-			"autotrain: the first refusals use a short backoff (assumed transient)");
+	/* ---- autotrain: falls back to the next priority tier while the top one is backed off ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		c->autotrain.step_count[TROOP_INFANTRY] = 2;
+		c->autotrain.steps[TROOP_INFANTRY][0] = (AutoTrainStep){ .tier = TIER_T4, .cap = 2000 };
+		c->autotrain.steps[TROOP_INFANTRY][1] = (AutoTrainStep){ .tier = TIER_T2, .cap = 2000 };
+		reset_sent();
 
-		// a target that is never going to succeed (e.g. the research for that tier is not
-		// done) must not be hammered forever at the short backoff - after enough refusals
-		// in a row the backoff grows a lot, without ever giving up on it for the whole run
+		AutoTrainTick(c);
+		int k = find_packet(_MSG_REQUEST_TRAINING_);
+		CHECK(k >= 0 && sent[k][9] == TIER_T4, "autotrain: tries the kind's first step first");
+
+		// T4 refused (e.g. the research for it is not done) - reply carries kind/tier/amount now
+		uint8_t refuseT4[7] = { 2, TROOP_INFANTRY, TIER_T4, 0, 0, 0, 0 };
+		RecvTrainingStart(c, refuseT4, sizeof(refuseT4));
+		CHECK(!c->autotrain.kind_busy[TROOP_INFANTRY], "autotrain: a refusal frees the kind");
+		uint64_t short_backoff = c->autotrain.retry_at[TROOP_INFANTRY][TIER_T4];
+		CHECK(short_backoff > 0 && short_backoff < now_ms() + 5 * 60 * 1000,
+			"autotrain: the first refusals on a tier use a short backoff (assumed transient)");
+
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c); // T4 backed off for this kind - T2 (the kind's next step) is not
+		k = find_packet(_MSG_REQUEST_TRAINING_);
+		CHECK(k >= 0 && sent[k][9] == TIER_T2,
+			"autotrain: moves on to the kind's next step while the first one is backed off");
+
+		// a tier that is never going to succeed must not be hammered forever at the short
+		// backoff - after enough refusals in a row on that SAME tier, the backoff grows a lot,
+		// without ever giving up on it for the whole run (research could finish later)
 		for (int i = 0; i < AUTOTRAIN_HARD_BLOCK_THRESHOLD - 1; i++)
-			RecvTrainingStart(c, refuse, sizeof(refuse));
-		uint64_t long_backoff = c->autotrain.kind_retry_at[TROOP_INFANTRY];
+			RecvTrainingStart(c, refuseT4, sizeof(refuseT4));
+		uint64_t long_backoff = c->autotrain.retry_at[TROOP_INFANTRY][TIER_T4];
 		CHECK(long_backoff > now_ms() + 5 * 60 * 1000,
-			"autotrain: enough consecutive refusals switch to a long backoff instead of retrying every minute forever");
+			"autotrain: enough consecutive refusals on one tier switch to a long backoff for that tier");
 
-		// an accepted order resets the streak, so a later real transient refusal is not
-		// immediately treated as another hard block
-		uint8_t accept[2] = { 0, TROOP_INFANTRY };
-		RecvTrainingStart(c, accept, sizeof(accept));
-		CHECK(c->autotrain.kind_consecutive_refusals[TROOP_INFANTRY] == 0,
-			"autotrain: an accepted order resets the refusal streak");
-
+		// an accepted order on T4 resets ONLY T4's streak, so a later real transient refusal
+		// there is not immediately treated as another hard block
+		uint8_t acceptT4[7] = { 0, TROOP_INFANTRY, TIER_T4, 0, 0, 0, 0 };
+		RecvTrainingStart(c, acceptT4, sizeof(acceptT4));
+		CHECK(c->autotrain.consecutive_refusals[TROOP_INFANTRY][TIER_T4] == 0,
+			"autotrain: an accepted order resets that tier's refusal streak");
 		free(c);
 	}
 

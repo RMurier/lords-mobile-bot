@@ -259,15 +259,17 @@ static bool ParseTroopTier(const char *s, uint8_t *out)
     return false;
 }
 
-/* "KIND:TIER:CAP, KIND:TIER:CAP, ..." in priority order - see AutoTrainSettings' comment for
- * how the order is used (per kind, first unmet entry in this list wins). */
-static bool ParseAutoTrainTargets(Connection *c, const char *value)
+/* "T2:10000000, T4:5000000" - one kind's priority-ordered list of (tier, cap) steps (see
+ * AutoTrainSettings' comment): fills T2 up to 10M first, then T4 up to 5M more. Each tier at
+ * most once per kind; up to AUTOTRAIN_MAX_STEPS_PER_KIND entries (the 5 tiers that exist). */
+static bool ParseAutoTrainSteps(Connection *c, uint8_t kind, const char *value)
 {
-    char buffer[1024];
+    char buffer[256];
     strncpy(buffer, value, sizeof(buffer));
     buffer[sizeof(buffer) - 1] = '\0';
 
-    c->autotrain.target_count = 0;
+    c->autotrain.step_count[kind] = 0;
+    bool seen[5] = {0};
 
     for (char *token = strtok(buffer, ","); token; token = strtok(NULL, ",")) {
         while (*token == ' ')
@@ -275,30 +277,30 @@ static bool ParseAutoTrainTargets(Connection *c, const char *value)
         if (*token == '\0')
             continue;
 
-        char kind_s[16], tier_s[8], cap_s[16];
-        if (sscanf(token, "%15[^:]:%7[^:]:%15s", kind_s, tier_s, cap_s) != 3) {
-            printf("Invalid autotrain.targets entry: %s (expected KIND:TIER:CAP)\n", token);
+        char tier_s[8], cap_s[16];
+        if (sscanf(token, "%7[^:]:%15s", tier_s, cap_s) != 2) {
+            printf("Invalid autotrain entry: %s (expected TIER:CAP, e.g. T2:10000000)\n", token);
             return false;
         }
 
-        uint8_t kind, tier;
-        if (!ParseTroopKind(kind_s, &kind)) {
-            printf("Invalid autotrain.targets kind: %s (INFANTRY, RANGED, CAVALRY or SIEGE)\n", kind_s);
-            return false;
-        }
+        uint8_t tier;
         if (!ParseTroopTier(tier_s, &tier)) {
-            printf("Invalid autotrain.targets tier: %s (T1-T5)\n", tier_s);
+            printf("Invalid autotrain tier: %s (expected T1-T5)\n", tier_s);
             return false;
         }
-        if (c->autotrain.target_count >= AUTOTRAIN_MAX_TARGETS) {
-            printf("Too many autotrain.targets entries (max %d)\n", AUTOTRAIN_MAX_TARGETS);
+        if (seen[tier]) {
+            printf("Duplicate autotrain tier: %s\n", tier_s);
+            return false;
+        }
+        if (c->autotrain.step_count[kind] >= AUTOTRAIN_MAX_STEPS_PER_KIND) {
+            printf("Too many autotrain steps (max %d)\n", AUTOTRAIN_MAX_STEPS_PER_KIND);
             return false;
         }
 
-        AutoTrainTarget *t = &c->autotrain.targets[c->autotrain.target_count++];
-        t->kind = kind;
-        t->tier = tier;
-        t->cap = (uint32_t)strtoul(cap_s, NULL, 10);
+        seen[tier] = true;
+        AutoTrainStep *step = &c->autotrain.steps[kind][c->autotrain.step_count[kind]++];
+        step->tier = tier;
+        step->cap = (uint32_t)strtoul(cap_s, NULL, 10);
     }
 
     return true;
@@ -511,12 +513,34 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 
-	if (strcmp(key, "autotrain.targets") == 0) {
-		return ParseAutoTrainTargets(c, value);
+	if (strcmp(key, "autotrain.infantry") == 0) {
+		return ParseAutoTrainSteps(c, TROOP_INFANTRY, value);
+	}
+
+	if (strcmp(key, "autotrain.ranged") == 0) {
+		return ParseAutoTrainSteps(c, TROOP_RANGED, value);
+	}
+
+	if (strcmp(key, "autotrain.cavalry") == 0) {
+		return ParseAutoTrainSteps(c, TROOP_CAVALRY, value);
+	}
+
+	if (strcmp(key, "autotrain.siege") == 0) {
+		return ParseAutoTrainSteps(c, TROOP_SIEGE, value);
 	}
 
 	if (strcmp(key, "gather.radius") == 0) {
 		c->gather.radius = (uint16_t)strtoul(value, NULL, 10);
+		return true;
+	}
+
+	if (strcmp(key, "gather.kind") == 0) {
+		uint8_t kind;
+		if (!ParseTroopKind(value, &kind)) {
+			printf("Invalid gather.kind: %s (expected INFANTRY, RANGED, CAVALRY or SIEGE)\n", value);
+			return false;
+		}
+		c->gather.kind = kind;
 		return true;
 	}
 
@@ -780,6 +804,7 @@ bool LoadConfig(Connection *c, const char *filename)
 	c->migration_scrolls_needed = 1;
 	c->gather.max_marches = 1;
 	c->gather.radius      = 30;
+	c->gather.kind        = TROOP_INFANTRY;
 	c->gather.pending_tile = GATHER_NO_PENDING_TILE;
 	c->recall.pause_seconds = 300; // $recall: no march for 5 minutes
 	c->notify.on_war = true; // preserves the old always-on-when-webhook-set war alert behavior
