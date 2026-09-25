@@ -407,6 +407,9 @@ typedef struct {
 // Upper bound on gather marches ever in flight at once (player.max_marches is a uint8_t in
 // practice well under this with any realistic VIP/buff level) - sizes the FIFO queue below.
 #define GATHER_MAX_ACTIVE_MARCHES 16
+// How often to redo the full tile scan - see gather.next_rescan_at's comment. 5 minutes: frequent
+// enough that a freed-up tile is not missed for long, rare enough not to spam RequestMapData.
+#define GATHER_RESCAN_INTERVAL_MS (5 * 60 * 1000)
 
 typedef enum {
     RESOURCE_KIND_FOOD  = 1,
@@ -477,6 +480,16 @@ typedef struct {
     bool     scan_done;
     uint16_t scan_cursor;   // index into the zone rectangle being swept
     uint64_t next_scan_at;  // now_ms() deadline: do not send the next RequestMapData before this
+
+    /* The first scan only happens once - after that, tile state (level/amount/occupied) is only
+     * ever refreshed by whatever the server pushes passively. Confirmed live that this can go
+     * stale: every known tile stayed marked occupied for 7+ minutes of real time (a real, briefly
+     * occupied tile does eventually free up - other players finish gathering and leave), with no
+     * passive push ever correcting it. So a full rescan (same mechanism as the first one - just
+     * scan_done/scan_cursor reset) reruns periodically regardless of passive pushes, both to
+     * refresh occupied tiles that quietly aren't anymore and to pick up new tiles. GatherTrackTile
+     * updates existing entries in place by (zone_id, point_id), so rescanning never duplicates. */
+    uint64_t next_rescan_at;
 
     uint8_t  active_marches; // gather marches this code has out right now (subset of player.current_marches)
     uint64_t next_march_at;  // now_ms() deadline: do not send another gather march before this

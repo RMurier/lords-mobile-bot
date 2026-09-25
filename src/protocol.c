@@ -4210,9 +4210,30 @@ void GatherTick(Connection *c) {
 			c->gather.scan_cursor++;
 		} else {
 			c->gather.scan_done = true;
+			c->gather.next_rescan_at = now_ms() + GATHER_RESCAN_INTERVAL_MS;
 			LOGI("[GATHER] Scan terminé : %u tuile(s) trouvée(s) dans le rayon\n", c->gather.tile_count);
 		}
 		return;
+	}
+
+	// Redo the full scan periodically instead of trusting passive pushes forever - see
+	// gather.next_rescan_at's comment. Never while a march is mid-send (pending_tile): flipping
+	// scan_done back on would drop into the scanning branch above next tick, which does not know
+	// about pending_tile at all and would strand that march half-sent.
+	if (c->gather.pending_tile == GATHER_NO_PENDING_TILE) {
+		if (c->gather.next_rescan_at == 0) {
+			// Armed on first reaching this point rather than treating "never set" as "already
+			// due" - same reasoning as next_march_at just below: firing instantly the moment
+			// scan_done becomes true (including here from something other than a real scan
+			// completing) would rescan immediately instead of after a real interval.
+			c->gather.next_rescan_at = now_ms() + GATHER_RESCAN_INTERVAL_MS;
+		} else if (now_ms() >= c->gather.next_rescan_at) {
+			c->gather.scan_done = false;
+			c->gather.scan_cursor = 0;
+			LOGI("[GATHER] Nouveau scan (%u tuile(s) connue(s) jusque-la, l'occupation peut avoir change)\n",
+				c->gather.tile_count);
+			return;
+		}
 	}
 
 	time_t now = time(NULL);

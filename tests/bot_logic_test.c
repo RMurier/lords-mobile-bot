@@ -2529,6 +2529,41 @@ static const uint8_t first_2[] = {
 		free(c);
 	}
 
+	/* ---- gather: the tile scan reruns periodically instead of trusting passive pushes forever
+	 * (real report: a tile stayed marked occupied for 7+ minutes after the occupier presumably
+	 * left, with no passive push ever correcting it) ---- */
+	{
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.scan_done = true;
+		c->player.max_marches = 6;
+
+		reset_sent();
+		GatherTick(c);
+		CHECK(c->gather.scan_done, "gather: reaching scan_done for the first time only arms the rescan timer, does not rescan instantly");
+		CHECK(find_packet(_MSG_REQUEST_MAPDATA) < 0, "gather: no rescan request sent while the interval has not elapsed yet");
+
+		c->gather.next_rescan_at = 1; // simulate the interval having elapsed
+		reset_sent();
+		GatherTick(c);
+		CHECK(!c->gather.scan_done && c->gather.scan_cursor == 0,
+			"gather: once the interval elapses, scan_done resets and the scan restarts from the beginning");
+
+		// a march mid-send (pending_tile) must never be interrupted by a rescan
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.scan_done = true;
+		c->gather.next_rescan_at = 1;
+		c->gather.pending_tile = 0;
+		c->gather.tile_count = 1;
+		c->gather.tiles[0].used = true;
+		c->player.max_marches = 6;
+		c->gather.march_send_at = now_ms() + 999999; // still waiting out the pacing delay
+		GatherTick(c);
+		CHECK(c->gather.scan_done, "gather: a rescan never interrupts a march that is still mid-send");
+		free(c);
+	}
+
 	/* ---- gather: a resource tile pushed from a different kingdom is not tracked ---- */
 	{
 		c = fresh("boss");

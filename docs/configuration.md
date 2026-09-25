@@ -502,7 +502,13 @@ T1 is empty) - not something this bot chooses. The troop *count* per march is st
 cap) and the chosen kind's own known troop total both cap it, whichever is lower.
 
 Also skips any tile currently occupied (confirmed live: an occupied tile's map data embeds the occupier's name and alliance tag)
-- it is never targeted until it shows free again.
+- it is never targeted until it shows free again. If every known tile is occupied, the bot says so (with how many) and backs off
+~30s instead of retrying every tick with no explanation.
+
+The full scan reruns automatically every 5 minutes (not just once at startup): occupied-tile state only updates from whatever the
+server pushes passively, and confirmed live that this can go stale - a tile can stay marked occupied long after the real occupier
+has left, with no push ever correcting it. The periodic rescan (same mechanism as the first one) refreshes it and also picks up any
+new tiles; it never interrupts a march that is already mid-send.
 
 `gather.max_marches` reserves that many of the account's total marches for gathering. `gather.radius` is how far around the castle
 (in tiles) to scan for resource tiles.
