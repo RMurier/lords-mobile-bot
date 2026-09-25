@@ -1395,6 +1395,7 @@ static const uint8_t build_event_none[] = {
 		c = fresh("boss");
 		c->gather.enabled = true;
 		c->gather.max_marches = 1;
+		c->gather.scan_done = true; // this test is about the march, not the zone scan
 		c->player.max_marches = 6;
 		c->gather.tile_count = 1;
 		// amount=1000 / 23.3 + 1 = 44 troops by the uncapped formula
@@ -1404,6 +1405,8 @@ static const uint8_t build_event_none[] = {
 		c->troop.total = 5;       // total is a separately maintained running sum, not derived - see TroopAdd
 		reset_sent();
 		c->gather.next_march_at = 1;
+		GatherTick(c); // looks at the tile first (RequestMapAdvance), march itself waits for march_send_at
+		c->gather.march_send_at = 1; // skip the human-pacing wait between the look and the march
 		GatherTick(c);
 		int k = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
 		uint32_t sent_count_field = k >= 0
@@ -1411,21 +1414,34 @@ static const uint8_t build_event_none[] = {
 		CHECK(k >= 0 && sent_count_field == 5,
 			"gather: the troop count is capped to c->troop.total, not the tile-derived formula");
 
-		/* no troops recorded at all: nothing is sent, and the tile is left untargeted */
-		c->gather.tiles[0].targeted = false;
+		free(c);
+
+		/* no troops recorded at all: nothing is sent, and the tile/slot are freed again */
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 1;
+		c->gather.scan_done = true;
+		c->player.max_marches = 6;
+		c->gather.tile_count = 1;
+		c->gather.tiles[0] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 2, .level = 3, .amount = 1000 };
+		c->troop.loaded = true;
 		c->troop.infantry[0] = 0;
 		c->troop.total = 0;
-		c->gather.next_march_at = 1;
 		reset_sent();
-		GatherTick(c);
-		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) < 0 && !c->gather.tiles[0].targeted,
-			"gather: with zero troops recorded, no march is sent and the tile stays available");
+		c->gather.next_march_at = 1;
+		GatherTick(c); // sends the RequestMapAdvance, marks the tile targeted, reserves a slot
+		c->gather.march_send_at = 1;
+		GatherTick(c); // at send time: nothing free - backs out of the tile and the slot it reserved
+		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) < 0 && !c->gather.tiles[0].targeted
+			&& c->gather.active_marches == 0,
+			"gather: with zero troops recorded, no march is sent and the tile/slot are freed again");
 		free(c);
 
 		/* gather also subtracts troops already committed to marches still out, not just c->troop.total */
 		c = fresh("boss");
 		c->gather.enabled = true;
 		c->gather.max_marches = 2;
+		c->gather.scan_done = true;
 		c->player.max_marches = 6;
 		c->gather.tile_count = 2;
 		c->gather.tiles[0] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 1, .level = 5, .amount = 5000 };
@@ -1435,7 +1451,9 @@ static const uint8_t build_event_none[] = {
 		c->troop.total = 100;
 		reset_sent();
 		c->gather.next_march_at = 1;
-		GatherTick(c); // highest level tile first (5 before 4): takes all 100 available troops
+		GatherTick(c); // highest level tile first (5 before 4): looks at it
+		c->gather.march_send_at = 1;
+		GatherTick(c); // then takes all 100 available troops
 		k = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
 		uint32_t amt1 = k >= 0 ? (uint32_t)(sent[k][66] | sent[k][67] << 8 | sent[k][68] << 16 | sent[k][69] << 24) : 0;
 		CHECK(k >= 0 && amt1 == 100 && c->gather.troops_out == 100,
@@ -1443,7 +1461,9 @@ static const uint8_t build_event_none[] = {
 
 		reset_sent();
 		c->gather.next_march_at = 1;
-		GatherTick(c); // second tile: nothing left free to send
+		GatherTick(c); // second tile: nothing left free to send, even after looking at it
+		c->gather.march_send_at = 1;
+		GatherTick(c);
 		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) < 0 && !c->gather.tiles[1].targeted,
 			"gather: troops already out on the first march leave nothing free for a second one");
 
@@ -1456,6 +1476,8 @@ static const uint8_t build_event_none[] = {
 		c->gather.tiles[0].targeted = false;
 		reset_sent();
 		c->gather.next_march_at = 1;
+		GatherTick(c);
+		c->gather.march_send_at = 1;
 		GatherTick(c);
 		CHECK(c->gather.troops_out == 100, "gather: troops_out is tracked again after a fresh accepted send");
 		RecvGatherTroopHome(c, NULL, 0);
