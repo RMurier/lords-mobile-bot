@@ -447,6 +447,11 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 
+	if (strcmp(key, "gather.max_troop_count") == 0) {
+		c->gather.max_troop_count = (uint32_t)strtoul(value, NULL, 10);
+		return true;
+	}
+
 if (strcmp(key, "protection.enabled") == 0) {
 		c->protection.enabled = (strcmp(value, "true") == 0);
 		return true;
@@ -702,6 +707,7 @@ bool LoadConfig(Connection *c, const char *filename)
 	c->migration_scrolls_needed = 1;
 	c->gather.max_marches = 1;
 	c->gather.radius      = 30;
+	c->gather.pending_tile = GATHER_NO_PENDING_TILE;
 	c->recall.pause_seconds = 300; // $recall: no march for 5 minutes
 	c->notify.on_war = true; // preserves the old always-on-when-webhook-set war alert behavior
 	c->bot.command_input_mask = (1u << COMMAND_CHANNEL_GUILD) | (1u << COMMAND_CHANNEL_MAIL);

@@ -284,6 +284,11 @@ CATEGORIES = [
             {"key": "gather.radius", "label": "Rayon de recherche", "type": "int", "min": 5, "max": 200,
              "default": "30", "unit": "cases", "depends": "gather.enabled",
              "help": "Distance autour du château dans laquelle chercher des tuiles de ressources."},
+            {"key": "gather.max_troop_count", "label": "Troupes max par marche", "type": "int",
+             "min": 0, "max": 10000000, "default": "0", "depends": "gather.enabled",
+             "help": "Plafonne le nombre de troupes envoyées en une marche de récolte à votre nombre de troupes "
+                     "réellement disponibles (0 = pas de plafond - déconseillé, la formule du nombre de troupes "
+                     "est expérimentale et peut largement dépasser ce que vous avez réellement pour une grosse tuile)."},
         ],
     },
     {

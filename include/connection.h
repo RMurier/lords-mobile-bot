@@ -430,10 +430,13 @@ typedef struct {
     char     requester[64];   // who is told when it is done
 } RecallState;
 
+#define GATHER_NO_PENDING_TILE 0xFFFF
+
 typedef struct {
     bool     enabled;
     uint8_t  max_marches;   // out of player.max_marches, how many to use for gathering
     uint16_t radius;        // tiles around the castle to scan
+    uint32_t max_troop_count; // never send more troops than this in one gather march (0 = no cap)
 
     bool     scan_done;
     uint16_t scan_cursor;   // index into the zone rectangle being swept
@@ -441,6 +444,14 @@ typedef struct {
 
     uint8_t  active_marches; // gather marches this code has out right now (subset of player.current_marches)
     uint64_t next_march_at;  // now_ms() deadline: do not send another gather march before this
+
+    /* Committed to a tile (targeted, slot reserved) but the march itself still waits: a
+     * RequestMapAdvance was just sent for it and, like a resource delivery, needs a human-like
+     * pause before the march - sending it in the same tick got resource deliveries refused
+     * (code 14) for a target never "looked at" this way; gather marches were refused outright
+     * (codes 2/6/12, live) without this step at all. */
+    uint16_t pending_tile;   // index into tiles[], or GATHER_NO_PENDING_TILE
+    uint64_t march_send_at;  // now_ms() deadline: send pending_tile's march no sooner than this
 
     GatherTile tiles[GATHER_MAX_TILES];
     uint16_t   tile_count;

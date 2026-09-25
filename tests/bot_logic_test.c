@@ -84,6 +84,7 @@ static Connection *fresh(const char *admins)
 {
 	Connection *c = calloc(1, sizeof(*c));
 	c->sock = -1;
+	c->gather.pending_tile = GATHER_NO_PENDING_TILE;
 	c->bot.command_prefix = '$';
 	c->bot.command_input_mask = (1u << COMMAND_CHANNEL_GUILD) | (1u << COMMAND_CHANNEL_MAIL);
 	c->bot.command_output = COMMAND_CHANNEL_MAIL;
@@ -1376,7 +1377,11 @@ static const uint8_t build_event_none[] = {
 		MarchesPauseEnd();
 		c->gather.next_march_at = 1;
 		GatherTick(c);
-		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) >= 0, "recall: gathering goes on once the pause is over");
+		CHECK(find_packet(_MSG_REQUEST_MAP_ADVANCE) >= 0 && c->gather.pending_tile != GATHER_NO_PENDING_TILE,
+			"recall: gathering goes on once the pause is over (looks at the tile first)");
+		c->gather.march_send_at = 1; // skip the human-pacing wait between the look and the march
+		GatherTick(c);
+		CHECK(find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) >= 0, "recall: the march itself follows once the pacing delay is over");
 
 		/* the request builder refuses too */
 		MarchesPauseStart(300);
@@ -1486,6 +1491,42 @@ static const uint8_t build_event_none[] = {
 		GatherTick(c);
 		CHECK(find_packet(_MSG_REQUEST_MAPDATA) < 0 && c->gather.scan_done,
 			"gather: nothing left in a radius-1 rectangle, scan ends after the one zone");
+		free(c);
+	}
+
+	/* Automatic gathering: sending a march. Live-tested, a level 13 tile with just over 1B in
+	 * stock made the uncapped amount/GATHER_DEFAULT_TROOP_CAPACITY formula ask for 44,193,237
+	 * troops - refused outright (nowhere near a real troop count). gather.max_troop_count caps
+	 * that. Also covers the two-step march (RequestMapAdvance, paced, then the march itself) on
+	 * a path that is not $recall's. */
+	{
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 1;
+		c->gather.scan_done = true;
+		c->gather.max_troop_count = 500000; // admin's real, known troop count
+		c->player.max_marches = 6;
+		c->player.current_marches = 0;
+		c->gather.tile_count = 1;
+		c->gather.tiles[0] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 2, .level = 13,
+			.amount = 1029702400 }; // the exact live figure that asked for 44,193,237 troops uncapped
+
+		reset_sent();
+		c->gather.next_march_at = 1;
+		GatherTick(c);
+		int adv = find_packet(_MSG_REQUEST_MAP_ADVANCE);
+		CHECK(adv >= 0 && find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) < 0 && c->gather.tiles[0].targeted,
+			"gather: looks at the tile and reserves it before sending anything else");
+		CHECK(c->gather.pending_tile == 0 && c->gather.march_send_at > now_ms(),
+			"gather: the march itself waits out a human-like pause first");
+
+		c->gather.march_send_at = 1;
+		GatherTick(c);
+		int m = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
+		CHECK(m >= 0 && c->gather.pending_tile == GATHER_NO_PENDING_TILE, "gather: the march follows, pending tile cleared");
+		uint32_t sent_troops = (uint32_t)sent[m][66] | ((uint32_t)sent[m][67] << 8)
+			| ((uint32_t)sent[m][68] << 16) | ((uint32_t)sent[m][69] << 24);
+		CHECK(sent_troops == 500000, "gather: troop count capped at gather.max_troop_count instead of the raw 44M+ formula result");
 		free(c);
 	}
 

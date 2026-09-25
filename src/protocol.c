@@ -4018,6 +4018,20 @@ static uint64_t GatherHumanDelay(void) {
 	return now_ms() + 1000 + (uint64_t)(rand() % 1000);
 }
 
+/* amount/GATHER_DEFAULT_TROOP_CAPACITY is only an experimental estimate (see its own comment) -
+ * live-tested, it asked for tens of millions of troops on a high-level tile, several orders of
+ * magnitude past what any account actually has. gather.max_troop_count (0 = no cap) is the
+ * admin's own known troop count, since the bot has no way to read it from the server; capping
+ * to it just gathers less per march rather than sending a request that can only be refused. */
+static uint32_t GatherTroopCount(const Connection *c, uint32_t amount) {
+	uint32_t count = (uint32_t)((double)amount / GATHER_DEFAULT_TROOP_CAPACITY) + 1;
+
+	if (c->gather.max_troop_count > 0 && count > c->gather.max_troop_count)
+		count = c->gather.max_troop_count;
+
+	return count;
+}
+
 void GatherTick(Connection *c) {
 	if (!c->gather.enabled) return;
 	if (c->player.max_marches == 0) return; // march data not loaded yet
@@ -4045,6 +4059,25 @@ void GatherTick(Connection *c) {
 		LOGI("[GATHER] %u tuile(s) connue(s) (reçues passivement)\n", c->gather.tile_count);
 	}
 
+	// A RequestMapAdvance was sent for this tile last tick: its human-pacing delay is the only
+	// thing left to wait out before the march itself goes out (see pending_tile's comment).
+	if (c->gather.pending_tile != GATHER_NO_PENDING_TILE) {
+		if (now_ms() < c->gather.march_send_at)
+			return;
+
+		GatherTile *t = &c->gather.tiles[c->gather.pending_tile];
+		uint32_t count = GatherTroopCount(c, t->amount);
+
+		RequestGatherMarch(c, t->zone_id, t->point_id, 0, count);
+		c->gather.pending_tile = GATHER_NO_PENDING_TILE;
+		c->gather.next_march_at = GatherHumanDelay(); // one march per delay, never several back to back
+
+		map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
+		LOGI("[GATHER] Envoi de %u troupes vers X:%u Y:%u (niveau %u, %u en stock)\n",
+			count, pos.x, pos.y, t->level, t->amount);
+		return;
+	}
+
 	uint8_t reserved = c->gather.max_marches < c->player.max_marches ? c->gather.max_marches : c->player.max_marches;
 
 	if (c->gather.active_marches >= reserved || c->player.current_marches >= c->player.max_marches)
@@ -4063,16 +4096,15 @@ void GatherTick(Connection *c) {
 	GatherTile *t = GatherBestUntargeted(c);
 	if (!t) return;
 
-	uint32_t count = (uint32_t)(t->amount / GATHER_DEFAULT_TROOP_CAPACITY) + 1;
-
 	t->targeted = true;
 	c->gather.active_marches++;
-	c->gather.next_march_at = GatherHumanDelay(); // one march per delay, never several back to back
-	RequestGatherMarch(c, t->zone_id, t->point_id, 0, count);
 
-	map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
-	LOGI("[GATHER] Envoi de %u troupes vers X:%u Y:%u (niveau %u, %u en stock)\n",
-		count, pos.x, pos.y, t->level, t->amount);
+	// Same fix a resource delivery already needed: sending the march for a point the client
+	// never "advanced" to this way got it refused (code 14) even with everything else right.
+	// Live-tested without this step, gather marches were refused outright (codes 2/6/12).
+	RequestMapAdvance(c, t->zone_id, t->point_id);
+	c->gather.pending_tile = (uint16_t)(t - c->gather.tiles);
+	c->gather.march_send_at = now_ms() + 1000 + (uint64_t)(rand() % 1000);
 }
 
 /* ------------------------------------------------------------------------
