@@ -2244,54 +2244,52 @@ static const uint8_t first_2[] = {
 		if (system(cleanup) != 0) { /* best effort */ }
 	}
 
-	/* ---- autotrain: per-(kind,tier) steps, per-kind independence ---- */
+	/* ---- autotrain: only one (kind, tier) trains account-wide at a time, round-robin across kinds ---- */
 	{
 		c = fresh("boss");
 		c->troop.loaded = true;
 		c->troop.ranged[TIER_T2] = 1000;
 		c->troop.infantry[TIER_T2] = 500;
 		c->autotrain.enabled = true;
-		c->autotrain.target[TROOP_RANGED][TIER_T2] = 5000;
 		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 2000;
+		c->autotrain.target[TROOP_RANGED][TIER_T2]   = 5000;
 		reset_sent();
 
-		// Both kinds need action; AutoTrainTick sends at most one order per call (like gather,
-		// one action per tick) but which kind goes first is just loop order, not a designed
-		// priority between kinds (only tiers are prioritized, per kind - see the next test) -
-		// so this checks it is one of the two expected orders, not a specific one.
+		// Both kinds need action, but the game only ever trains one at a time account-wide (a
+		// real capture showed two more kinds requested while a first was still training both got
+		// refused outright) - infantry (the lower TroopKind index) goes first.
 		AutoTrainTick(c);
 		int k = find_packet(_MSG_REQUEST_TRAINING_);
-		uint32_t amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
-		bool first_is_ranged = k >= 0 && sent[k][8] == TROOP_RANGED && sent[k][9] == TIER_T2 && amount == 4000;
-		bool first_is_infantry = k >= 0 && sent[k][8] == TROOP_INFANTRY && sent[k][9] == TIER_T2 && amount == 1500;
-		CHECK(first_is_ranged || first_is_infantry,
-			"autotrain: first tick trains the missing amount toward one kind's total target");
-		uint8_t first_kind = first_is_ranged ? TROOP_RANGED : TROOP_INFANTRY;
-		uint8_t second_kind = first_is_ranged ? TROOP_INFANTRY : TROOP_RANGED;
-		CHECK(c->autotrain.kind_busy[first_kind], "autotrain: that kind is marked busy after sending its order");
-
-		reset_sent();
-		AutoTrainTick(c); // first_kind already busy, and the pacing delay has not elapsed yet
-		CHECK(sent_count == 0, "autotrain: no new order while the pacing delay has not elapsed");
+		CHECK(k >= 0 && sent[k][8] == TROOP_INFANTRY && sent[k][9] == TIER_T2,
+			"autotrain: first tick starts the lowest kind that needs training");
+		CHECK(c->autotrain.busy, "autotrain: busy (account-wide) after sending an order");
 
 		c->autotrain.next_action_at = 0; // simulate the pacing delay having elapsed
 		reset_sent();
-		AutoTrainTick(c);
-		k = find_packet(_MSG_REQUEST_TRAINING_);
-		CHECK(k >= 0 && sent[k][8] == second_kind,
-			"autotrain: the first kind being busy does not block the other kind's own target");
+		AutoTrainTick(c); // infantry's order is still training - nothing else may start meanwhile
+		CHECK(sent_count == 0, "autotrain: no other kind can start while one is still training account-wide");
 
-		// training completes for ranged: RecvAddSoldier reports it, frees the kind, credits the count
-		uint8_t addsoldier[6] = { TROOP_RANGED, TIER_T2, 0xA0, 0x0F, 0x00, 0x00 }; // 4000 LE
+		// infantry's batch finishes: RecvAddSoldier reports it, frees the account-wide slot, credits the count
+		uint8_t addsoldier[6] = { TROOP_INFANTRY, TIER_T2, 0xDC, 0x05, 0x00, 0x00 }; // 1500 LE
 		RecvAddSoldier(c, addsoldier, sizeof(addsoldier));
-		CHECK(c->troop.ranged[TIER_T2] == 5000, "autotrain: RecvAddSoldier credits the trained amount");
-		CHECK(!c->autotrain.kind_busy[TROOP_RANGED], "autotrain: RecvAddSoldier frees the kind's queue");
+		CHECK(c->troop.infantry[TIER_T2] == 2000, "autotrain: RecvAddSoldier credits the trained amount");
+		CHECK(!c->autotrain.busy, "autotrain: RecvAddSoldier frees the account-wide busy flag");
 
 		c->autotrain.next_action_at = 0;
 		reset_sent();
 		AutoTrainTick(c);
 		k = find_packet(_MSG_REQUEST_TRAINING_);
-		CHECK(k < 0 || sent[k][8] != TROOP_RANGED, "autotrain: a kind already at its total target is not retrained");
+		CHECK(k >= 0 && sent[k][8] == TROOP_RANGED,
+			"autotrain: round-robin moves on to the next kind once infantry reaches its target");
+
+		uint8_t addsoldier2[6] = { TROOP_RANGED, TIER_T2, 0x70, 0x0F, 0x00, 0x00 }; // 4000 LE
+		RecvAddSoldier(c, addsoldier2, sizeof(addsoldier2));
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		k = find_packet(_MSG_REQUEST_TRAINING_);
+		CHECK(k < 0 || sent[k][8] != TROOP_INFANTRY,
+			"autotrain: a kind already at its target is not retrained just because round-robin reaches it again");
 		free(c);
 	}
 
@@ -2311,7 +2309,7 @@ static const uint8_t first_2[] = {
 		// T2 refused (e.g. a resource shortage) - reply carries kind/tier/amount now
 		uint8_t refuseT2[7] = { 2, TROOP_INFANTRY, TIER_T2, 0, 0, 0, 0 };
 		RecvTrainingStart(c, refuseT2, sizeof(refuseT2));
-		CHECK(!c->autotrain.kind_busy[TROOP_INFANTRY], "autotrain: a refusal frees the kind");
+		CHECK(!c->autotrain.busy, "autotrain: a refusal frees the account-wide busy flag");
 		uint64_t short_backoff = c->autotrain.retry_at[TROOP_INFANTRY][TIER_T2];
 		CHECK(short_backoff > 0 && short_backoff < now_ms() + 5 * 60 * 1000,
 			"autotrain: the first refusals on a tier use a short backoff (assumed transient)");
@@ -2338,6 +2336,106 @@ static const uint8_t first_2[] = {
 		RecvTrainingStart(c, acceptT2, sizeof(acceptT2));
 		CHECK(c->autotrain.consecutive_refusals[TROOP_INFANTRY][TIER_T2] == 0,
 			"autotrain: an accepted order resets that tier's refusal streak");
+		free(c);
+	}
+
+	/* ---- autotrain: a refusal with no kind/tier in it (just the status byte) is still matched
+	 * to the right (kind, tier) via what AutoTrainTick itself remembers sending, instead of
+	 * leaving the account-wide slot stuck busy forever ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
+		c->autotrain.target[TROOP_RANGED][TIER_T2]   = 5000000;
+		c->autotrain.target[TROOP_CAVALRY][TIER_T2]  = 5000000;
+
+		// infantry T2: sent, then accepted for far less than asked (real capture: asked
+		// 3,701,309, server granted 29) - a full-size response, decoded normally
+		AutoTrainTick(c);
+		uint8_t acceptInf[7] = { 0, TROOP_INFANTRY, TIER_T2, 29, 0, 0, 0 };
+		RecvTrainingStart(c, acceptInf, sizeof(acceptInf));
+		CHECK(c->training[TROOP_INFANTRY].amount == 29, "autotrain: a full response is decoded normally regardless of how small the granted amount is");
+		CHECK(c->autotrain.busy, "autotrain: an accepted order keeps the account-wide slot busy until it actually finishes");
+
+		// infantry's small batch finishes, freeing the slot for ranged: sent, then refused with
+		// ONLY a status byte (no kind/tier/amount at all - confirmed live)
+		uint8_t addsoldierInf[6] = { TROOP_INFANTRY, TIER_T2, 0x1D, 0x00, 0x00, 0x00 }; // 29 LE
+		RecvAddSoldier(c, addsoldierInf, sizeof(addsoldierInf));
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		int k = find_packet(_MSG_REQUEST_TRAINING_);
+		CHECK(k >= 0 && sent[k][8] == TROOP_RANGED, "autotrain: round-robin moves on to ranged next");
+		CHECK(c->autotrain.busy, "autotrain: ranged's order marks the account-wide slot busy");
+		uint8_t bareRefusal[1] = { 1 };
+		RecvTrainingStart(c, bareRefusal, sizeof(bareRefusal));
+		CHECK(!c->autotrain.busy,
+			"autotrain: a bare status-only refusal still frees the slot instead of leaving it stuck forever");
+		CHECK(c->autotrain.consecutive_refusals[TROOP_RANGED][TIER_T2] == 1,
+			"autotrain: the bare refusal is counted against the correct (kind, tier) for backoff");
+
+		// cavalry T2: same bare-refusal shape, proving this keeps working for a second (kind,
+		// tier) in a row rather than only the first time
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		k = find_packet(_MSG_REQUEST_TRAINING_);
+		CHECK(k >= 0 && sent[k][8] == TROOP_CAVALRY, "autotrain: round-robin moves on to cavalry next");
+		CHECK(c->autotrain.busy, "autotrain: cavalry's order marks the account-wide slot busy");
+		RecvTrainingStart(c, bareRefusal, sizeof(bareRefusal));
+		CHECK(!c->autotrain.busy && c->autotrain.consecutive_refusals[TROOP_CAVALRY][TIER_T2] == 1,
+			"autotrain: correctly attributes a second consecutive bare refusal to cavalry, not ranged again");
+		free(c);
+	}
+
+	/* ---- autotrain: never requests the raw (possibly 7-digit) gap outright - starts from a
+	 * modest guess and grows from what was actually granted, instead of looking non-human ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000; // real capture: bot used to ask for 3,701,309 in one shot
+
+		AutoTrainTick(c);
+		int k = find_packet(_MSG_REQUEST_TRAINING_);
+		uint32_t amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(amount == AUTOTRAIN_INITIAL_BATCH_GUESS,
+			"autotrain: first-ever request for a (kind, tier) uses the modest initial guess, not the full multi-million gap");
+
+		// granted far less than asked (real capture: 29) - the next request grows from THAT, not
+		// back up to the full gap
+		uint8_t accept[7] = { 0, TROOP_INFANTRY, TIER_T2, 29, 0, 0, 0 };
+		RecvTrainingStart(c, accept, sizeof(accept));
+		uint8_t addsoldier[6] = { TROOP_INFANTRY, TIER_T2, 29, 0, 0, 0 };
+		RecvAddSoldier(c, addsoldier, sizeof(addsoldier));
+
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		k = find_packet(_MSG_REQUEST_TRAINING_);
+		amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(amount == 43, // 29 * 3/2, integer division
+			"autotrain: the next request grows ~50 percent from what was actually granted last time, not the raw gap");
+
+		// resolve infantry's 2nd request (43 accepted in full) so the account-wide slot frees up
+		uint8_t accept2[7] = { 0, TROOP_INFANTRY, TIER_T2, 43, 0, 0, 0 };
+		RecvTrainingStart(c, accept2, sizeof(accept2));
+		uint8_t addsoldier2[6] = { TROOP_INFANTRY, TIER_T2, 43, 0, 0, 0 };
+		RecvAddSoldier(c, addsoldier2, sizeof(addsoldier2));
+
+		// a totally different kind's FIRST-EVER request must already use what was learned from
+		// infantry, not restart from the modest initial guess - confirmed live: the account's
+		// own owner reports the same cap applies to every kind and tier
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 0; // done needing infantry - isolate ranged's request
+		c->autotrain.target[TROOP_RANGED][TIER_T2] = 5000000;
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		k = find_packet(_MSG_REQUEST_TRAINING_);
+		amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(k >= 0 && sent[k][8] == TROOP_RANGED && amount == 64, // 43 * 3/2, integer division - grown from infantry's history
+			"autotrain: the learned cap is account-wide - a different kind's first-ever request already uses it, not the initial guess");
 		free(c);
 	}
 
@@ -2398,6 +2496,36 @@ static const uint8_t first_2[] = {
 			if (c->gather.tiles[i].point_id == 5)
 				CHECK(!c->gather.tiles[i].occupied, "gather: a tile is freed again once its name field clears");
 		}
+		free(c);
+	}
+
+	/* ---- gather: every known tile occupied backs off with a warning instead of retrying
+	 * silently forever (real report: 34/34 tiles occupied, bot looked "stuck" with no log) ---- */
+	{
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 1;
+		c->gather.scan_done = true;
+		c->player.max_marches = 6;
+
+		uint8_t buf[3 + 51];
+		memset(buf, 0, sizeof(buf));
+		uint8_t *r0 = buf + 3;
+		r0[0] = 100; r0[1] = 0; r0[2] = 5; r0[3] = 3;
+		memcpy(r0 + 4, "Someone", 7); // any non-zero name marks it occupied
+		r0[22] = 4;
+		r0[23] = 0x68; r0[24] = 0x6b; r0[25] = 0x0e; r0[26] = 0x00; // 945000
+		RecvMapInfoPlus(c, buf, sizeof(buf));
+		CHECK(c->gather.tile_count == 1 && c->gather.tiles[0].occupied,
+			"gather: setup - the only known tile is occupied");
+
+		reset_sent();
+		c->gather.next_march_at = 1; // pacing already elapsed
+		GatherTick(c);
+		CHECK(find_packet(_MSG_REQUEST_MAP_ADVANCE) < 0 && find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK) < 0,
+			"gather: nothing sent when every known tile is occupied");
+		CHECK(c->gather.next_march_at > now_ms() + 20000,
+			"gather: backs off for a while instead of retrying every tick with no pacing at all");
 		free(c);
 	}
 

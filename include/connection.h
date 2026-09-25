@@ -789,7 +789,7 @@ typedef struct {
  * RecvTrainingStart fires either way). No end time: the response's trailing bytes are not
  * decoded (see RecvTrainingStart's comment), so this can say a training is running and what
  * it is, not when it finishes. Cleared by TroopAdd, the same "a batch just completed" event
- * used to credit c->troop and free AutoTrainSettings' kind_busy. */
+ * used to credit c->troop and free AutoTrainSettings' busy flag. */
 typedef struct {
 	bool     active;
 	uint8_t  tier;
@@ -804,25 +804,62 @@ typedef struct {
 // landing) - so keep retrying, just rarely.
 #define AUTOTRAIN_HARD_BLOCK_BACKOFF_MS    (30 * 60 * 1000)
 
+// First-ever request for a (kind, tier) with no history yet: a real player has no way to know
+// the true affordable max either (see AutoTrainSettings' comment on last_granted), so this is a
+// deliberately unremarkable guess, not the (possibly 7-digit) full gap to the target.
+#define AUTOTRAIN_INITIAL_BATCH_GUESS      10000
+// Once we know what was actually granted last time, grow toward the target by this factor per
+// attempt (50%) instead of jumping straight back to the full gap.
+#define AUTOTRAIN_BATCH_GROWTH_NUM         3
+#define AUTOTRAIN_BATCH_GROWTH_DEN         2
+
 /* Modeled directly on the game's own barracks/range/stable/workshop screen: one box per (kind,
  * tier) pair - a fixed 4x5 grid (infantry/ranged/cavalry/siege x T1-T5), each an independent
  * target; 0 = do not train that exact pair. For a given kind, AutoTrainTick always tries the
  * lowest tier that is not yet at its own target and not backed off, in T1..T5 order - e.g.
  * infantry T2=10M, T4=5M fills T2 to 10M first, then - once T2 is there - moves on to T4.
  *
- * Each of the 4 kinds trains through its own building and, as far as anything captured so far
- * shows, only ever has one order in flight at a time - see RecvTrainingStart's comment - hence
- * one busy flag per kind. Backoff after a refusal is indexed [kind][tier]: a refusal on one
- * tier of a kind (e.g. T4 locked by research) must not block a different, already-unlocked
- * tier of the same kind (e.g. T2) - AutoTrainTick's loop naturally moves past a backed-off tier
- * to the kind's next one, and naturally retries the earlier one again once its own backoff
- * expires. */
+ * Confirmed live (user report + capture) that the account can only ever have ONE (kind, tier)
+ * actually training at a time, not one per kind/building as an earlier version of this code
+ * assumed: two more kinds requested seconds after a first one (still training) were both
+ * refused outright. So there is a single account-wide busy flag, not one per kind, and it stays
+ * true from the moment a request is sent until the batch actually finishes (RecvAddSoldier /
+ * RecvTroopTrainingImmediate) - an ACCEPTED order still blocks every other kind/tier until then,
+ * exactly like "already training" in the game's own UI. AutoTrainTick round-robins across kinds
+ * (next_kind) so one kind that keeps needing a lot cannot starve the other three of a turn.
+ *
+ * The game can silently grant far less than requested even on an accepted order (confirmed
+ * live: 3.7M requested, 29 granted) - some real, un-decoded limit caps it regardless of what is
+ * asked (checked: not present as a separate field anywhere in _MSG_RESP_TRAINING_ itself, a
+ * capture asking for less than a known max showed nothing but the granted amount echoed back).
+ * Confirmed live by the account's own owner that this limit is the SAME for every kind and every
+ * tier at any given moment - only the price and duration differ per (kind, tier), not the cap -
+ * so last_granted is a single account-wide value, not one per (kind, tier): learning it from an
+ * attempt on ANY kind/tier immediately benefits every other one too, instead of rediscovering it
+ * separately four times over.
+ *
+ * Since asking for more than that limit never gets more accepted, but DOES mean sending an
+ * obviously non-human amount (no player types a 7-digit number into the training field),
+ * AutoTrainTick never requests the raw gap to the target outright: each new attempt asks for at
+ * most last_granted plus 50% - an ordinary "try a bit more than last time" progression -
+ * starting from a modest, unremarkable guess (AUTOTRAIN_INITIAL_BATCH_GUESS) before anything has
+ * been granted yet this run.
+ *
+ * Backoff after a refusal is indexed [kind][tier]: a refusal on one tier of a kind (e.g. T4
+ * locked by research) must not block a different, already-unlocked tier of the same kind (e.g.
+ * T2) - AutoTrainTick's loop naturally moves past a backed-off tier to the kind's next one, and
+ * naturally retries the earlier one again once its own backoff expires. */
 typedef struct {
 	bool enabled;
 
 	uint32_t target[4][5];                       // [kind][tier]; 0 = do not train that pair
 
-	bool     kind_busy[4];                       // indexed by TroopKind
+	bool     busy;                               // true while the one account-wide training order is in flight or still running
+	uint8_t  pending_kind;                       // kind of that order, valid while busy
+	uint8_t  pending_tier;                       // tier of that order, valid while busy
+	uint8_t  next_kind;                          // round-robin cursor - see this struct's comment
+
+	uint32_t last_granted;                       // account-wide, shared by every (kind, tier) - see this struct's comment; 0 = no history yet
 	uint64_t retry_at[4][5];                     // [kind][tier] now_ms() backoff after a refusal
 	uint16_t consecutive_refusals[4][5];         // [kind][tier], resets on any accepted order for that pair
 	uint64_t next_action_at;        // now_ms(): at most one new training order per tick, paced like gather

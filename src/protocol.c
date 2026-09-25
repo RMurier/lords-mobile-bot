@@ -4318,7 +4318,20 @@ void GatherTick(Connection *c) {
 		return;
 
 	GatherTile *t = GatherBestUntargeted(c);
-	if (!t) return;
+	if (!t) {
+		// Every known tile is either already targeted or occupied by someone else - not a bug,
+		// tiles genuinely can all be taken in a crowded kingdom, but silently retrying every tick
+		// forever with no explanation is exactly the "looks stuck" report GatherTroopCount's
+		// shortage case already had to fix. Same treatment: back off and say why once per cycle
+		// instead of spamming a tight retry loop.
+		uint16_t occupied = 0;
+		for (uint16_t i = 0; i < c->gather.tile_count; i++)
+			if (c->gather.tiles[i].occupied) occupied++;
+		c->gather.next_march_at = now_ms() + 30000 + (uint64_t)(rand() % 15000);
+		LOGW("[GATHER] Aucune tuile libre parmi les %u connue(s) (%u occupee(s) par d'autres joueurs) - "
+			"nouvel essai dans ~30s\n", c->gather.tile_count, occupied);
+		return;
+	}
 
 	t->targeted = true;
 	c->gather.active_marches++;
@@ -4618,7 +4631,7 @@ static uint32_t *TroopBucket(Connection *c, uint8_t kind, uint8_t tier) {
 // that knows a kind's training building just freed up - see AutoTrainSettings' comment.
 static void TroopAdd(Connection *c, uint8_t kind, uint8_t tier, uint32_t amount) {
 	if (kind < 4) {
-		c->autotrain.kind_busy[kind] = false;
+		c->autotrain.busy = false; // account-wide: only one (kind, tier) can ever be training - see AutoTrainSettings' comment
 		c->training[kind].active = false;
 	}
 
@@ -4668,33 +4681,17 @@ void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size) {
  *   00 01 01 3a 1c 00 00 ...
  * status(1)=0 success, kind(1), tier(1), amount(4) as u32 LE - same values queued, e.g. here
  * RANGED/T2/7226. Only confirms the order was accepted; troops are not added yet (that is
- * RecvAddSoldier / RecvTroopTrainingImmediate, later). Every capture sample had status 0 -
- * a refusal's exact code is not confirmed, just that a non-zero byte means refused, same
- * convention as every other status-first response in this file.
+ * RecvAddSoldier / RecvTroopTrainingImmediate, later). A refusal can instead come back as just
+ * the status byte alone (confirmed live, size 5 total = 1-byte payload) - no kind/tier/amount at
+ * all - so the pending (kind, tier) AutoTrainTick itself remembers is what tells us which one it
+ * was for; a non-zero status always means refused, same convention as every other status-first
+ * response in this file.
  *
- * Fires for ANY accepted/refused training, autotrain's or a human's in game - the backoff
- * below is keyed by [kind][tier] precisely so a refusal here (e.g. T4 locked by research)
- * only ever affects that one tier of that one kind, never a different, perfectly usable one. */
-void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size) {
-	if (size < 7) return;
-
-	uint8_t status = read_u8(data);
-	uint8_t kind = read_u8(data + 1);
-	uint8_t tier = read_u8(data + 2);
-	uint32_t amount = read_u32(data + 3);
-	if (kind >= 4 || tier > TIER_T5) return;
-
-	if (status == 0) {
-		c->training[kind].active = true;
-		c->training[kind].tier   = tier;
-		c->training[kind].amount = amount;
-		c->autotrain.consecutive_refusals[kind][tier] = 0;
-		// kind_busy stays true (set when we sent the request) until RecvAddSoldier /
-		// RecvTroopTrainingImmediate reports the batch actually finished.
-		return;
-	}
-
-	c->autotrain.kind_busy[kind] = false; // only meaningful if this bot was the one waiting; harmless otherwise
+ * Fires for ANY accepted/refused training, autotrain's or a human's in game - the backoff below
+ * is keyed by [kind][tier] precisely so a refusal here (e.g. T4 locked by research) only ever
+ * affects that one tier of that one kind, never a different, perfectly usable one. */
+static void AutoTrainApplyRefusal(Connection *c, uint8_t kind, uint8_t tier, uint8_t status) {
+	c->autotrain.busy = false;
 
 	uint16_t refusals = ++c->autotrain.consecutive_refusals[kind][tier];
 	if (refusals >= AUTOTRAIN_HARD_BLOCK_THRESHOLD) {
@@ -4710,15 +4707,48 @@ void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size) {
 	}
 }
 
+void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size) {
+	if (size < 1) return;
+	uint8_t status = read_u8(data);
+
+	// Bare status-only refusal: only meaningful while we ourselves have exactly one order
+	// pending (the game allows only one account-wide - see AutoTrainSettings' comment). If
+	// nothing is pending, this cannot be about anything autotrain sent - ignore it.
+	if (size < 7) {
+		if (status != 0 && c->autotrain.busy)
+			AutoTrainApplyRefusal(c, c->autotrain.pending_kind, c->autotrain.pending_tier, status);
+		return;
+	}
+
+	uint8_t kind = read_u8(data + 1);
+	uint8_t tier = read_u8(data + 2);
+	uint32_t amount = read_u32(data + 3);
+	if (kind >= 4 || tier > TIER_T5) return;
+
+	if (status == 0) {
+		c->training[kind].active = true;
+		c->training[kind].tier   = tier;
+		c->training[kind].amount = amount;
+		c->autotrain.consecutive_refusals[kind][tier] = 0;
+		if (amount > 0) c->autotrain.last_granted = amount; // account-wide, shared by every (kind, tier) - see AutoTrainSettings' comment
+		// busy stays true (set when we sent the request) until RecvAddSoldier /
+		// RecvTroopTrainingImmediate reports the batch actually finished.
+		return;
+	}
+
+	AutoTrainApplyRefusal(c, kind, tier, status);
+}
+
 void AutoTrainTick(Connection *c) {
 	if (!c->autotrain.enabled) return;
 	if (!c->troop.loaded) return; // no real baseline yet (see TroopAdd's comment) - wait for the login snapshot
+	if (c->autotrain.busy) return; // one order account-wide at a time - see AutoTrainSettings' comment
 
 	if (now_ms() < c->autotrain.next_action_at) return;
 
 	uint64_t now = now_ms();
-	for (uint8_t kind = 0; kind < 4; kind++) {
-		if (c->autotrain.kind_busy[kind]) continue; // already training something
+	for (uint8_t i = 0; i < 4; i++) {
+		uint8_t kind = (uint8_t)((c->autotrain.next_kind + i) % 4); // round-robin: see AutoTrainSettings' comment
 
 		for (uint8_t tier = 0; tier <= TIER_T5; tier++) {
 			uint32_t target = c->autotrain.target[kind][tier];
@@ -4729,12 +4759,26 @@ void AutoTrainTick(Connection *c) {
 			uint32_t current = bucket ? *bucket : 0;
 			if (current >= target) continue; // already at its target - move on to the kind's next tier
 
-			c->autotrain.kind_busy[kind] = true; // optimistic, mirrors gather's active_marches pattern
+			// Never ask for the raw (possibly 7-digit) gap outright - see AutoTrainSettings'
+			// comment on last_granted: grow gradually from what was actually granted last time
+			// (account-wide, shared across every kind/tier), or start from a modest,
+			// unremarkable guess if nothing has been granted yet this run.
+			uint32_t gap = target - current;
+			uint32_t last = c->autotrain.last_granted;
+			uint32_t want = last > 0
+				? (uint32_t)(((uint64_t)last * AUTOTRAIN_BATCH_GROWTH_NUM) / AUTOTRAIN_BATCH_GROWTH_DEN)
+				: AUTOTRAIN_INITIAL_BATCH_GUESS;
+			if (want > gap) want = gap; // never ask for more than actually still needed
+
+			c->autotrain.busy = true; // optimistic, mirrors gather's active_marches pattern
+			c->autotrain.pending_kind = kind;
+			c->autotrain.pending_tier = tier;
+			c->autotrain.next_kind = (uint8_t)((kind + 1) % 4);
 			c->autotrain.next_action_at = GatherHumanDelay(); // one new order per tick, same pacing as gather
-			RequestTroopTraining(c, kind, tier, target - current);
+			RequestTroopTraining(c, kind, tier, want);
 
 			LOGI("[AUTOTRAIN] Formation de %u troupes %s T%u (objectif %u)\n",
-				target - current, TROOP_KIND_NAMES[kind], tier + 1, target);
+				want, TROOP_KIND_NAMES[kind], tier + 1, target);
 			return;
 		}
 	}

@@ -206,6 +206,7 @@ webui.bat       Start the web console (Windows)
 - [In-game commands](docs/commands.md)
 - [Research (technologies): protocol and what is known](docs/research.md)
 - [Buildings: levels (Mana upgrade), ids, Trading Post capacity and tax](docs/buildings.md)
+- [Analyzing the game client (APK): methodology, tooling gotchas, and findings](docs/apk-analysis.md)
 
 ## License
 

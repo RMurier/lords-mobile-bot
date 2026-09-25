@@ -524,11 +524,19 @@ autotrain.cavalry_t4 = 5M
 ```
 
 Key format: `autotrain.<kind>_t<1-5>` (`kind`: `infantry`, `ranged`, `cavalry`, `siege`). Each box is independent: 0 or unset means
-"do not train that exact (kind, tier) pair". Each of the four kinds has its own building/queue; within a kind, the lowest tier not
-yet at its own target is always trained first (e.g. `T2` fills before `T4` starts). Accepts a plain number or a `K`/`M`/`B` suffix
-(`10M` = 10000000), same as the bank/cargo ship reserve settings. A tier that keeps getting refused (e.g. the research for it is not
-done yet) backs off automatically instead of retrying every tick - a few times a minute at first, then once every 30 minutes if it
-still fails, without ever giving up on it for the session (the research could finish later).
+"do not train that exact (kind, tier) pair". Only **one (kind, tier) pair trains at a time for the whole account** - confirmed live,
+requesting a second kind while a first one is still training gets refused outright, same as trying it manually in game. The bot
+round-robins across the four kinds so one that always needs a huge amount doesn't starve the others of a turn; within a kind, the
+lowest tier not yet at its own target is always tried first (e.g. `T2` fills before `T4` starts). Accepts a plain number or a
+`K`/`M`/`B` suffix (`10M` = 10000000), same as the bank/cargo ship reserve settings. A tier that keeps getting refused (e.g. the
+research for it is not done yet) backs off automatically instead of retrying every tick - a few times a minute at first, then once
+every 30 minutes if it still fails, without ever giving up on it for the session (the research could finish later).
+
+Note: the game can silently grant far less than requested even when accepting the order (e.g. asking for 3.7M and receiving 29) -
+confirmed by the account's own owner that this per-order cap is the same for every kind and every tier at any given moment (only
+price and duration differ) and changes over time (29 at one point, 7226 at another, same account). Rather than ask for the raw
+gap outright - an amount no human would ever type - the bot starts from a modest guess and grows ~50% from whatever was actually
+granted last time, sharing that learned value across all four kinds so it only needs discovering once, not four times over.
 
 **Speeding up a training queue with items, cheaply:** research/observation from live play - use **one 50% reduction item first**,
 then fill the remainder of the timer with **25% items**. Using several 50% items back to back wastes more of each one's reduction
