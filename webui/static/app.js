@@ -765,6 +765,30 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
   };
   const icon = (name, size = 22) => `<svg class="ico" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 
+  const TROOP_KIND_LABELS = { infantry: "Infanterie", ranged: "Tireurs", cavalry: "Cavalerie", siege: "Siège" };
+
+  // Per-tier breakdown (T1-T5) for each kind - the tgrid above only has kind-level sums, not
+  // enough to tell "plenty of troops overall but none of the tier gather/training needs".
+  function troopTierTable(byTier) {
+    if (!byTier) return "";
+    const kinds = Object.keys(TROOP_KIND_LABELS).filter((k) => byTier[k]);
+    if (!kinds.length) return "";
+    const rows = kinds.map((k) => `<tr><td>${icon(k, 18)} ${TROOP_KIND_LABELS[k]}</td>
+      ${byTier[k].map((n) => `<td>${n ? short(n) : "—"}</td>`).join("")}</tr>`).join("");
+    return `<table class="ttiers"><thead><tr><th></th><th>T1</th><th>T2</th><th>T3</th><th>T4</th><th>T5</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+  }
+
+  // What each kind's building is currently training, whichever started it (autotrain or a
+  // human in game) - see TrainingSlot's comment (src/protocol.c) for why there is no ETA.
+  function trainingRow(training) {
+    if (!training || !training.some((t) => t.active)) return "";
+    const pills = training.filter((t) => t.active).map((t) =>
+      `<span class="pill warn">${icon(t.kind, 16)} ${TROOP_KIND_LABELS[t.kind] || t.kind} T${t.tier} · ${short(t.amount)}</span>`
+    ).join(" ");
+    return `<p class="help">${icon("clock", 14)} En cours de formation : ${pills}</p>`;
+  }
+
   function gameHtml(game) {
     if (!game) return `<div class="card"><p class="help">Chargement…</p></div>`;
     if (!game.available) {
@@ -821,7 +845,8 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
         ${t.loaded ? `<div class="tgrid">
           ${troop("total", "Total", num(t.total))}${troop("infantry", "Infanterie", short(t.infantry))}${troop("cavalry", "Cavalerie", short(t.cavalry))}
           ${troop("ranged", "Tireurs", short(t.ranged))}${troop("siege", "Siège", short(t.siege))}
-          ${d.wounded.loaded ? troop("wounded", "Blessés", num(d.wounded.total)) : ""}</div>`
+          ${d.wounded.loaded ? troop("wounded", "Blessés", num(d.wounded.total)) : ""}</div>
+          ${troopTierTable(d.troops_by_tier)}${trainingRow(d.training)}`
           : `<p class="help">Pas encore reçues du serveur.</p>`}</div>`;
   }
 

@@ -16,6 +16,7 @@ Field types:
     shields  ordered subset of SHIELDS
     names    comma separated in-game player names
     channels one or several of CHANNELS, comma separated
+    autotrain_targets  comma separated KIND:TIER:CAP entries, in priority order (see autotrain.targets)
 """
 
 import re
@@ -45,6 +46,10 @@ CHANNELS = [
 ]
 
 RESOURCES = [("food", "Nourriture"), ("rock", "Pierre"), ("wood", "Bois"), ("ore", "Minerai"), ("gold", "Or")]
+
+TROOP_KINDS = [("INFANTRY", "Infanterie"), ("RANGED", "Distance"), ("CAVALRY", "Cavalerie"), ("SIEGE", "Siège")]
+TROOP_TIERS = ["T1", "T2", "T3", "T4", "T5"]
+AUTOTRAIN_MAX_TARGETS = 16  # keep in sync with AUTOTRAIN_MAX_TARGETS in include/connection.h
 
 
 def _bool(key, label, help="", default=False, depends=None):
@@ -289,6 +294,23 @@ CATEGORIES = [
              "help": "Plafonne le nombre de troupes envoyées en une marche de récolte à votre nombre de troupes "
                      "réellement disponibles (0 = pas de plafond - déconseillé, la formule du nombre de troupes "
                      "est expérimentale et peut largement dépasser ce que vous avez réellement pour une grosse tuile)."},
+        ],
+    },
+    {
+        "id": "autotrain",
+        "label": "Formation automatique",
+        "description": "Forme des troupes en continu jusqu'à des plafonds fixés, dans l'ordre donné : "
+                      "chaque type (infanterie, distance, cavalerie, siège) a sa propre file - un seul palier "
+                      "à la fois par type -, et passe au palier suivant de la liste une fois le plafond atteint "
+                      "(ex : T2 avant T4 pour le même type).",
+        "fields": [
+            _bool("autotrain.enabled", "Activer la formation automatique"),
+            {"key": "autotrain.targets", "label": "Paliers à former (ordre de priorité)", "type": "autotrain_targets",
+             "default": "", "depends": "autotrain.enabled",
+             "help": "Un par ligne virtuelle, séparés par des virgules : TYPE:PALIER:PLAFOND. "
+                     "Types : INFANTRY, RANGED, CAVALRY, SIEGE. Paliers : T1 à T5. "
+                     "Exemple : INFANTRY:T2:10000000, RANGED:T2:12000000, CAVALRY:T2:10000000, "
+                     "INFANTRY:T4:5000000, CAVALRY:T4:5000000, RANGED:T4:5000000"},
         ],
     },
     {
@@ -592,6 +614,30 @@ def validate(field, raw):
         if len(names) > 8:
             raise ValueError("Maximum 8 objets.")
         return ", ".join(names)
+
+    if kind == "autotrain_targets":
+        entries = [part.strip() for part in text.split(",") if part.strip()]
+        if not entries:
+            raise ValueError("Ajoutez au moins un palier (ex : INFANTRY:T2:10000000).")
+        if len(entries) > AUTOTRAIN_MAX_TARGETS:
+            raise ValueError(f"Maximum {AUTOTRAIN_MAX_TARGETS} paliers.")
+        known_kinds = {name for name, _ in TROOP_KINDS}
+        normalised = []
+        for entry in entries:
+            parts = entry.split(":")
+            if len(parts) != 3:
+                raise ValueError(f"« {entry} » : format attendu KIND:TIER:PLAFOND (ex : INFANTRY:T2:10000000).")
+            troop_kind, tier, cap = (p.strip() for p in parts)
+            if troop_kind.upper() not in known_kinds:
+                raise ValueError(f"« {troop_kind} » : type inconnu (INFANTRY, RANGED, CAVALRY ou SIEGE).")
+            if tier.upper() not in TROOP_TIERS:
+                raise ValueError(f"« {tier} » : palier inconnu (T1 à T5).")
+            if not re.fullmatch(r"\d+", cap):
+                raise ValueError(f"« {cap} » : le plafond doit être un nombre entier positif.")
+            if int(cap) > _U32_MAX:
+                raise ValueError(f"« {cap} » : trop grand (maximum {_U32_MAX}).")
+            normalised.append(f"{troop_kind.upper()}:{tier.upper()}:{int(cap)}")
+        return ", ".join(normalised)
 
     if kind == "names":
         names = []
