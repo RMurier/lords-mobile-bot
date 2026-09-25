@@ -436,13 +436,18 @@ typedef struct {
     bool     occupied;
     char     occupied_by[13];
 
-    /* Same record carries a kingdom_id(2) right after alliance_tag, at offset+20 - confirmed
-     * on the sibling WAR_RECORD_TAG record (tag=8) at that exact offset, and it exactly fills
-     * the gap between alliance_tag(+17,3) and level(+22) for this record too. The game pushes
-     * tiles from other kingdoms passively (e.g. alliance rally-point tracking); zone_id/point_id
-     * alone are not globally unique across kingdoms, so without this a foreign tile can decode
-     * to a nonsensical local X/Y and get gathered as if it were real. Tracked only to compare
-     * against c->player.current_kingdom_id in RecvMapInfoPlus. */
+    /* Same record carries a value(2) right after alliance_tag, at offset+20 - confirmed on the
+     * sibling WAR_RECORD_TAG record (tag=8) at that exact offset (there, the occupier's real
+     * kingdom), and it exactly fills the gap between alliance_tag(+17,3) and level(+22) for this
+     * record too. NOT "which kingdom this tile is in", despite the field's name and an earlier
+     * version of this code filtering on it as if it were: confirmed live that a genuinely free
+     * tile decodes this as 0 (no occupier to report a kingdom for), while an occupied one
+     * decodes the occupier's real kingdom - filtering resource tiles by kingdom_id ==
+     * current_kingdom_id silently dropped every free tile and kept only occupied ones, which is
+     * the opposite of useful. Cross-kingdom garbage tiles (zone_id/point_id collide with the
+     * local scan's numbering, decoding to a bogus local X/Y) are filtered by GatherZoneInRange
+     * instead (protocol.c) - kingdom_id is kept here only for reference/logging, not as a
+     * filter. */
     uint16_t kingdom_id;
 } GatherTile;
 

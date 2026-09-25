@@ -3767,6 +3767,8 @@ void NotifyDiscord(Connection *c, const char *message) {
 		LOGE("[NOTIFY] Échec de l'envoi au webhook Discord (curl absent, réseau bloqué ou webhook invalide ; code %d)\n", rc);
 }
 
+static bool GatherZoneInRange(Connection *c, uint16_t zone_id);
+
 void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 	if (!c->war.enabled && !c->gather.enabled) return;
 
@@ -3832,13 +3834,13 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 			// level 0 and a near-UINT32_MAX amount; skip it instead of tracking/overwriting a
 			// real tile with garbage - it would never be gatherable anyway.
 			//
-			// Also reject tiles from a different kingdom (see GatherTile.kingdom_id): the game
-			// pushes those passively (e.g. alliance rally-point tracking in another kingdom) and
-			// zone_id/point_id are not globally unique across kingdoms, so a foreign tile can
-			// decode to a bogus local X/Y (e.g. right next to the map origin) and get gathered
-			// as if it were real - matches refusal patterns seen against such tiles.
-			if (level >= 1 && level <= 5 && amount > 0 &&
-			    kingdom_id == c->player.current_kingdom_id) {
+			// Also reject anything outside the scan's own rectangle (see GatherZoneInRange's
+			// comment - NOT a kingdom_id check, an earlier version of this filtered on that
+			// field and it turned out to mean something else entirely, silently dropping every
+			// free tile): the game pushes tiles passively (e.g. alliance rally-point tracking
+			// elsewhere) whose zone_id/point_id can collide with the local scan's numbering and
+			// decode to a bogus local X/Y (e.g. right next to the map origin).
+			if (level >= 1 && level <= 5 && amount > 0 && GatherZoneInRange(c, zone_id)) {
 				GatherTile *t = GatherTrackTile(c, zone_id, point_id);
 				if (t) {
 					t->resource_kind = tag;
@@ -3924,6 +3926,32 @@ void RequestMapData(Connection *c, uint16_t zone_id) {
 	write_zero(c->data + c->size, 32); c->size += 32;
 	write_u16(c->data, c->size);
 	send_packet(c, true);
+}
+
+/* Is zone_id inside the same scan rectangle GatherZoneAt sweeps (own castle position ±
+ * gather.radius)? Confirmed live (capture) that GatherTile.kingdom_id is NOT "which kingdom
+ * this tile is in" as an earlier version of this code assumed: a genuinely free tile decodes
+ * kingdom_id=0 (no occupier to report a kingdom for), while an occupied one decodes the
+ * occupier's real kingdom - filtering on it against the player's own kingdom silently dropped
+ * every free tile and kept only occupied ones, making the account's own kingdom look 100%
+ * occupied when most of it was simply never tracked at all. This zone-bounds check replaces
+ * that filter, using only already-trusted data (the same rectangle math as the active scan)
+ * instead of a field whose meaning was misread. */
+static bool GatherZoneInRange(Connection *c, uint16_t zone_id) {
+	map_pos_t castle = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
+	int radius = c->gather.radius > 0 ? c->gather.radius : 30;
+
+	int x_min = castle.x > radius ? castle.x - radius : 0;
+	int x_max = castle.x + radius < 511 ? castle.x + radius : 511;
+	int y_min = castle.y > radius ? castle.y - radius : 0;
+	int y_max = castle.y + radius < 1023 ? castle.y + radius : 1023;
+
+	int xz_min = x_min >> 5, xz_max = x_max >> 5;
+	int yz_min = y_min >> 4, yz_max = y_max >> 4;
+
+	int xz = zone_id % 16;
+	int yz = zone_id / 16;
+	return xz >= xz_min && xz <= xz_max && yz >= yz_min && yz <= yz_max;
 }
 
 /* zone_id of the tile `index` steps into the square scan rectangle around the

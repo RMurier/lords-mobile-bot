@@ -2446,6 +2446,7 @@ static const uint8_t first_2[] = {
 		c->gather.max_marches = 1;
 		c->gather.scan_done = true;
 		c->player.max_marches = 6;
+		c->player.zone_id = 100; c->player.point_id = 0; // castle inside zone 100, same as the test tiles - keeps them in GatherZoneInRange's rectangle
 
 		// Two ORE tiles in one _MSG_RESP_UPDATE_MAPINFO_PLUS push: point 5 (level 4, higher -
 		// would normally win) has a name+tag embedded like a real capture showed for an
@@ -2507,6 +2508,7 @@ static const uint8_t first_2[] = {
 		c->gather.max_marches = 1;
 		c->gather.scan_done = true;
 		c->player.max_marches = 6;
+		c->player.zone_id = 100; c->player.point_id = 0; // castle inside zone 100, same as the test tile
 
 		uint8_t buf[3 + 51];
 		memset(buf, 0, sizeof(buf));
@@ -2564,26 +2566,33 @@ static const uint8_t first_2[] = {
 		free(c);
 	}
 
-	/* ---- gather: a resource tile pushed from a different kingdom is not tracked ---- */
+	/* ---- gather: a resource tile outside the scan's own rectangle is not tracked, but its
+	 * kingdom_id is irrelevant to that decision ---- */
 	{
+		// Confirmed live (real capture) that a genuinely free tile decodes kingdom_id=0 (no
+		// occupier to report one for) while an occupied one decodes the occupier's real
+		// kingdom - an earlier version of this code filtered resource tiles on kingdom_id
+		// matching the player's own, which silently dropped every free tile it ever saw and
+		// only ever kept occupied ones. This test locks in that a free tile (kingdom_id=0) is
+		// tracked exactly like an occupied one would be, as long as it's within the scan's own
+		// rectangle - kingdom_id plays no part in that decision anymore.
 		c = fresh("boss");
 		c->gather.enabled = true;
-		c->player.current_kingdom_id = 13; // home kingdom, matches the user's real report
+		c->player.zone_id = 100; c->player.point_id = 0; // castle inside zone 100
 
 		uint8_t buf[3 + 51 * 2];
 		memset(buf, 0, sizeof(buf));
 
-		// point 5: same kingdom (13) - must be tracked
+		// point 5: inside the scan rectangle (same zone as the castle), free (kingdom_id=0,
+		// no occupier) - must still be tracked
 		uint8_t *r0 = buf + 3;
 		r0[0] = 100; r0[1] = 0; r0[2] = 5; r0[3] = 3;
-		r0[20] = 13; r0[21] = 0; // kingdom_id = 13
 		r0[22] = 4;
 		r0[23] = 0x68; r0[24] = 0x6b; r0[25] = 0x0e; r0[26] = 0x00; // 945000
 
-		// point 6: foreign kingdom (2000) - must be rejected, even though level/amount look real
+		// point 6: a zone far outside any plausible scan radius of the castle - must be rejected
 		uint8_t *r1 = buf + 3 + 51;
-		r1[0] = 100; r1[1] = 0; r1[2] = 6; r1[3] = 3;
-		r1[20] = 0xD0; r1[21] = 0x07; // kingdom_id = 2000
+		r1[0] = 0xE8; r1[1] = 0x03; r1[2] = 6; r1[3] = 3; // zone_id = 1000
 		r1[22] = 1;
 		r1[23] = 0x60; r1[24] = 0x0e; r1[25] = 0x03; r1[26] = 0x00; // 200000
 
@@ -2594,8 +2603,8 @@ static const uint8_t first_2[] = {
 			if (c->gather.tiles[i].point_id == 5) found5 = true;
 			if (c->gather.tiles[i].point_id == 6) found6 = true;
 		}
-		CHECK(found5, "gather: a tile whose kingdom_id matches the player's own kingdom is tracked");
-		CHECK(!found6, "gather: a tile pushed from a different kingdom is not tracked");
+		CHECK(found5, "gather: a free tile (kingdom_id=0) inside the scan rectangle is tracked");
+		CHECK(!found6, "gather: a tile far outside the scan rectangle is not tracked");
 		free(c);
 	}
 
