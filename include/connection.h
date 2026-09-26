@@ -853,6 +853,14 @@ typedef struct {
 // (kind, tier) at a time, so when one order is refused because something is already training,
 // asking for the next kind a second later is refused for the same reason.
 #define AUTOTRAIN_REFUSAL_PAUSE_MS         (2 * 60 * 1000)
+// A (kind, tier) the stock cannot pay for even one troop of is left alone this long (the stock only grows slowly).
+#define AUTOTRAIN_POOR_BACKOFF_MS          (10 * 60 * 1000)
+// The bag tops the stock up at most this many times for one order: the server has to credit it, and an order that never
+// gets there must not drain the bag one top-up at a time.
+#define AUTOTRAIN_BAG_TOPUPS_MAX           3
+// A training whose end time (from _MSG_RESP_TRAININGINFO_) passed this long ago, with no
+// "troops added" packet since, is taken as finished - the packet was missed.
+#define AUTOTRAIN_END_GRACE_S              30
 
 #define AUTOTRAIN_REFUSAL_BACKOFF_MS       (60 * 1000)       // normal case: likely transient (resources, timing)
 #define AUTOTRAIN_HARD_BLOCK_THRESHOLD     5                 // this many refusals in a row -> stop assuming "transient"
@@ -865,7 +873,7 @@ typedef struct {
 // First-ever request for a (kind, tier) with no history yet: a real player has no way to know
 // the true affordable max either (see AutoTrainSettings' comment on last_granted), so this is a
 // deliberately unremarkable guess, not the (possibly 7-digit) full gap to the target.
-#define AUTOTRAIN_INITIAL_BATCH_GUESS      5000  // a level-25 barracks holds 5000 before research bonuses (docs/apk-analysis.md)
+#define AUTOTRAIN_INITIAL_BATCH_GUESS      5000  // only when the building list is missing: normally BarracksCapacityFloor
 // Once we know what was actually granted last time, grow toward the target by this factor per
 // attempt (50%) instead of jumping straight back to the full gap.
 #define AUTOTRAIN_BATCH_GROWTH_NUM         3
@@ -917,6 +925,8 @@ typedef struct {
 	uint8_t  pending_tier;                       // tier of that order, valid while busy
 	uint8_t  next_kind;                          // round-robin cursor - see this struct's comment
 
+	uint64_t running_until;                      // server clock: when the training seen at login ends, 0 = unknown (see RecvTrainingInfo)
+	uint8_t  bag_topups;                         // bag top-ups made for the order about to be sent, back to 0 once it is sent
 	uint32_t pending_amount;                     // amount of the order in flight, valid while busy: a refusal halves the next attempt from it
 	uint32_t last_granted;                       // account-wide, shared by every (kind, tier) - see this struct's comment; 0 = no history yet
 	uint64_t retry_at[4][5];                     // [kind][tier] now_ms() backoff after a refusal

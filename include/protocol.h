@@ -102,6 +102,7 @@ void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size);
 void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size);
 void RecvTrainingInfo(Connection *c, const uint8_t *data, uint16_t size);
 uint32_t BarracksCapacityFloor(const Connection *c);
+uint32_t TroopsAffordable(const Connection *c, uint8_t kind, uint8_t tier, bool with_bag, int *short_resource);
 void AutoTrainTick(Connection *c);
 void RecvWoundedTroopData(Connection *c, const uint8_t *data);
 void RecvValhallaInfo(Connection *c, const uint8_t *data, uint16_t size);

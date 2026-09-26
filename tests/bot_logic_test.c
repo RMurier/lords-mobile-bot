@@ -75,6 +75,9 @@ static int find_packet(uint16_t type)
 	return -1;
 }
 
+/* enough of every resource that an autotrain order is never cut down by the stock */
+static void give_stock(Connection *c) { c->resources.food = c->resources.rock = c->resources.wood = c->resources.ore = 2000000000u; c->resources.gold = 2000000000u; }
+
 static void reset_sent(void) { sent_count = 0; useitem_count = 0; }
 
 static int failures = 0;
@@ -3233,6 +3236,7 @@ static const uint8_t first_2[] = {
 		c->troop.ranged[TIER_T2] = 1000;
 		c->troop.infantry[TIER_T2] = 500;
 		c->autotrain.enabled = true;
+		give_stock(c);
 		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 2000;
 		c->autotrain.target[TROOP_RANGED][TIER_T2]   = 5000;
 		reset_sent();
@@ -3280,6 +3284,7 @@ static const uint8_t first_2[] = {
 		c = fresh("boss");
 		c->troop.loaded = true;
 		c->autotrain.enabled = true;
+		give_stock(c);
 		c->autotrain.target[TROOP_INFANTRY][TIER_T1] = 5000000;
 		c->autotrain.target[TROOP_RANGED][TIER_T1]   = 5000000;
 		reset_sent();
@@ -3289,7 +3294,7 @@ static const uint8_t first_2[] = {
 		uint32_t first = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
 		CHECK(first == AUTOTRAIN_INITIAL_BATCH_GUESS && first <= 5000, "autotrain: the first amount is no more than a level-25 barracks holds");
 
-		uint8_t bareRefusal[1] = { 1 };
+		uint8_t bareRefusal[1] = { 2 }; // code 2: not "already training" (code 1), so the amount is what gets cut
 		RecvTrainingStart(c, bareRefusal, sizeof(bareRefusal));
 		CHECK(c->autotrain.next_action_at >= now_ms() + AUTOTRAIN_REFUSAL_PAUSE_MS - 1000,
 			"autotrain: a refusal pauses everything, not just that kind - the next kind is not tried a second later");
@@ -3307,15 +3312,179 @@ static const uint8_t first_2[] = {
 		free(c);
 	}
 
-	/* ---- autotrain: _MSG_RESP_TRAININGINFO_ is not acted on (its fields are not decoded) ---- */
+	/* ---- autotrain: a training already running at login (_MSG_RESP_TRAININGINFO_) blocks every order until it ends ---- */
 	{
 		c = fresh("boss");
 		c->troop.loaded = true;
 		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_INFANTRY][TIER_T1] = 5000000;
+		c->autotrain.target[TROOP_RANGED][TIER_T1]   = 5000000;
+		// the capture: infantry T1, 17500, begun 1790006... server clock 1790427614 - 69042 s, 76845 s long
 		uint8_t info[18] = { 0, 0, 0x5c, 0x44, 0, 0, 0xde, 0xc1, 0xb6, 0x6a, 0, 0, 0, 0, 0x2d, 0x2c, 0x01, 0 };
+		c->server_time = 0x6ab6c1deULL + 69042;
 		RecvTrainingInfo(c, info, sizeof(info));
-		CHECK(!c->autotrain.busy && c->autotrain.last_granted == 0 && !c->training[0].active,
-			"autotrain: the undecoded login packet changes no state");
+		CHECK(c->autotrain.busy && c->training[TROOP_INFANTRY].active && c->training[TROOP_INFANTRY].amount == 17500,
+			"autotrain: a training in progress at login marks the slot busy");
+		CHECK(c->autotrain.running_until == 0x6ab6c1deULL + 76845, "autotrain: its end is begin + duration");
+		CHECK(c->autotrain.last_granted == 0, "autotrain: the login training is not taken as what one order may hold");
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(sent_count == 0, "autotrain: nothing is sent while it runs");
+
+		c->server_time = 0x6ab6c1deULL + 76845 + AUTOTRAIN_END_GRACE_S + 1; // past its end, no 'troops added' packet came
+		c->autotrain.next_action_at = 0;
+		AutoTrainTick(c);
+		CHECK(!c->autotrain.busy && !c->training[TROOP_INFANTRY].active, "autotrain: the slot is freed once the end has passed");
+		free(c);
+
+		// already over at login: idle
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->server_time = 0x6ab6c1deULL + 76845 + 100;
+		RecvTrainingInfo(c, info, sizeof(info));
+		CHECK(!c->autotrain.busy && !c->training[TROOP_INFANTRY].active, "autotrain: a training whose end has passed is idle");
+		free(c);
+		// nothing training: zeros
+		c = fresh("boss");
+		uint8_t none[18] = { 0 };
+		c->server_time = 0x6ab6c1deULL;
+		RecvTrainingInfo(c, none, sizeof(none));
+		CHECK(!c->autotrain.busy, "autotrain: an empty TRAININGINFO is idle");
+		free(c);
+	}
+
+	/* ---- the second capture: infantry T2 x 2472 running, from a real login (client clock 0x6ab7d365) ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
+		c->server_time = 0x6ab7d365ULL;
+		uint8_t info[18] = { 0x00, 0x01, 0xa8, 0x09, 0x00, 0x00, 0x14, 0xc9, 0xb7, 0x6a, 0, 0, 0, 0, 0x91, 0x38, 0x00, 0x00 };
+		RecvTrainingInfo(c, info, sizeof(info));
+		CHECK(c->autotrain.busy && c->training[TROOP_INFANTRY].active && c->training[TROOP_INFANTRY].tier == TIER_T2
+			&& c->training[TROOP_INFANTRY].amount == 2472, "TRAININGINFO (real capture): infantry T2 x 2472 is running");
+		CHECK(c->autotrain.running_until == 0x6ab7c914ULL + 14481, "TRAININGINFO (real capture): it ends at begin + 14481 s");
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(sent_count == 0, "TRAININGINFO (real capture): no order is sent while it runs");
+		// a refusal with code 1 is that same 'already training': it must not shrink the next amount
+		c->autotrain.busy = false; c->autotrain.running_until = 0; c->autotrain.next_action_at = 0;
+		AutoTrainTick(c);
+		uint8_t code1[1] = { 1 };
+		RecvTrainingStart(c, code1, sizeof(code1));
+		CHECK(c->autotrain.last_granted == 0, "autotrain: code 1 (already training) does not shrink the next amount");
+		uint8_t code2[1] = { 2 };
+		c->autotrain.next_action_at = 0; c->autotrain.retry_at[TROOP_INFANTRY][TIER_T2] = 0;
+		AutoTrainTick(c);
+		RecvTrainingStart(c, code2, sizeof(code2));
+		CHECK(c->autotrain.last_granted > 0, "autotrain: another refusal code does shrink it");
+		free(c);
+	}
+
+	/* ---- an order is never bigger than the stock pays for ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
+		// the login of the second capture: 0 food, 47370 stone, 28580 wood, 30560 ore, 5.96M gold
+		c->resources.food = 0; c->resources.rock = 47370; c->resources.wood = 28580; c->resources.ore = 30560; c->resources.gold = 5960000;
+		int scarce = -1;
+		CHECK(TroopsAffordable(c, TROOP_INFANTRY, TIER_T2, false, &scarce) == 0 && scarce == 0, "affordable: no food = no infantry T2, food is what is short");
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(find_packet(_MSG_REQUEST_TRAINING_) < 0, "autotrain: nothing is asked when not one troop can be paid");
+		CHECK(c->autotrain.retry_at[TROOP_INFANTRY][TIER_T2] > now_ms() + 5 * 60 * 1000 && !c->autotrain.busy,
+			"autotrain: that box waits, and the slot is not left busy");
+
+		c->resources.food = 250000;                                       // 2500 troops' worth of food (100 each)
+		CHECK(TroopsAffordable(c, TROOP_INFANTRY, TIER_T2, false, NULL) == 285, "affordable: the scarcest resource sets it (28580 wood / 100)");
+		c->autotrain.retry_at[TROOP_INFANTRY][TIER_T2] = 0;
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		int k = find_packet(_MSG_REQUEST_TRAINING_);
+		uint32_t amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(amount == 285, "autotrain: the order is cut down to what the stock pays for");
+		CHECK(TroopsAffordable(c, TROOP_INFANTRY, TIER_T5, false, NULL) == UINT32_MAX, "affordable: T5 has no price in the table, not limited");
+		free(c);
+	}
+
+	/* ---- the bag pays what the stock lacks, and no more than that ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
+		c->resources.food = 0;                                            // 5000 infantry T2 = 500000 food
+		c->items[FOOD_500K].quantity = 3; c->items[FOOD_5K].quantity = 10;
+		CHECK(TroopsAffordable(c, TROOP_INFANTRY, TIER_T2, false, NULL) == 0 && TroopsAffordable(c, TROOP_INFANTRY, TIER_T2, true, NULL) == 15500,
+			"affordable: the bag counts when asked (1550000 food in it / 100)");
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(find_packet(_MSG_REQUEST_TRAINING_) < 0 && useitem_count == 1 && c->items[FOOD_500K].quantity == 2 && c->items[FOOD_5K].quantity == 10,
+			"bag: only what is missing is taken - one 500K item for the 500000 food, nothing more");
+		CHECK(c->autotrain.bag_topups == 1 && c->resources.food == 500000, "bag: the food is credited, one top-up counted");
+		CHECK(!c->autotrain.busy && c->autotrain.next_action_at > now_ms(), "bag: the order waits a few seconds for the server to credit it");
+
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		int k = find_packet(_MSG_REQUEST_TRAINING_);
+		uint32_t amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(k >= 0 && amount == 5000 && useitem_count == 0 && c->autotrain.bag_topups == 0,
+			"bag: then the order goes out for the full amount, with nothing more taken from the bag");
+		free(c);
+
+		// the bag cannot cover it: the order shrinks to what the stock pays for, and the bag stays untouched
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
+		c->resources.food = 100000;                                       // 1000 troops
+		c->items[FOOD_5K].quantity = 2;                                   // +10000 food = 100 more troops, still short of 5000
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(find_packet(_MSG_REQUEST_TRAINING_) < 0 && useitem_count == 1 && c->items[FOOD_5K].quantity == 0,
+			"bag: the shortfall of the amount stock + bag can pay is taken from the bag");
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		int k2 = find_packet(_MSG_REQUEST_TRAINING_);
+		uint32_t amount2 = k2 >= 0 ? (uint32_t)(sent[k2][10] | sent[k2][11] << 8 | sent[k2][12] << 16 | sent[k2][13] << 24) : 0;
+		CHECK(amount2 == 1100, "bag: the order is cut to what stock + bag pay for (110000 food / 100)");
+		free(c);
+	}
+
+	/* ---- the first order is what the account's barracks hold ---- */
+	{
+		c = fresh("boss");
+		c->building_count = 3;
+		c->building[0].build_id = BUILDING_BARRACKS; c->building[0].level = 25;
+		c->building[1].build_id = BUILDING_BARRACKS; c->building[1].level = 1;
+		c->building[2].build_id = BUILDING_ACADEMY;  c->building[2].level = 25;
+		CHECK(BarracksCapacityFloor(c) == 5020, "barracks: the capacities of every Barracks add up (5000 + 20), other buildings ignored");
+		c->building_count = 0;
+		CHECK(BarracksCapacityFloor(c) == 0, "barracks: 0 until the building list has arrived");
+		c->building_count = 1;
+		c->building[0].build_id = BUILDING_BARRACKS; c->building[0].level = 1;
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_INFANTRY][TIER_T1] = 5000000;
+		reset_sent();
+		AutoTrainTick(c);
+		int k = find_packet(_MSG_REQUEST_TRAINING_);
+		uint32_t amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(amount == 20, "autotrain: a level-1 barracks: the first order is 20 troops, not a fixed 5000");
 		free(c);
 	}
 
@@ -3324,6 +3493,7 @@ static const uint8_t first_2[] = {
 		c = fresh("boss");
 		c->troop.loaded = true;
 		c->autotrain.enabled = true;
+		give_stock(c);
 		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 2000;
 		c->autotrain.target[TROOP_INFANTRY][TIER_T4] = 2000;
 		reset_sent();
@@ -3372,6 +3542,7 @@ static const uint8_t first_2[] = {
 		c = fresh("boss");
 		c->troop.loaded = true;
 		c->autotrain.enabled = true;
+		give_stock(c);
 		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
 		c->autotrain.target[TROOP_RANGED][TIER_T2]   = 5000000;
 		c->autotrain.target[TROOP_CAVALRY][TIER_T2]  = 5000000;
@@ -3421,6 +3592,7 @@ static const uint8_t first_2[] = {
 		c = fresh("boss");
 		c->troop.loaded = true;
 		c->autotrain.enabled = true;
+		give_stock(c);
 		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000; // real capture: bot used to ask for 3,701,309 in one shot
 
 		AutoTrainTick(c);

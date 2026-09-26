@@ -545,9 +545,22 @@ every 30 minutes if it still fails, without ever giving up on it for the session
 
 **Refusals:** the game trains one (kind, tier) at a time. After any refusal the bot leaves *every* kind alone for 2 minutes instead of
 trying the next one a second later (which would be refused for the same reason), and the next order asks for half the refused amount
-(first order: 5000, what a level-25 barracks holds before research bonuses), then grows again by 50% from what was granted. The
-login packet `_MSG_RESP_TRAININGINFO_` (2402) is not decoded yet - shown in debug mode only - so at login the bot cannot know whether
-something is already training; it finds out from the first refusal.
+(first order: what the account's Barracks hold - 20 at level 1 up to 5000 at level 25 each, added up over every Barracks, before
+research bonuses, so a floor - then grows again by 50% from what was granted). The
+login packet `_MSG_RESP_TRAININGINFO_` (2402) tells whether something is already training (type, tier, quantity, begin time,
+duration - the layout of the game client's own `SoldierKind/SoldierRank/SoldierBeginTime/SoldierNeedTime` fields, confirmed by a
+capture of 2472 infantry T2 the owner was training): while it runs the bot sends nothing, and it says so in the log (`Formation deja
+en cours ... encore N min`). With nothing training the packet is not sent at all. Refusal **code 1** is that same "already training"
+(it never shrinks the amount); another code (2 was seen with 0 food) does.
+
+**Never more than the stock pays for:** the price of one troop comes from the game's `Soldier` table (`include/troop_table.h`, base
+price, bonuses only lower it). The order is cut down to what the scarcest resource pays for, **stock and bag together**.
+
+**The bag pays only what the stock lacks:** when the stock does not cover an order but the stock plus the bag's resource items does,
+the bot uses the strict minimum of items for the missing part of each resource (same planning as the trade and `$askhelp` top-ups,
+smallest cover), waits 3-4 s for the server to credit it, then sends the order. At most 3 top-ups per order; if the bag cannot cover
+it, the order is cut to what the stock alone pays for. With not one troop payable (bag included) the bot logs `Pas assez de
+<ressource> (sac compris) ...` and leaves that box alone for 10 minutes.
 
 Note: the game can silently grant far less than requested even when accepting the order (e.g. asking for 3.7M and receiving 29) -
 confirmed by the account's own owner that this per-order cap is the same for every kind and every tier at any given moment (only

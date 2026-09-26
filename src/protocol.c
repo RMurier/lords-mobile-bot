@@ -6,6 +6,7 @@
 #include "items.h"
 #include "log.h"
 #include "guildbank.h"
+#include "troop_table.h"
 #include <stdlib.h>
 #include <ctype.h>
 #include <time.h>
@@ -4797,6 +4798,7 @@ static uint32_t *TroopBucket(Connection *c, uint8_t kind, uint8_t tier) {
 static void TroopAdd(Connection *c, uint8_t kind, uint8_t tier, uint32_t amount) {
 	if (kind < 4) {
 		c->autotrain.busy = false; // account-wide: only one (kind, tier) can ever be training - see AutoTrainSettings' comment
+		c->autotrain.running_until = 0;
 		c->training[kind].active = false;
 		if (c->autotrain.enabled) c->autotrain.next_action_at = GatherHumanDelay(); // a player takes a moment before the next order
 	}
@@ -4858,10 +4860,13 @@ void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size) {
  * affects that one tier of that one kind, never a different, perfectly usable one. */
 static void AutoTrainApplyRefusal(Connection *c, uint8_t kind, uint8_t tier, uint8_t status) {
 	c->autotrain.busy = false;
+	c->autotrain.running_until = 0;
 	// Whatever the reason was (over the barracks' capacity, resources, something already training), asking
 	// again for the same amount would be refused again: next time ask for half of it.
+	// Code 1 is "something is already training" (seen with a training running at login, and only then), which
+	// the amount has nothing to do with.
 	uint32_t asked = c->autotrain.pending_amount;
-	if (asked >= 3 && (c->autotrain.last_granted == 0 || asked / 3 < c->autotrain.last_granted))
+	if (status != 1 && asked >= 3 && (c->autotrain.last_granted == 0 || asked / 3 < c->autotrain.last_granted))
 		c->autotrain.last_granted = asked / 3; // the next request is last_granted + 50%, so half of `asked`
 	c->autotrain.pending_amount = 0;
 	// nothing else is tried for a while - see AUTOTRAIN_REFUSAL_PAUSE_MS
@@ -4913,6 +4918,24 @@ void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size) {
 	AutoTrainApplyRefusal(c, kind, tier, status);
 }
 
+/* How many troops of that kind and tier the stock pays for, at the game's base price (troop_table.h; bonuses only
+ * lower it, so this is a floor). UINT32_MAX for a tier the table has no price for (T5). When it is 0 or short,
+ * `short_resource` (if given) is the index of the scarcest resource: 0 food, 1 stone, 2 wood, 3 ore, 4 gold.
+ * `with_bag` counts the bag's resource items as stock too. */
+uint32_t TroopsAffordable(const Connection *c, uint8_t kind, uint8_t tier, bool with_bag, int *short_resource) {
+	if (kind > 3 || tier > TIER_T4) return UINT32_MAX;
+	const int64_t stock[5] = { c->resources.food, c->resources.rock, c->resources.wood, c->resources.ore, c->resources.gold };
+	uint64_t best = UINT64_MAX;
+	for (int r = 0; r < 5; r++) {
+		const uint16_t price = TROOP_COST[kind][tier][r];
+		if (!price) continue;
+		const uint64_t have = (stock[r] > 0 ? (uint64_t)stock[r] : 0) + (with_bag ? BagTotal(c, (ResourceType)r) : 0);
+		const uint64_t can = have / price;
+		if (can < best) { best = can; if (short_resource) *short_resource = r; }
+	}
+	return best > UINT32_MAX ? UINT32_MAX : (uint32_t)best;
+}
+
 /* The fewest troops one training order can hold, from the account's barracks: the Barracks' "Training Capacity"
  * of the wiki (gamedata/buildings.json), added up over every Barracks the account has ("multiple barracks will
  * increase barracks capacity"). Research and other bonuses only raise it, so it is a floor, never a ceiling.
@@ -4929,23 +4952,62 @@ uint32_t BarracksCapacityFloor(const Connection *c) {
 	return total;
 }
 
-/* _MSG_RESP_TRAININGINFO_ (2402), 18 bytes, sent at login:
- *   00 00 5c 44 00 00 de c1 b6 6a 00 00 00 00 2d 2c 01 00
- * NOT decoded. A first reading (kind, tier, amount 17500, start, duration 76845 s) was tried and the
- * account's owner said no such training exists - the fields are something else. The u64 at offset 6
- * is a server time (about 19 h before that session's clock). Only shown in debug mode, until a capture
- * taken with a known training running settles what it holds. */
+/* _MSG_RESP_TRAININGINFO_ (2402), 18 bytes, sent at login: the training in progress, if any. The layout is the
+ * client's own DataManager fields SoldierKind (u8), SoldierRank (u8), SoldierBeginTime (i64), SoldierNeedTime
+ * (u32) (dump.cs, RecvTrainingInfo), with the quantity (u32) between the rank and the time. From a capture:
+ *   00 00 | 5c 44 00 00 | de c1 b6 6a 00 00 00 00 | 2d 2c 01 00
+ *   infantry T1, 17500, begun 19 h before that session's server clock, 76845 s of training: still running
+ *   (the account's owner did not recognise that one).
+ * Confirmed by a second capture: infantry T2, 2472, begun 2641 s before the server clock, 14481 s of training - the
+ * account's owner was training exactly 2472 T2 infantry at that moment. With nothing training the packet is not sent
+ * at all (a capture of the same account without training has no such line). While something trains, nothing else can
+ * start, so autotrain does not even try; a refusal with code 1 is that same "already training". */
 void RecvTrainingInfo(Connection *c, const uint8_t *data, uint16_t size) {
-	(void)c;
 	if (size < 18) return;
-	LOGD("[AUTOTRAIN] TRAININGINFO (non decode) : u16=%u u32=%u time=%llu u32=%u\n", read_u16(data), read_u32(data + 2),
-		(unsigned long long)read_u64(data + 6), read_u32(data + 14));
+	uint8_t kind = read_u8(data), tier = read_u8(data + 1);
+	uint32_t amount = read_u32(data + 2);
+	int64_t start = (int64_t)read_u64(data + 6);
+	uint32_t duration = read_u32(data + 14);
+	int64_t now = c->server_time ? (int64_t)c->server_time : (int64_t)time(NULL);
+	LOGD("[AUTOTRAIN] TRAININGINFO : type %u palier %u quantite %u debut %lld duree %u\n", kind, tier, amount, (long long)start, duration);
+
+	bool running = kind < 4 && tier <= TIER_T5 && amount > 0 && duration > 0 && start > 0
+		&& start + (int64_t)duration > now;
+	if (!running) {
+		// only a state this packet itself set is cleared: an order sent a moment ago is not its business
+		if (c->autotrain.busy && c->autotrain.running_until) {
+			c->autotrain.busy = false;
+			c->autotrain.running_until = 0;
+		}
+		return;
+	}
+
+	c->training[kind].active = true;
+	c->training[kind].tier   = tier;
+	c->training[kind].amount = amount;
+	c->autotrain.busy = true;
+	c->autotrain.pending_kind = kind;
+	c->autotrain.pending_tier = tier;
+	c->autotrain.pending_amount = 0;
+	c->autotrain.running_until = (uint64_t)(start + duration);
+
+	LOGI("[AUTOTRAIN] Formation deja en cours : %u %s T%u, encore %llu min - rien d'autre ne sera lance d'ici la\n",
+		amount, TROOP_KIND_NAMES[kind], tier + 1, (unsigned long long)((start + duration - now + 59) / 60));
 }
 
 void AutoTrainTick(Connection *c) {
 	if (!c->autotrain.enabled) return;
 	if (!c->troop.loaded) return; // no real baseline yet (see TroopAdd's comment) - wait for the login snapshot
 
+	// The end time is known: free the slot once it has passed, even if the "troops added" packet never came
+	if (c->autotrain.busy && c->autotrain.running_until && c->server_time
+		&& c->server_time > c->autotrain.running_until + AUTOTRAIN_END_GRACE_S) {
+		LOGD("[AUTOTRAIN] Fin de formation depassee sans confirmation : on considere la file libre\n");
+		c->autotrain.busy = false;
+		c->autotrain.running_until = 0;
+		c->training[c->autotrain.pending_kind].active = false;
+		c->autotrain.next_action_at = GatherHumanDelay();
+	}
 	if (c->autotrain.busy) return; // one order account-wide at a time - see AutoTrainSettings' comment
 
 	if (now_ms() < c->autotrain.next_action_at) return;
@@ -4973,6 +5035,65 @@ void AutoTrainTick(Connection *c) {
 				? (uint32_t)(((uint64_t)last * AUTOTRAIN_BATCH_GROWTH_NUM) / AUTOTRAIN_BATCH_GROWTH_DEN)
 				: (BarracksCapacityFloor(c) ? BarracksCapacityFloor(c) : AUTOTRAIN_INITIAL_BATCH_GUESS);
 			if (want > gap) want = gap; // never ask for more than actually still needed
+
+			// Never ask for what cannot be paid: the order would just be refused (a login capture with 0 food got
+			// code 2 for 5000 infantry). The bag's resource items count as stock, but only the strict minimum of them is
+			// used, and only for what the stock lacks for this order.
+			static const char *const names[5] = { "nourriture", "pierre", "bois", "minerai", "or" };
+			int scarce = 0;
+			const uint32_t affordable = TroopsAffordable(c, kind, tier, true, &scarce);
+			if (affordable == 0) {
+				LOGI("[AUTOTRAIN] Pas assez de %s (sac compris) pour former une seule troupe %s T%u : reessai dans %u min\n",
+					names[scarce], TROOP_KIND_NAMES[kind], tier + 1, AUTOTRAIN_POOR_BACKOFF_MS / 60000);
+				c->autotrain.retry_at[kind][tier] = now + AUTOTRAIN_POOR_BACKOFF_MS;
+				continue;
+			}
+			if (want > affordable) want = affordable;
+
+			if (tier <= TIER_T4) {
+				const int64_t stock[5] = { c->resources.food, c->resources.rock, c->resources.wood, c->resources.ore, c->resources.gold };
+				uint64_t shortfall[5];
+				bool lacking = false;
+				for (int r = 0; r < 5; r++) {
+					const uint64_t need = (uint64_t)want * TROOP_COST[kind][tier][r];
+					const uint64_t have = stock[r] > 0 ? (uint64_t)stock[r] : 0;
+					shortfall[r] = need > have ? need - have : 0;
+					if (shortfall[r]) lacking = true;
+				}
+				if (lacking) {
+					BagUse plan[5][BAG_PLAN_MAX];
+					int used[5] = { 0, 0, 0, 0, 0 };
+					bool coverable = c->autotrain.bag_topups < AUTOTRAIN_BAG_TOPUPS_MAX;
+					for (int r = 0; r < 5 && coverable; r++) {
+						if (!shortfall[r]) continue;
+						used[r] = BagPlan(c, (ResourceType)r, shortfall[r], plan[r]);
+						if (used[r] < 0) coverable = false;
+					}
+					if (coverable) {
+						char detail[200] = "";
+						size_t n = 0;
+						for (int r = 0; r < 5; r++) {
+							if (!shortfall[r]) continue;
+							n += (size_t)snprintf(detail + n, sizeof(detail) - n, "%s%s %llu", n ? ", " : "", names[r], (unsigned long long)shortfall[r]);
+							BagApply(c, plan[r], used[r], (ResourceType)r);
+						}
+						c->autotrain.bag_topups++;
+						c->autotrain.next_action_at = now + 3000 + (uint64_t)(rand() % 1500); // the server has to credit them
+						LOGI("[AUTOTRAIN] Sac utilise pour former %u %s T%u : il manquait %s\n", want, TROOP_KIND_NAMES[kind], tier + 1, detail);
+						return;
+					}
+					// the bag cannot (or may no more) cover it: what the stock alone pays for
+					const uint32_t alone = TroopsAffordable(c, kind, tier, false, &scarce);
+					if (alone == 0) {
+						LOGI("[AUTOTRAIN] Le sac ne complete pas %s pour %s T%u : reessai dans %u min\n",
+							names[scarce], TROOP_KIND_NAMES[kind], tier + 1, AUTOTRAIN_POOR_BACKOFF_MS / 60000);
+						c->autotrain.retry_at[kind][tier] = now + AUTOTRAIN_POOR_BACKOFF_MS;
+						continue;
+					}
+					if (want > alone) want = alone;
+				}
+			}
+			c->autotrain.bag_topups = 0;
 
 			c->autotrain.busy = true; // optimistic, mirrors gather's active_marches pattern
 			c->autotrain.pending_kind = kind;
