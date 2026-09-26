@@ -6763,10 +6763,15 @@ void RequestBuildStart(Connection *c, uint16_t slot, uint16_t build_id)
  * `_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP` is the constant's name but it is a client request): `u32 seq, u8 1`. The research
  * one sends 0 in that byte, so it is most likely the kind (1 = construction). It carries no building: the server helps
  * the one just started (its answer, 2853, is `00 01 <build_id> <level> 1e`). */
+/* The number is written out on purpose: the enum constant of that name in packet_enum.h evaluates to 2854, two more than the
+ * game's 2852 (packet_map.h and the capture agree on 2852). Sent with the enum, the server did not know the message and closed the
+ * connection a few seconds later. Everything else this code sends was checked against the map. */
+#define MSG_ALLIANCE_SOMEBODY_NEEDHELP_REQUEST 2852
+
 void RequestBuildHelp(Connection *c)
 {
 	c->size = 2;
-	write_u16(c->data + c->size, _MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP); c->size += 2;
+	write_u16(c->data + c->size, MSG_ALLIANCE_SOMEBODY_NEEDHELP_REQUEST); c->size += 2;
 	write_u32(c->data + c->size, ++c->protocol.seq_id);                 c->size += 4;
 	write_u8 (c->data + c->size, 1);                                     c->size += 1;
 	write_u16(c->data, c->size);

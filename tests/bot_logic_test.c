@@ -1440,7 +1440,7 @@ int main(void)
 			reset_sent();
 			ac->protocol.seq_id = 0x14;
 			RequestBuildHelp(ac);
-			int at = find_packet(_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP);
+			int at = find_packet(2852);   /* the number the game sends (not the enum constant of that name: it is 2854) */
 			CHECK(at >= 0 && sent_size[at] == 4 + sizeof(req_help) && memcmp(sent[at] + 4, req_help, sizeof(req_help)) == 0,
 				"askhelp: the alliance help request is byte for byte the game's (u32 seq, 1)");
 			reset_sent();
@@ -1477,13 +1477,13 @@ int main(void)
 				memset(begin, 0, sizeof(begin));
 				begin[0] = 50; begin[2] = 4; begin[4] = 2; begin[13] = 0x10; begin[14] = 0x0e;
 				RecvBuildBegin(ac, begin, sizeof(begin));
-				CHECK(find_packet(_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP) < 0 && ac->askhelp.queue == 0 && ac->askhelp.phase == ASKHELP_WAIT_HELP,
+				CHECK(find_packet(2852) < 0 && ac->askhelp.queue == 0 && ac->askhelp.phase == ASKHELP_WAIT_HELP,
 					"askhelp: does not ask for help the instant the answer arrives, the start went to the free queue (0)");
 				uint64_t pause = ac->askhelp.next_at - now_ms();
 				CHECK(pause >= 900 && pause <= 2100, "askhelp: waits about 1 to 2 seconds before asking, like the game (1.2 s measured)");
 				ac->askhelp.next_at = 0;
 				AskHelpTick(ac);
-				CHECK(find_packet(_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP) >= 0 && ac->askhelp.phase == ASKHELP_WAIT_CANCEL_TIMER, "askhelp: then asks the alliance for help");
+				CHECK(find_packet(2852) >= 0 && ac->askhelp.phase == ASKHELP_WAIT_CANCEL_TIMER, "askhelp: then asks the alliance for help");
 				uint64_t wait = ac->askhelp.next_at - now_ms();
 				CHECK(wait >= 2900 && wait <= 4100, "askhelp: waits 3 to 4 seconds after the help request before cancelling");
 				reset_sent();
