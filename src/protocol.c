@@ -6800,6 +6800,7 @@ void RecvBuildCancel(Connection *c, const uint8_t *data, uint16_t size)
 		if (h->queue >= 0 && h->queue < BUILDING_QUEUE_SLOTS)
 			c->construction[h->queue].used = 0;
 		h->queue = -1;
+		h->retried_other = false;
 		if (h->recovering) {
 			h->recovering = false;
 			h->phase = ASKHELP_PAUSE;
@@ -6832,10 +6833,19 @@ void RecvBuildBegin(Connection *c, const uint8_t *data, uint16_t size)
 	uint16_t slot = read_u16(data), build_id = read_u16(data + 2);
 	uint8_t level = read_u8(data + 4);
 
+	// Which queue it went to: the byte right after the five stocks that end the answer (offset 37). Read from the two answers the bot
+	// got live (the farm went to queue 1 while queue 0 was empty - so it is NOT "the first free queue") and the two of the capture
+	// (queue 0): 1, 1, 0, 0, and the login lists that farm in entry 1. Without that byte the entry is guessed, and a guess is never used to cancel.
 	int at = -1;
-	for (int i = 0; i < BUILDING_QUEUE_SLOTS && at < 0; i++)
-		if (!c->construction[i].used)
-			at = i;
+	bool queue_known = false;
+	if (size >= 38 && read_u8(data + 37) < BUILDING_QUEUE_SLOTS) {
+		at = read_u8(data + 37);
+		queue_known = true;
+	} else {
+		for (int i = 0; i < BUILDING_QUEUE_SLOTS && at < 0; i++)
+			if (!c->construction[i].used)
+				at = i;
+	}
 	if (at >= 0) {
 		BuildingConstruction *q = &c->construction[at];
 		q->used = 1;
@@ -6849,8 +6859,8 @@ void RecvBuildBegin(Connection *c, const uint8_t *data, uint16_t size)
 	if (c->askhelp.active && c->askhelp.phase == ASKHELP_WAIT_BEGIN && c->askhelp.slot == slot) {
 		AskHelpState *h = &c->askhelp;
 		h->queue = (int8_t)at;
-		if (at < 0) {
-			AskHelpStop(c, "aucune file libre dans le suivi du bot : je m'arrête sans rien annuler");
+		if (at < 0 || !queue_known) {
+			AskHelpStop(c, "le serveur n'a pas dit dans quelle file la construction est entrée : je m'arrête sans rien annuler");
 		} else {
 			// The game asks for help about 1.2 s after the answer (measured on the capture, 1.2 s between 2004 and 2852), not at once.
 			h->phase = ASKHELP_WAIT_HELP;
@@ -7065,9 +7075,10 @@ void AskHelpStop(Connection *c, const char *why)
 /* What $askhelp starts: the next level of the account's low-level farm (BuildingReservedFarm), and only that - never a
  * prerequisite of it. False, with `why`, when it cannot be started now: no farm, already at its maximum, being built, a
  * prerequisite or a research short, not enough of the five basic resources, mana items needed, or both queues busy. */
-static bool AskHelpTarget(const Connection *c, uint16_t *slot, int *leftover_queue, char *why, size_t why_size)
+static bool AskHelpTarget(const Connection *c, uint16_t *slot, int *leftover_queue, uint64_t shortfall[5], char *why, size_t why_size)
 {
 	*leftover_queue = -1;
+	for (int i = 0; i < 5; i++) shortfall[i] = 0;
 	int idx = BuildingReservedFarm(c);
 	if (idx < 0) { snprintf(why, why_size, "Le compte n'a aucune ferme."); return false; }
 
@@ -7099,10 +7110,12 @@ static bool AskHelpTarget(const Connection *c, uint16_t *slot, int *leftover_que
 		return false;
 	}
 	if (row->cost[5] || row->cost[6] || row->cost[7]) { snprintf(why, why_size, "La ferme gardée demande des objets de mana."); return false; }
-	if (c->resources.food < row->cost[0] || c->resources.rock < row->cost[1] || c->resources.wood < row->cost[2]
-		|| c->resources.ore < row->cost[3] || c->resources.gold < row->cost[4]) {
-		snprintf(why, why_size, "Pas assez de ressources pour monter la ferme gardée.");
-		return false;
+	// What the stock lacks for that level (the plain start takes nothing from the bag): the tick covers it from the bag's resource items.
+	const int64_t stock[5] = { c->resources.food, c->resources.rock, c->resources.wood, c->resources.ore, c->resources.gold };
+	for (int i = 0; i < 5; i++) {
+		uint64_t have = stock[i] > 0 ? (uint64_t)stock[i] : 0;
+		if (have < row->cost[i])
+			shortfall[i] = row->cost[i] - have;
 	}
 
 	int busy = 0;
@@ -7120,12 +7133,13 @@ bool AskHelpStart(Connection *c, const char *requester, uint16_t total, char *er
 	AskHelpState *h = &c->askhelp;
 	uint16_t slot;
 	int leftover;
+	uint64_t shortfall[5];
 	char why[160];
 
 	if (h->active) { snprintf(error, error_size, "Une série est déjà en cours (%u/%u).", h->done, h->total); return false; }
 	if (!c->construction_loaded || c->building_count == 0) { snprintf(error, error_size, "Les bâtiments et les files de construction ne sont pas encore reçus du serveur."); return false; }
 	if (MarchesPaused()) { snprintf(error, error_size, "Le bot est en pause après un rappel."); return false; }
-	if (!AskHelpTarget(c, &slot, &leftover, why, sizeof(why))) { snprintf(error, error_size, "%s", why); return false; }
+	if (!AskHelpTarget(c, &slot, &leftover, shortfall, why, sizeof(why))) { snprintf(error, error_size, "%s", why); return false; }
 
 	memset(h, 0, sizeof(*h));
 	h->active = true;
@@ -7161,9 +7175,41 @@ void AskHelpTick(Connection *c)
 			return;
 		uint16_t slot;
 		int leftover;
+		uint64_t shortfall[5];
 		char why[160];
-		if (!AskHelpTarget(c, &slot, &leftover, why, sizeof(why))) {
+		if (!AskHelpTarget(c, &slot, &leftover, shortfall, why, sizeof(why))) {
 			AskHelpStop(c, why);
+			return;
+		}
+		if (leftover < 0 && (shortfall[0] || shortfall[1] || shortfall[2] || shortfall[3] || shortfall[4])) {
+			// The stock lacks something for that level. The game covers it with the bag's resource items on its own; the
+			// plain start does not, so the bot does it: only what is missing, only if the bag can cover all of it, a few
+			// times at most per series (the cancel gives the cost back, so once is normally enough).
+			BagUse plan[5][BAG_PLAN_MAX];
+			int used[5] = { 0, 0, 0, 0, 0 };
+			char detail[300] = "";
+			size_t n = 0;
+			bool coverable = h->topups < 5;
+			const int64_t stock[5] = { c->resources.food, c->resources.rock, c->resources.wood, c->resources.ore, c->resources.gold };
+			for (int i = 0; i < 5; i++) {
+				if (!shortfall[i]) continue;
+				used[i] = BagPlan(c, (ResourceType)i, shortfall[i], plan[i]);
+				if (used[i] < 0) coverable = false;
+				n += (size_t)snprintf(detail + n, sizeof(detail) - n, "%s%s : il manque %llu (stock %lld, sac %llu)", n ? " ; " : "",
+					RESOURCE_LABEL_FR[i], (unsigned long long)shortfall[i], (long long)stock[i], (unsigned long long)BagTotal(c, (ResourceType)i));
+			}
+			if (!coverable) {
+				char text[400];
+				snprintf(text, sizeof(text), h->topups >= 5 ? "toujours à court après 5 compléments depuis le sac (%s)" : "pas assez de ressources pour la ferme gardée, le sac ne suffit pas (%s)", detail);
+				AskHelpStop(c, text);
+				return;
+			}
+			for (int i = 0; i < 5; i++)
+				if (used[i] > 0)
+					BagApply(c, plan[i], used[i], (ResourceType)i);
+			h->topups++;
+			LOGI("[AIDE] Ressources complétées depuis le sac pour la ferme : %s\n", detail);
+			h->next_at = now + 3000 + (uint64_t)(rand() % 1500);   // the server has to credit them
 			return;
 		}
 		if (leftover >= 0) {
@@ -7189,6 +7235,7 @@ void AskHelpTick(Connection *c)
 		h->slot = slot;
 		h->build_id = BUILD_ID_FARM;
 		h->queue = -1;
+		h->retried_other = false;
 		RequestBuildStart(c, slot, BUILD_ID_FARM);
 		h->phase = ASKHELP_WAIT_BEGIN;
 		h->phase_since = now;
@@ -7211,8 +7258,23 @@ void AskHelpTick(Connection *c)
 		h->phase_since = now;
 		return;
 	case ASKHELP_WAIT_CANCEL_ANSWER:
-		if (now - h->phase_since > 10000)
+		if (now - h->phase_since > 10000) {
+			// No answer: the server ignores a cancel of an empty queue, so the construction may be in the other one. That one is
+			// tried - once, and only when the bot has nothing known running there, so it can only be the farm this series started.
+			int other = h->queue == 0 ? 1 : 0;
+			if (!h->retried_other && h->queue >= 0 && h->queue < BUILDING_QUEUE_SLOTS && other < BUILDING_QUEUE_SLOTS
+				&& !c->construction[other].used) {
+				LOGW("[AIDE] Pas de réponse à l'annulation de la file %d : j'essaie l'autre file (%d), où le bot ne connaît rien\n", h->queue, other);
+				c->construction[other] = c->construction[h->queue];
+				c->construction[h->queue].used = 0;
+				h->queue = (int8_t)other;
+				h->retried_other = true;
+				RequestBuildCancel(c, (uint8_t)other);
+				h->phase_since = now;
+				return;
+			}
 			AskHelpStop(c, "pas de réponse du serveur à l'annulation");
+		}
 		return;
 	case ASKHELP_WAIT_HELP:
 		if (now < h->next_at)

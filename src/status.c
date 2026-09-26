@@ -92,9 +92,12 @@ void StatusWrite(Connection *c, bool connected)
 
 	fprintf(f, "\"resources\":{\"food\":%u,\"rock\":%u,\"wood\":%u,\"ore\":%u,\"gold\":%u},",
 		c->resources.food, c->resources.rock, c->resources.wood, c->resources.ore, c->resources.gold);
-	fprintf(f, "\"bag\":{\"food\":%u,\"rock\":%u,\"wood\":%u,\"ore\":%u,\"gold\":%u},",
-		c->bag_resources.food, c->bag_resources.rock, c->bag_resources.wood, c->bag_resources.ore,
-		c->bag_resources.gold);
+	// The bag is the resource items (packs of 3K, 10K... 60M) the account holds: BagTotal adds up their values. This used to
+	// print Connection.bag_resources, a field nothing ever filled, so the console's "Sac" was always 0.
+	fprintf(f, "\"bag\":{\"food\":%llu,\"rock\":%llu,\"wood\":%llu,\"ore\":%llu,\"gold\":%llu},",
+		(unsigned long long)BagTotal(c, RESOURCE_FOOD), (unsigned long long)BagTotal(c, RESOURCE_ROCK),
+		(unsigned long long)BagTotal(c, RESOURCE_WOOD), (unsigned long long)BagTotal(c, RESOURCE_ORE),
+		(unsigned long long)BagTotal(c, RESOURCE_GOLD));
 	fprintf(f, "\"production\":{\"food\":%lld,\"rock\":%lld,\"wood\":%lld,\"ore\":%lld,\"gold\":%lld},",
 		(long long)c->production.food, (long long)c->production.rock, (long long)c->production.wood,
 		(long long)c->production.ore, (long long)c->production.gold);

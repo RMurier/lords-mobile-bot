@@ -1556,6 +1556,68 @@ int main(void)
 			free(ac);
 		}
 
+		/* the queue a start went to is read from the answer (byte 37), not guessed: live, the farm went to queue 1 with queue 0 empty */
+		{
+			/* the bot's own answer at 13:30:21, farm slot 57584 to level 13: the byte after the gold is 01 */
+			static const uint8_t live_begin_q1[] = {
+				0xf0, 0xe0, 0x04, 0x00, 0x0d, 0xec, 0xc8, 0xb7, 0x6a, 0x00, 0x00, 0x00, 0x00, 0x1e, 0x08, 0x00, 0x00,
+				0x30, 0x38, 0x05, 0x03, 0x96, 0x01, 0x00, 0x00, 0xe5, 0xc2, 0x8d, 0x77, 0x71, 0xa7, 0x01, 0x00,
+				0x54, 0xc6, 0x43, 0x01, 0x01, 0x00, 0x00 };
+			Connection *qc = fresh("boss");
+			qc->building_count = 1;
+			qc->building[0] = (BuildingInfo){ .position_id = 57584, .build_id = 4, .level = 12 };
+			qc->construction_loaded = true;
+			qc->construction_extra_expires = INT64_MAX;
+			RecvBuildBegin(qc, live_begin_q1, sizeof(live_begin_q1));
+			CHECK(qc->construction[1].used && qc->construction[1].slot == 57584 && !qc->construction[0].used,
+				"build: the answer's queue byte (1) puts the farm in queue 1 although queue 0 is empty");
+			free(qc);
+
+			/* askhelp cancels that queue, never the guessed one; a cancel that gets no answer is tried once on the other queue */
+			qc = fresh("boss");
+			qc->resources.food = qc->resources.rock = qc->resources.wood = qc->resources.ore = qc->resources.gold = 1000000000LL;
+			qc->building_count = 2;
+			qc->building[0] = (BuildingInfo){ .position_id = 57584, .build_id = 4, .level = 12 };
+			qc->building[1] = (BuildingInfo){ .position_id = 51, .build_id = 8, .level = 13 };
+			qc->construction_loaded = true;
+			qc->construction_extra_expires = INT64_MAX;
+			char error[200];
+			AskHelpStart(qc, "boss", 2, error, sizeof(error));
+			qc->askhelp.next_at = 0;
+			AskHelpTick(qc);
+			reset_sent();
+			RecvBuildBegin(qc, live_begin_q1, sizeof(live_begin_q1));
+			CHECK(qc->askhelp.queue == 1, "askhelp: the series takes the queue from the answer (1)");
+			qc->askhelp.next_at = 0;
+			AskHelpTick(qc);     /* help */
+			qc->askhelp.next_at = 0;
+			reset_sent();
+			AskHelpTick(qc);     /* cancel */
+			int at = find_packet(2006);
+			CHECK(at >= 0 && sent[at][8] == 1, "askhelp: cancels queue 1, where the answer said the farm is");
+
+			/* no answer: the other queue, once */
+			qc->askhelp.phase_since = 1;
+			reset_sent();
+			AskHelpTick(qc);
+			at = find_packet(2006);
+			CHECK(at >= 0 && sent[at][8] == 0 && qc->askhelp.retried_other && qc->askhelp.active, "askhelp: a cancel without answer is tried once on the other queue");
+			qc->askhelp.phase_since = 1;
+			reset_sent();
+			AskHelpTick(qc);
+			CHECK(!qc->askhelp.active && find_packet(2006) < 0, "askhelp: and then it stops, without a third try");
+
+			/* an answer without the queue byte: the series stops and cancels nothing */
+			qc->construction[0].used = qc->construction[1].used = 0;
+			AskHelpStart(qc, "boss", 2, error, sizeof(error));
+			qc->askhelp.next_at = 0;
+			AskHelpTick(qc);
+			reset_sent();
+			RecvBuildBegin(qc, live_begin_q1, 17);
+			CHECK(!qc->askhelp.active && find_packet(2006) < 0, "askhelp: an answer that does not say the queue stops the series, nothing cancelled");
+			free(qc);
+		}
+
 		/* a farm left under construction by a series cut short is cancelled first, then the series goes on */
 		{
 			Connection *lc = fresh("boss");
@@ -1601,6 +1663,41 @@ int main(void)
 			AskHelpTick(lc);
 			CHECK(find_packet(2006) < 0 && find_packet(2003) >= 0, "askhelp: another building under construction is never cancelled, the farm is started in the free queue");
 			free(lc);
+		}
+
+		/* the farm's cost is covered from the bag when the stock lacks some, once, and the series goes on */
+		{
+			Connection *sc = fresh("boss");
+			sc->resources.food = sc->resources.wood = sc->resources.ore = sc->resources.gold = 1000000000LL;
+			sc->resources.rock = 4375;   /* the farm to level 13 asks 13,675 stone: 9,300 short */
+			sc->building_count = 2;
+			sc->building[0] = (BuildingInfo){ .position_id = 50, .build_id = 4, .level = 12 };
+			sc->building[1] = (BuildingInfo){ .position_id = 51, .build_id = 8, .level = 13 };
+			sc->construction_loaded = true;
+			sc->construction_extra_expires = INT64_MAX;
+			char error[200];
+			CHECK(AskHelpStart(sc, "boss", 2, error, sizeof(error)), "askhelp: a stock that lacks some stone does not refuse the series at once");
+
+			sc->items[STONE_10K].quantity = 0;
+			reset_sent();
+			sc->askhelp.next_at = 0;
+			AskHelpTick(sc);
+			CHECK(!sc->askhelp.active && find_packet(2003) < 0 && replied("pierre") && replied("sac 0"),
+				"askhelp: with nothing in the bag it stops, and names the resource, what is missing, the stock and the bag");
+
+			sc->resources.rock = 4375;
+			sc->items[STONE_10K].quantity = 1;
+			CHECK(AskHelpStart(sc, "boss", 2, error, sizeof(error)), "askhelp: a series can start again");
+			reset_sent();
+			sc->askhelp.next_at = 0;
+			AskHelpTick(sc);
+			CHECK(find_packet(1406) >= 0 && find_packet(2003) < 0 && sc->resources.rock >= 13675 && sc->items[STONE_10K].quantity == 0 && sc->askhelp.topups == 1,
+				"askhelp: a 10K stone pack from the bag covers the missing stone, nothing is started yet");
+			reset_sent();
+			sc->askhelp.next_at = 0;
+			AskHelpTick(sc);
+			CHECK(find_packet(2003) >= 0, "askhelp: once the stone is credited the farm is started");
+			free(sc);
 		}
 
 		/* the farm kept at a low level: never upgraded by the automatic construction */

@@ -109,6 +109,12 @@ class BuildSettings(unittest.TestCase):
         for key in ("B.buildings", "B.queue", "auto.types", "auto.plan", "auto.state"):
             self.assertIn(key, app_js)
 
+    def test_the_bag_shown_is_computed_from_the_items(self):
+        # it used to print a field nothing filled: the console's "Sac" was always 0
+        status_c = (REPO / "src" / "status.c").read_text(encoding="utf-8")
+        self.assertIn("BagTotal(c, RESOURCE_ROCK)", status_c)
+        self.assertNotIn("c->bag_resources.food", status_c)
+
 
 if __name__ == "__main__":
     unittest.main()

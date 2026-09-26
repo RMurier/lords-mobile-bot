@@ -949,6 +949,8 @@ typedef struct {
 	uint16_t       slot;            // the building being started / cancelled
 	uint16_t       build_id;
 	int8_t         queue;           // the queue entry the start went to, -1 = not known yet
+	uint8_t        topups;          // times the bag was used to cover the farm's cost during this series
+	bool           retried_other;   // the cancel got no answer and was tried on the other queue once
 	bool           recovering;      // the cancel in flight is of the farm a previous series left under construction: not a cycle
 	uint64_t       phase_since;     // now_ms()
 	uint64_t       next_at;         // now_ms(): when the current wait ends
@@ -1378,7 +1380,7 @@ typedef struct {
 	AppInfo app;
 	// resources 
 	ResourceStock resources;      // current resources
-	ResourceStock bag_resources;  // consumable resource items
+	ResourceStock bag_resources;  // UNUSED: nothing fills it - the bag is read with BagTotal() (protocol.h)
 	ResourceProduction production; // Per-hour production
 	uint64_t resources_last_update;
 	
