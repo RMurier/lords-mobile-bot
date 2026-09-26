@@ -517,6 +517,14 @@ typedef struct {
      * it is still strictly closer to reality than not tracking this at all. */
     uint32_t troops_out;
     uint32_t pending_amounts[GATHER_MAX_ACTIVE_MARCHES];
+    // Same FIFO slots as pending_amounts (index into tiles[]) - lets a march coming home (or
+    // getting refused) clear that specific tile's `targeted` flag. Without this, `targeted` was
+    // only ever set to true and never back to false on the success path, so every tile gathered
+    // even once stayed permanently excluded from GatherBestUntargeted - in a crowded/small radius
+    // this starves out all the close tiles first, leaving only ever-farther untried ones to pick
+    // from, which live looked like "only gathers far-away tiles" despite free tiles sitting right
+    // next to the castle the whole time.
+    uint16_t pending_tiles[GATHER_MAX_ACTIVE_MARCHES];
     uint8_t  pending_head;
     uint8_t  pending_count;
 

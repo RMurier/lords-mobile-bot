@@ -4082,32 +4082,41 @@ void RequestValhallaDivineRevive(Connection *c) {
 }
 
 // FIFO of troops committed to gather marches still out - see GatherSettings' comment.
-static void GatherQueuePush(Connection *c, uint32_t amount) {
+static void GatherQueuePush(Connection *c, uint32_t amount, uint16_t tile_index) {
 	if (c->gather.pending_count >= GATHER_MAX_ACTIVE_MARCHES) return; // should not happen (bounded by player.max_marches well under this); drop rather than overflow
 	uint8_t idx = (uint8_t)((c->gather.pending_head + c->gather.pending_count) % GATHER_MAX_ACTIVE_MARCHES);
 	c->gather.pending_amounts[idx] = amount;
+	c->gather.pending_tiles[idx] = tile_index;
 	c->gather.pending_count++;
 	c->gather.troops_out += amount;
 }
 
 // Undo the optimistic push right after a march is refused - the troops never actually left,
-// so this removes the entry we JUST pushed (the back of the queue), not the oldest one.
+// so this removes the entry we JUST pushed (the back of the queue), not the oldest one. The
+// march never actually went out, so the tile it was headed for is free again immediately -
+// see pending_tiles' comment.
 static void GatherQueuePopBack(Connection *c) {
 	if (c->gather.pending_count == 0) return;
 	c->gather.pending_count--;
 	uint8_t idx = (uint8_t)((c->gather.pending_head + c->gather.pending_count) % GATHER_MAX_ACTIVE_MARCHES);
 	uint32_t amount = c->gather.pending_amounts[idx];
+	uint16_t tile_index = c->gather.pending_tiles[idx];
 	c->gather.troops_out -= (c->gather.troops_out >= amount) ? amount : c->gather.troops_out;
+	if (tile_index < c->gather.tile_count) c->gather.tiles[tile_index].targeted = false;
 }
 
-// A march came home - credit back whichever amount was sent first (oldest still out). Not
-// necessarily THIS march's real amount (see GatherSettings' comment), but the best available.
+// A march came home - credit back whichever amount was sent first (oldest still out), and free
+// that entry's tile back up for GatherBestUntargeted (see pending_tiles' comment). Not
+// necessarily THIS march's real tile/amount (see GatherSettings' comment) if returns arrive out
+// of order, but the best available guess.
 static void GatherQueuePopFront(Connection *c) {
 	if (c->gather.pending_count == 0) return;
 	uint32_t amount = c->gather.pending_amounts[c->gather.pending_head];
+	uint16_t tile_index = c->gather.pending_tiles[c->gather.pending_head];
 	c->gather.pending_head = (uint8_t)((c->gather.pending_head + 1) % GATHER_MAX_ACTIVE_MARCHES);
 	c->gather.pending_count--;
 	c->gather.troops_out -= (c->gather.troops_out >= amount) ? amount : c->gather.troops_out;
+	if (tile_index < c->gather.tile_count) c->gather.tiles[tile_index].targeted = false;
 }
 
 void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size) {
@@ -4358,7 +4367,7 @@ void GatherTick(Connection *c) {
 		}
 
 		RequestGatherMarch(c, t->zone_id, t->point_id, chosen_kind, count);
-		GatherQueuePush(c, count);
+		GatherQueuePush(c, count, c->gather.pending_tile);
 		c->gather.pending_tile = GATHER_NO_PENDING_TILE;
 		c->gather.next_march_at = GatherHumanDelay(); // one march per delay, never several back to back
 
