@@ -407,6 +407,12 @@ typedef struct {
 // Upper bound on gather marches ever in flight at once (player.max_marches is a uint8_t in
 // practice well under this with any realistic VIP/buff level) - sizes the FIFO queue below.
 #define GATHER_MAX_ACTIVE_MARCHES 16
+// After a refused march, leave that tile alone this long: without it the same (nearest) tile was
+// re-picked every ~2s with the exact same troop count, refused every time, forever.
+#define GATHER_TILE_REFUSAL_COOLDOWN_MS (60 * 1000)
+// This many refusals in a row (necessarily on different tiles by then, given the cooldown) point at
+// the troop count rather than tile occupancy: the learned cap below is then cut in half.
+#define GATHER_REFUSALS_BEFORE_SHRINK 3
 // How often to redo the full tile scan - see gather.next_rescan_at's comment. 5 minutes: frequent
 // enough that a freed-up tile is not missed for long, rare enough not to spam RequestMapData.
 #define GATHER_RESCAN_INTERVAL_MS (5 * 60 * 1000)
@@ -422,6 +428,7 @@ typedef enum {
 typedef struct {
     bool     used;
     bool     targeted;     // a march is already out (or was) for this tile
+    uint64_t refused_until; // now_ms() deadline: skip this tile after the server refused a march to it
     uint16_t zone_id;
     uint8_t  point_id;
     uint8_t  resource_kind; // GatherResourceKind
@@ -473,8 +480,8 @@ typedef struct {
     uint32_t max_troop_count; // never send more troops than this in one gather march (0 = no cap)
 
     /* Which of the 4 troop-count slots RequestGatherMarch fills, tried in this order: the
-     * first kind with troops actually free right now wins for that march (e.g. infantry
-     * first, fall back to ranged if infantry is out) - see GatherTick's comment. Tier choice
+     * first kind is used up first and the next ones top the same march up when it is not
+     * enough (e.g. infantry first, ranged for the remainder) - see GatherTick's comment. Tier choice
      * within whichever kind is picked is left to the server's own auto-pick (troop_type_id/
      * the per-slot tag - always 0 in every capture so far, and it picked this account's
      * lowest available tier on its own, e.g. T2 when T1 was empty - so this is not
@@ -516,7 +523,12 @@ typedef struct {
      * request that gets refused (same failure mode as today), never anything destructive, and
      * it is still strictly closer to reality than not tracking this at all. */
     uint32_t troops_out;
-    uint32_t pending_amounts[GATHER_MAX_ACTIVE_MARCHES];
+    /* Same ledger split per troop kind (TroopKind index, 0-3): what is still out, per kind. The
+     * free stock of a kind is its own total minus ITS OWN out amount - subtracting the all-kinds
+     * troops_out from one kind's total (what this used to do) hid troops that were really free
+     * whenever a different kind was the one out. Tracks what was actually sent, never a guess. */
+    uint32_t troops_out_by_kind[4];
+    uint32_t pending_amounts[GATHER_MAX_ACTIVE_MARCHES][4]; // per march, per troop kind: one march can mix kinds
     // Same FIFO slots as pending_amounts (index into tiles[]) - lets a march coming home (or
     // getting refused) clear that specific tile's `targeted` flag. Without this, `targeted` was
     // only ever set to true and never back to false on the success path, so every tile gathered
@@ -531,6 +543,13 @@ typedef struct {
     GatherTile tiles[GATHER_MAX_TILES];
     uint16_t   tile_count;
     time_t     last_status_log; // throttles the periodic "N tiles known" log line
+
+    /* Per-march troop cap learned from refusals (0 = none learned yet). The server refuses (code 2)
+     * a march bigger than the commander's march capacity, and the bot has no way to read that
+     * capacity, so it converges on it instead: halved after GATHER_REFUSALS_BEFORE_SHRINK refusals
+     * in a row, raised 25% after each accepted march to keep probing upward. */
+    uint32_t learned_max_troops;
+    uint32_t last_sent_count;      // troop count of the most recent march request, for the above
 
     uint16_t consecutive_refusals; // resets on any accepted march; see GATHER_REFUSAL_WARN_THRESHOLD
     bool     refusal_warned;       // one warning per streak, not one per refusal

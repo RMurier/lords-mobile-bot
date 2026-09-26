@@ -133,6 +133,7 @@ void NotifyDiscord(Connection *c, const char *message);
 
 void RequestMapData(Connection *c, uint16_t zone_id);
 void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint8_t kind, uint32_t troop_count);
+void RequestGatherMarchMixed(Connection *c, uint16_t zone_id, uint8_t point_id, const uint32_t counts[4]);
 void RequestGatherRecall(Connection *c, uint32_t march_id);
 
 /* $recall: take every march back, then send none for recall.pause_seconds (5 minutes by default). The pause

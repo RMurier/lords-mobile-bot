@@ -492,14 +492,19 @@ gather.radius = 30
 gather.max_troop_count = 0
 ```
 
-A gather march only ever uses **one** troop kind at a time - confirmed from live captures, the request is 4 fixed slots (one per
-kind), not a single "pick a tier" field. `gather.kind` is a priority list: the first kind with troops actually free right now wins
-for that march, falling back to the next one otherwise (e.g. infantry first, ranged if infantry is out) - if every kind in the list
-is empty, the march waits (~30s backoff, logged) instead of retrying every tick. Which *tier* gets used within the chosen kind is
+A gather march is 4 fixed slots (one per troop kind). `gather.kind` is a priority list: the march is filled from the first
+kind's free troops, and when that is not enough for what the tile needs, the next kinds top it up in the same march (e.g.
+infantry first, then ranged for the remainder) - only what each kind really has free is sent, never more. What is out on
+marches is tracked per kind. If every kind in the list is empty, the march waits (~30s backoff, logged) instead of retrying
+every tick. Which *tier* gets used within the chosen kind is
 left to the server's own auto-pick (confirmed live: it already picks the account's lowest available tier on its own, e.g. T2 when
 T1 is empty) - not something this bot chooses. The troop *count* per march is still an experimental estimate
 (`GATHER_DEFAULT_TROOP_CAPACITY`, one captured sample) - it can ask for far more than you have; `gather.max_troop_count` (0 = no
 cap) and the chosen kind's own known troop total both cap it, whichever is lower.
+
+If the server refuses a march ("Marche refusée"), that tile is left alone for 60s, and after 3 refusals in a row the bot 
+halves its per-march troop cap (learned at runtime, raised 25% after each accepted march) - a refusal with code 2 on a free tile 
+usually means the march is bigger than your commander's march capacity. Set `gather.max_troop_count` to your real capacity to skip the learning phase.
 
 Also skips any tile currently occupied (confirmed live: an occupied tile's map data embeds the occupier's name and alliance tag)
 - it is never targeted until it shows free again. If every known tile is occupied, the bot says so (with how many) and backs off

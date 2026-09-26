@@ -4001,6 +4001,13 @@ static bool GatherZoneAt(Connection *c, uint16_t index, uint16_t *zone_out) {
 static const char *TROOP_KIND_NAMES[4] = {"infanterie", "distance", "cavalerie", "siege"};
 
 void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint8_t kind, uint32_t troop_count) {
+	uint32_t counts[4] = { 0, 0, 0, 0 };
+	counts[kind & 3] = troop_count;
+	RequestGatherMarchMixed(c, zone_id, point_id, counts);
+}
+
+// Same request with a count in each of the 4 kind slots - one march can carry several kinds at once.
+void RequestGatherMarchMixed(Connection *c, uint16_t zone_id, uint8_t point_id, const uint32_t counts[4]) {
 	if (MarchesPaused()) {
 		LOGW("[RECALL] Marche de récolte non envoyée : marches suspendues\n");
 		return;
@@ -4013,7 +4020,7 @@ void RequestGatherMarch(Connection *c, uint16_t zone_id, uint8_t point_id, uint8
 
 	for (uint8_t slot = 0; slot < 4; slot++) {
 		write_zero(c->data + c->size, 2); c->size += 2;                    // per-slot tag: unconfirmed meaning, 0 in every sample
-		write_u32(c->data + c->size, slot == kind ? troop_count : 0); c->size += 4;
+		write_u32(c->data + c->size, counts[slot]); c->size += 4;
 		uint32_t tail = (slot == 3) ? 8 : 10;
 		write_zero(c->data + c->size, tail); c->size += tail;
 	}
@@ -4082,13 +4089,25 @@ void RequestValhallaDivineRevive(Connection *c) {
 }
 
 // FIFO of troops committed to gather marches still out - see GatherSettings' comment.
-static void GatherQueuePush(Connection *c, uint32_t amount, uint16_t tile_index) {
+static void GatherQueuePush(Connection *c, const uint32_t amounts[4], uint16_t tile_index) {
 	if (c->gather.pending_count >= GATHER_MAX_ACTIVE_MARCHES) return; // should not happen (bounded by player.max_marches well under this); drop rather than overflow
 	uint8_t idx = (uint8_t)((c->gather.pending_head + c->gather.pending_count) % GATHER_MAX_ACTIVE_MARCHES);
-	c->gather.pending_amounts[idx] = amount;
 	c->gather.pending_tiles[idx] = tile_index;
 	c->gather.pending_count++;
-	c->gather.troops_out += amount;
+	for (uint8_t k = 0; k < 4; k++) {
+		c->gather.pending_amounts[idx][k] = amounts[k];
+		c->gather.troops_out += amounts[k];
+		c->gather.troops_out_by_kind[k] += amounts[k];
+	}
+}
+
+// Credit a finished/undone march's troops back to both ledgers (total and per kind).
+static void GatherCreditBack(Connection *c, const uint32_t amounts[4]) {
+	for (uint8_t k = 0; k < 4; k++) {
+		c->gather.troops_out -= (c->gather.troops_out >= amounts[k]) ? amounts[k] : c->gather.troops_out;
+		uint32_t *out = &c->gather.troops_out_by_kind[k];
+		*out -= (*out >= amounts[k]) ? amounts[k] : *out;
+	}
 }
 
 // Undo the optimistic push right after a march is refused - the troops never actually left,
@@ -4099,10 +4118,12 @@ static void GatherQueuePopBack(Connection *c) {
 	if (c->gather.pending_count == 0) return;
 	c->gather.pending_count--;
 	uint8_t idx = (uint8_t)((c->gather.pending_head + c->gather.pending_count) % GATHER_MAX_ACTIVE_MARCHES);
-	uint32_t amount = c->gather.pending_amounts[idx];
 	uint16_t tile_index = c->gather.pending_tiles[idx];
-	c->gather.troops_out -= (c->gather.troops_out >= amount) ? amount : c->gather.troops_out;
-	if (tile_index < c->gather.tile_count) c->gather.tiles[tile_index].targeted = false;
+	GatherCreditBack(c, c->gather.pending_amounts[idx]);
+	if (tile_index < c->gather.tile_count) {
+		c->gather.tiles[tile_index].targeted = false;
+		c->gather.tiles[tile_index].refused_until = now_ms() + GATHER_TILE_REFUSAL_COOLDOWN_MS;
+	}
 }
 
 // A march came home - credit back whichever amount was sent first (oldest still out), and free
@@ -4111,11 +4132,10 @@ static void GatherQueuePopBack(Connection *c) {
 // of order, but the best available guess.
 static void GatherQueuePopFront(Connection *c) {
 	if (c->gather.pending_count == 0) return;
-	uint32_t amount = c->gather.pending_amounts[c->gather.pending_head];
 	uint16_t tile_index = c->gather.pending_tiles[c->gather.pending_head];
+	GatherCreditBack(c, c->gather.pending_amounts[c->gather.pending_head]);
 	c->gather.pending_head = (uint8_t)((c->gather.pending_head + 1) % GATHER_MAX_ACTIVE_MARCHES);
 	c->gather.pending_count--;
-	c->gather.troops_out -= (c->gather.troops_out >= amount) ? amount : c->gather.troops_out;
 	if (tile_index < c->gather.tile_count) c->gather.tiles[tile_index].targeted = false;
 }
 
@@ -4129,7 +4149,16 @@ void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size) {
 		if (c->gather.active_marches > 0) c->gather.active_marches--; // undo the optimistic count at send time
 		GatherQueuePopBack(c); // and undo the optimistic troops_out push from the same send
 
-		if (++c->gather.consecutive_refusals >= GATHER_REFUSAL_WARN_THRESHOLD && !c->gather.refusal_warned) {
+		++c->gather.consecutive_refusals;
+		if (c->gather.consecutive_refusals % GATHER_REFUSALS_BEFORE_SHRINK == 0 && c->gather.last_sent_count > 1) {
+			uint32_t base = c->gather.learned_max_troops && c->gather.learned_max_troops < c->gather.last_sent_count
+				? c->gather.learned_max_troops : c->gather.last_sent_count;
+			c->gather.learned_max_troops = base / 2 > 0 ? base / 2 : 1;
+			LOGW("[GATHER] %u refus d'affilée : plafond de troupes par marche ramené à %u (le serveur "
+				"refuse probablement une marche plus grosse que la capacité du commandant)\n",
+				c->gather.consecutive_refusals, c->gather.learned_max_troops);
+		}
+		if (c->gather.consecutive_refusals >= GATHER_REFUSAL_WARN_THRESHOLD && !c->gather.refusal_warned) {
 			c->gather.refusal_warned = true;
 			// Confirmed live (manual in-game check) that a run of refusals across different
 			// tiles CAN genuinely be "already taken" one after another - high-level tiles
@@ -4148,6 +4177,10 @@ void RecvGatherMarchResp(Connection *c, const uint8_t *data, uint16_t size) {
 
 	c->gather.consecutive_refusals = 0;
 	c->gather.refusal_warned = false;
+	if (c->gather.learned_max_troops) {
+		uint32_t up = c->gather.learned_max_troops + c->gather.learned_max_troops / 4 + 1;
+		c->gather.learned_max_troops = up;
+	}
 	c->player.current_marches++;
 	LOGD("[GATHER] Marche #%u acceptée\n", march_id);
 }
@@ -4215,6 +4248,7 @@ static GatherTile *GatherBestUntargeted(Connection *c) {
 	for (uint16_t i = 0; i < c->gather.tile_count; i++) {
 		GatherTile *t = &c->gather.tiles[i];
 		if (t->targeted) continue;
+		if (t->refused_until > now_ms()) continue; // server just refused a march here - see GATHER_TILE_REFUSAL_COOLDOWN_MS
 		if (t->occupied) continue; // someone else is already gathering it - see GatherTile's comment
 
 		map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
@@ -4250,6 +4284,8 @@ static uint32_t GatherTroopCount(const Connection *c, uint32_t amount) {
 
 	if (c->gather.max_troop_count > 0 && count > c->gather.max_troop_count)
 		count = c->gather.max_troop_count;
+	if (c->gather.learned_max_troops > 0 && count > c->gather.learned_max_troops)
+		count = c->gather.learned_max_troops;
 
 	return count;
 }
@@ -4312,22 +4348,29 @@ void GatherTick(Connection *c) {
 		uint32_t raw_count = GatherTroopCount(c, t->amount); // tile-formula estimate, capped to gather.max_troop_count if set
 
 		uint32_t count = raw_count;
-		uint32_t available = 0;
-		uint32_t kind_total = 0;
-		uint8_t  chosen_kind = c->gather.kind_priority_count ? c->gather.kind_priority[0] : TROOP_INFANTRY;
+		uint32_t available = 0;   // free troops across every configured kind, for the log
+		uint32_t counts[4] = { 0, 0, 0, 0 };
 		bool troop_capped = false;
 		bool have_kind = !c->troop.loaded; // no baseline yet: skip the whole check, same as before
 
-		// raw_count has no idea how many troops the account actually has free right now - it is
-		// purely the tile's stock divided by an unverified per-troop capacity constant, optionally
-		// capped by the admin's own known max_troop_count. Try kind_priority in order and use the
-		// first kind that actually has troops free (its total, every tier combined, minus
-		// troops_out already committed to marches still out - see GatherSettings' comment) - e.g.
-		// fall back to ranged if infantry is out. Tier choice within that kind is left to the
-		// server's own auto-pick (see kind_priority's comment).
-		if (c->troop.loaded) {
-			for (uint8_t i = 0; i < c->gather.kind_priority_count && !have_kind; i++) {
-				uint8_t kind = c->gather.kind_priority[i];
+		if (!c->troop.loaded) {
+			counts[c->gather.kind_priority_count ? c->gather.kind_priority[0] & 3 : TROOP_INFANTRY] = count;
+		} else {
+			// raw_count has no idea how many troops the account actually has free right now - it
+			// is purely the tile's stock divided by an unverified per-troop capacity constant,
+			// optionally capped by the admin's own known max_troop_count. Fill it from
+			// kind_priority in order: each kind gives what it has free (its total, every tier
+			// combined, minus what is already out on marches - tracked per kind, see
+			// GatherSettings' comment), and when the first kind alone is not enough the next
+			// ones make up the difference in the same march (the request has one slot per kind).
+			// Tier choice within a kind is left to the server's own auto-pick (see kind_priority's
+			// comment).
+			uint32_t remaining = raw_count;
+			uint8_t used = 0; // bitmask, a kind listed twice is only counted once
+			for (uint8_t i = 0; i < c->gather.kind_priority_count; i++) {
+				uint8_t kind = c->gather.kind_priority[i] & 3;
+				if (used & (1u << kind)) continue;
+				used |= (uint8_t)(1u << kind);
 				const uint32_t *bucket;
 				switch (kind) {
 					case TROOP_RANGED:  bucket = c->troop.ranged;  break;
@@ -4336,14 +4379,16 @@ void GatherTick(Connection *c) {
 					default:             bucket = c->troop.infantry; break;
 				}
 				uint32_t total = bucket[0] + bucket[1] + bucket[2] + bucket[3] + c->troop.t5_data[kind];
-				uint32_t free_now = total > c->gather.troops_out ? total - c->gather.troops_out : 0;
-				if (free_now > 0) {
-					have_kind = true;
-					chosen_kind = kind;
-					kind_total = total;
-					available = free_now;
-				}
+				uint32_t out_now = c->gather.troops_out_by_kind[kind];
+				uint32_t free_now = total > out_now ? total - out_now : 0;
+				available += free_now;
+				uint32_t take = free_now < remaining ? free_now : remaining;
+				counts[kind] = take;
+				remaining -= take;
 			}
+			count = raw_count - remaining;
+			have_kind = count > 0;
+			troop_capped = remaining > 0;
 
 			if (!have_kind) {
 				// Nothing free in any priority kind right now: this is our own shortage, not the
@@ -4363,22 +4408,29 @@ void GatherTick(Connection *c) {
 					"l'instant - nouvel essai dans ~30s\n", c->gather.kind_priority_count);
 				return;
 			}
-			if (count > available) { count = available; troop_capped = true; }
 		}
 
-		RequestGatherMarch(c, t->zone_id, t->point_id, chosen_kind, count);
-		GatherQueuePush(c, count, c->gather.pending_tile);
+		RequestGatherMarchMixed(c, t->zone_id, t->point_id, counts);
+		c->gather.last_sent_count = count;
+		GatherQueuePush(c, counts, c->gather.pending_tile);
 		c->gather.pending_tile = GATHER_NO_PENDING_TILE;
 		c->gather.next_march_at = GatherHumanDelay(); // one march per delay, never several back to back
 
 		map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
+		char mix[128] = "";
+		size_t mix_len = 0;
+		for (uint8_t k = 0; k < 4 && mix_len < sizeof(mix); k++) {
+			if (counts[k] == 0) continue;
+			int n = snprintf(mix + mix_len, sizeof(mix) - mix_len, "%s%u %s", mix_len ? " + " : "", counts[k], TROOP_KIND_NAMES[k]);
+			if (n > 0) mix_len += (size_t)n;
+		}
 		if (troop_capped)
-			LOGI("[GATHER] Envoi de %u troupes %s (plafonne, %u demandees par le calcul) vers X:%u Y:%u "
-				"(niveau %u, %u en stock) - %u troupes libres sur %u de ce type au total\n",
-				count, TROOP_KIND_NAMES[chosen_kind], raw_count, pos.x, pos.y, t->level, t->amount, available, kind_total);
+			LOGI("[GATHER] Envoi de %u troupes (%s) (plafonne, %u demandees par le calcul) vers X:%u Y:%u "
+				"(niveau %u, %u en stock) - %u troupes libres au total dans les types configures\n",
+				count, mix, raw_count, pos.x, pos.y, t->level, t->amount, available);
 		else
-			LOGI("[GATHER] Envoi de %u troupes %s vers X:%u Y:%u (niveau %u, %u en stock)%s\n",
-				count, TROOP_KIND_NAMES[chosen_kind], pos.x, pos.y, t->level, t->amount,
+			LOGI("[GATHER] Envoi de %u troupes (%s) vers X:%u Y:%u (niveau %u, %u en stock)%s\n",
+				count, mix, pos.x, pos.y, t->level, t->amount,
 				c->troop.loaded ? "" : " (troupes non chargees, aucun plafond applique)");
 		return;
 	}

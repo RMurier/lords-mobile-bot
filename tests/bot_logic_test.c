@@ -1516,6 +1516,63 @@ static const uint8_t build_event_none[] = {
 		CHECK(c->gather.troops_out == 0, "gather: troops coming home are credited back to troops_out");
 		free(c);
 
+		/* a march tops up with the next kind in priority when the first is not enough, and troops out
+		 * are tracked per kind: what infantry has out never shrinks the cavalry stock */
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 2;
+		c->gather.scan_done = true;
+		c->player.max_marches = 6;
+		c->gather.kind_priority[0] = TROOP_INFANTRY;
+		c->gather.kind_priority[1] = TROOP_CAVALRY;
+		c->gather.kind_priority_count = 2;
+		c->gather.tile_count = 2;
+		c->gather.tiles[0] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 1, .level = 5, .amount = 5000 };
+		c->gather.tiles[1] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 2, .level = 4, .amount = 5000 };
+		c->troop.loaded = true;
+		c->troop.infantry[0] = 100;
+		c->troop.cavalry[0] = 70;
+		reset_sent();
+		c->gather.next_march_at = 1;
+		GatherTick(c);
+		c->gather.march_send_at = 1;
+		GatherTick(c); // wants 215: infantry gives its 100, cavalry tops up with its 70, same march
+		k = find_packet(_MSG_REQUEST_TROOPMARCH_NOTATK);
+		uint32_t inf_sent = k >= 0 ? (uint32_t)(sent[k][22 + 16*TROOP_INFANTRY] | sent[k][23 + 16*TROOP_INFANTRY] << 8) : 0;
+		uint32_t cav_sent = k >= 0 ? (uint32_t)(sent[k][22 + 16*TROOP_CAVALRY] | sent[k][23 + 16*TROOP_CAVALRY] << 8) : 0;
+		CHECK(k >= 0 && inf_sent == 100 && cav_sent == 70,
+			"gather: one march mixes kinds in priority order when the first kind is not enough");
+		CHECK(c->gather.troops_out_by_kind[TROOP_INFANTRY] == 100 && c->gather.troops_out_by_kind[TROOP_CAVALRY] == 70
+			&& c->gather.troops_out == 170, "gather: each kind's troops out are tracked separately");
+		RecvGatherTroopHome(c, NULL, 0);
+		CHECK(c->gather.troops_out == 0 && c->gather.troops_out_by_kind[TROOP_INFANTRY] == 0
+			&& c->gather.troops_out_by_kind[TROOP_CAVALRY] == 0,
+			"gather: a mixed march coming home credits back every kind it carried");
+		free(c);
+
+		/* the first kind alone is enough: nothing is taken from the next one */
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 2;
+		c->gather.scan_done = true;
+		c->player.max_marches = 6;
+		c->gather.kind_priority[0] = TROOP_INFANTRY;
+		c->gather.kind_priority[1] = TROOP_CAVALRY;
+		c->gather.kind_priority_count = 2;
+		c->gather.tile_count = 1;
+		c->gather.tiles[0] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 1, .level = 5, .amount = 5000 };
+		c->troop.loaded = true;
+		c->troop.infantry[0] = 1000;
+		c->troop.cavalry[0] = 70;
+		reset_sent();
+		c->gather.next_march_at = 1;
+		GatherTick(c);
+		c->gather.march_send_at = 1;
+		GatherTick(c);
+		CHECK(c->gather.troops_out_by_kind[TROOP_INFANTRY] == 215 && c->gather.troops_out_by_kind[TROOP_CAVALRY] == 0,
+			"gather: the second kind is left alone when the first has enough");
+		free(c);
+
 		/* a delivery already going on does not send its next march during the pause, and does after it */
 		MarchesPauseEnd();
 		c = fresh("boss");
