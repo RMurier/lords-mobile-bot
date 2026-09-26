@@ -92,6 +92,38 @@ counting down live), player name, power, kills, gems, VIP, kingdom, position, ma
 the page reads it every 4 seconds. The values are the last ones the server sent; the page says how old they are.
 If the bot is stopped, the page shows the last known values marked as offline.
 
+## Research tab
+
+Two parts. **The settings**: the automatic research (a switch, the categories to work on in priority order, and how much of each
+resource to leave alone), see [configuration.md](configuration.md#automatic-research). **Where the bot is**, refreshed every few
+seconds from what the bot reports:
+
+- the research in progress, with its progress bar and time left, and what the automatic mode is doing or why it does nothing
+  (Academy too low, prerequisites, not enough resources...);
+- the 16 categories in the order of the game's tabs, each with how many researches are finished and how many are started; the ones
+  the bot works on are marked *auto 1*, *auto 2*...; click one to open it;
+- the researches of the open category, each with its level out of its maximum, and for the ones not finished: *Prête* (the bot could start
+  it now), *Ressources* (only the stock is short), *Prérequis* with what has to be done first (a research and its level, with its category when it is another one) or *Académie* with the level it asks for,
+  plus the duration (before your speed bonuses) and cost of the next level.
+
+The names, maximum levels, costs and prerequisites come from the game's own table (`gamedata/game_research.json`, made by
+`tools/extract_game_tables.py`); the levels come from the bot. Nothing is shown until the bot has started and been sent your researches.
+
+## Construction tab
+
+The same shape as the research tab. **The settings**: the automatic construction (a switch, the buildings to work on in priority order,
+the resources to leave alone), see [configuration.md](configuration.md#automatic-construction). **Where the
+account is**, from what the bot reports (the levels follow each construction that finishes while the bot runs):
+
+- what is under construction, with its progress and time left, and what the automatic mode did or why it does nothing;
+- the buildings the automation can work on, each with how many the account has and the highest level, and *auto 1*, *auto 2*... on the chosen
+  ones; click one to open it;
+- each building of the open type: its level (`25 + mana 1, 2/5 vers mana 2`, out of 55), and for the ones not finished *Prête*, *Ressources*,
+  *Prérequis* (with the buildings to raise first and their level), *Recherche* (a research is short) or *En construction*, plus the next level's
+  duration (before speed bonuses) and cost, mana costs included, and a note when the game also asks for a step of its quests, which the bot cannot see.
+
+The names, maximum levels, costs and prerequisites come from the game's own table (`gamedata/game_buildings.json`).
+
 ## Guild bank tab
 
 Shows the [guild bank](commands.md#the-guild-bank) of the account: **every member of the guild with their balance** of food,

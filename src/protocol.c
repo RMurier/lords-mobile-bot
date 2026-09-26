@@ -1494,6 +1494,10 @@ void RecvMarchData(Connection *c, const uint8_t *data) {
 	uint16_t offset = 0;
 	c->player.max_marches     = read_u8(data + offset); offset += 1;
 	c->player.current_marches = read_u8(data + offset); offset += 1;
+	if (!c->gather.inherited_set) {
+		c->gather.inherited_set = true;
+		c->gather.inherited_marches = c->player.current_marches;
+	}
 	
 	// There is more data include troops and location 
 	
@@ -2336,7 +2340,7 @@ bool IsBuilding(uint16_t build_id)
             return true;
 
         default:
-            return false;
+            return BuildingType(build_id) != NULL; // the game's own table names every id (building_table.h)
     }
 }
 
@@ -2359,7 +2363,10 @@ const char *GetBuildingName(uint16_t build_id)
         case 14: return "Embassy";
         case 15: return "Workshop";
         case 17: return "Trading Post";
-        default: return "Unknown";
+        default: {
+            const BuildingTypeInfo *t = BuildingType(build_id); // the ids nobody had identified before the game's table was read
+            return t && t->name_en ? t->name_en : "Unknown";
+        }
     }
 }
 
@@ -3025,6 +3032,19 @@ void RecvBuildingQueue(Connection *c, const uint8_t *data, uint16_t size)
 		LOGI("[BUILD] En construction : #%u %s(emplacement %u) vers %s, durée %.1f h, reste %.1f h\n",
 			b->build_id, IsBuilding(b->build_id) ? GetBuildingName(b->build_id) : "", b->slot, level,
 			b->duration / 3600.0, BuildingConstructionSecondsLeft(b, now) / 3600.0);
+	}
+
+	// The 8 bytes after the two entries are the game's BuildingQueueData.ExpireTime: the second queue is rentable
+	// (_MSG_REQUEST_RENT_EXTRA_BUILDING_QUEUE) and has an end date. INT64_MAX = permanent - what every capture shows,
+	// on an account whose player confirmed a permanent second queue. A date in the past or 0 = no second queue: INFERRED,
+	// no capture of such an account.
+	c->construction_extra_expires = (int64_t)read_u64(data + BUILDING_QUEUE_SLOTS * BUILDING_QUEUE_ENTRY_SIZE);
+	c->construction_loaded = true;
+	{
+		int64_t now = c->server_time ? (int64_t)c->server_time : (int64_t)time(NULL);
+		LOGI("[BUILD] Deuxième file de construction : %s\n",
+			c->construction_extra_expires == INT64_MAX ? "permanente"
+			: c->construction_extra_expires > now ? "louée (encore active)" : "absente");
 	}
 }
 
@@ -4202,7 +4222,9 @@ void RecvGatherReturnResp(Connection *c, const uint8_t *data, uint16_t size) {
  * not decoded - GatherReportInfo already gives the collected amount. */
 void RecvGatherTroopHome(Connection *c, const uint8_t *data, uint16_t size) {
 	(void)data; (void)size;
-	if (c->gather.active_marches > 0) c->gather.active_marches--;
+	// The oldest march out is the first back: one inherited from before this session, if any, else ours.
+	if (c->gather.inherited_marches > 0) c->gather.inherited_marches--;
+	else if (c->gather.active_marches > 0) c->gather.active_marches--;
 	if (c->player.current_marches > 0) c->player.current_marches--;
 	GatherQueuePopFront(c); // credit the troops back as available again
 	// Re-arm the pacing: whatever next_march_at held could be long past (a slot can
@@ -4288,6 +4310,15 @@ static uint32_t GatherTroopCount(const Connection *c, uint32_t amount) {
 		count = c->gather.learned_max_troops;
 
 	return count;
+}
+
+/* Marches out from before this session still charged to the gather budget. Never more than what
+ * the live count says is not ours, so a returning delivery/manual march (which does not go through
+ * RecvGatherTroopHome) frees its share on its own. */
+static uint8_t GatherInheritedMarches(const Connection *c) {
+	uint8_t others = c->player.current_marches > c->gather.active_marches
+		? (uint8_t)(c->player.current_marches - c->gather.active_marches) : 0;
+	return c->gather.inherited_marches < others ? c->gather.inherited_marches : others;
 }
 
 void GatherTick(Connection *c) {
@@ -4437,7 +4468,7 @@ void GatherTick(Connection *c) {
 
 	uint8_t reserved = c->gather.max_marches < c->player.max_marches ? c->gather.max_marches : c->player.max_marches;
 
-	if (c->gather.active_marches >= reserved || c->player.current_marches >= c->player.max_marches)
+	if (c->gather.active_marches + GatherInheritedMarches(c) >= reserved || c->player.current_marches >= c->player.max_marches)
 		return;
 
 	// Armed on the first opportunity instead of acting right away, so the very
@@ -6020,6 +6051,241 @@ void RequestResearchStart(Connection *c, uint16_t tech_id, uint8_t level, const 
 	send_packet(c, true);
 }
 
+/* The plain start, confirmed from a capture of the PC client (research #221, level 8 -> 9, enough resources in
+ * stock so no item was used): _MSG_REQUEST_RESEARCH_EVENT_START (3202), payload seq(4), tech(2), TARGET level(1),
+ * 3 zero bytes - the same shape as the cancel. The answer is the same as the smart-use start's (3203). */
+void RequestResearchStartPlain(Connection *c, uint16_t tech_id, uint8_t level) {
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_RESEARCH_EVENT_START);  c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);               c->size += 4;
+	write_u16(c->data + c->size, tech_id);                             c->size += 2;
+	write_u8 (c->data + c->size, level);                               c->size += 1;
+	write_zero(c->data + c->size, 3);                                  c->size += 3;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/* --- category names (also used by config.c and the $research command) --- */
+
+/* Lower-case ASCII copy of `in` with the accents the French names use folded away, so "economie"
+ * finds "Économie". Anything else non-ASCII is dropped. */
+static void FoldForSearch(const char *in, char *out, size_t size)
+{
+	static const struct { unsigned char second; char plain; } FOLD[] = {
+		{0xA0,'a'},{0xA2,'a'},{0xA4,'a'},{0xA7,'c'},{0xA8,'e'},{0xA9,'e'},{0xAA,'e'},{0xAB,'e'},
+		{0xAE,'i'},{0xAF,'i'},{0xB4,'o'},{0xB6,'o'},{0xB9,'u'},{0xBB,'u'},{0xBC,'u'},
+		{0x80,'a'},{0x89,'e'},{0x88,'e'},{0x8A,'e'},
+	};
+	size_t n = 0;
+
+	for (const unsigned char *p = (const unsigned char *)in; *p && n + 1 < size; p++) {
+		if (*p < 0x80) {
+			out[n++] = (char)tolower(*p);
+		} else if (*p == 0xC3 && p[1]) {
+			for (size_t i = 0; i < sizeof(FOLD) / sizeof(FOLD[0]); i++)
+				if (FOLD[i].second == p[1]) { out[n++] = FOLD[i].plain; break; }
+			p++;
+		}
+	}
+	out[n] = 0;
+}
+
+/* Categories a query designates: its position in the game's tabs (1..16), or a piece of its French or English name. */
+size_t ResearchFindKinds(const char *query, const ResearchKindInfo **found, size_t max)
+{
+	size_t count = 0;
+	char needle[64], hay[128];
+	FoldForSearch(query, needle, sizeof(needle));
+
+	if (needle[0] == 0)
+		return 0;
+
+	char *end;
+	long number = strtol(needle, &end, 10);
+	bool is_number = (*end == 0);
+
+	// A whole name wins over a part of a name: "Military" is the Military tab, not also
+	// "Military Command" and "Upgrade Military" - the console writes the full English names.
+	for (int pass = 0; pass < 2 && count == 0; pass++) {
+		for (uint16_t i = 0; i < RESEARCH_KIND_COUNT && count < max; i++) {
+			const ResearchKindInfo *k = &RESEARCH_KINDS[i];
+			bool match = false;
+
+			if (is_number) {
+				match = (k->order == number);
+			} else {
+				FoldForSearch(k->name_fr, hay, sizeof(hay));
+				match = pass == 0 ? strcmp(hay, needle) == 0 : strstr(hay, needle) != NULL;
+				if (!match) {
+					FoldForSearch(k->name_en, hay, sizeof(hay));
+					match = pass == 0 ? strcmp(hay, needle) == 0 : strstr(hay, needle) != NULL;
+				}
+			}
+
+			if (match)
+				found[count++] = k;
+		}
+		if (is_number)
+			break;
+	}
+
+	return count;
+}
+
+/* Academy level as the game counts it for the researches: the mana levels above 25 included (the Mana Awakening
+ * researches ask for Academy 30). 0 when the building list has not arrived. */
+uint8_t AcademyLevel(const Connection *c) {
+	for (uint8_t i = 0; i < c->building_count; i++)
+		if (c->building[i].build_id == BUILDING_ACADEMY)
+			return c->building[i].level;
+	return 0;
+}
+
+/* One level of one research to start. */
+typedef struct {
+	uint16_t id;
+	uint8_t  level;
+} ResearchStep;
+
+#define RESEARCH_CHAIN_MAX 24   // deepest prerequisite chain followed (the game's longest is far shorter)
+
+/* The next step toward reaching `target` on research `id`: its next level, unless that level's prerequisites
+ * are not met, in which case the step is the one that gets a missing prerequisite closer - recursively, in any
+ * category (43 of the table's 2,365 prerequisites point to another one). The prerequisites are read per level:
+ * the table gives each level its own list, and checked against a real account (none of its reached levels breaks
+ * them). `stack` holds the (research, level) pairs being resolved, so a research that needs another which needs
+ * it back at a level not reached yet (they do exist, e.g. #14 and #15) stops instead of looping. */
+static bool ResearchResolveStep(const Connection *c, uint16_t id, uint8_t target, ResearchStep *out,
+                                uint16_t *stack_id, uint8_t *stack_level, int depth) {
+	const ResearchTechInfo *t = ResearchTech(id);
+	if (!t || t->locked || depth >= RESEARCH_CHAIN_MAX)
+		return false;
+
+	uint8_t have = ResearchLevel(&c->research, id);
+	if (have >= target || have >= t->max_level)
+		return false;
+
+	for (int i = 0; i < depth; i++)
+		if (stack_id[i] == id && stack_level[i] == target)
+			return false;
+	stack_id[depth] = id;
+	stack_level[depth] = target;
+
+	const ResearchLevelInfo *row = ResearchLevelRow(t, (uint8_t)(have + 1));
+	for (int r = 0; r < 4; r++) {
+		if (!row->req_id[r] || ResearchLevel(&c->research, row->req_id[r]) >= row->req_level[r])
+			continue;
+		// A prerequisite is missing: this level waits, its prerequisite comes first.
+		return ResearchResolveStep(c, row->req_id[r], row->req_level[r], out, stack_id, stack_level, depth + 1);
+	}
+
+	out->id = id;
+	out->level = (uint8_t)(have + 1);
+	return true;
+}
+
+/* Next research to start, from the game's tables (research_table.h). The goal is every research of category
+ * `kind` (0 = any) - or just `only_id` when it is not 0 - taken to its maximum level. For each one that is not
+ * there yet, ResearchResolveStep finds the step that can be taken next, which is its own next level or, when
+ * that level needs a research at a level the account has not reached, that prerequisite's step, wherever it is.
+ * Among these steps, the ones the account can start now (Academy high enough, base cost covered by the stock)
+ * compete: the step that unblocks the most goals comes first - a prerequisite shared by several researches
+ * before a research nothing waits for - then the shortest.
+ *
+ * Fills `pick` (id, the level to request, the goal research it is for, how many goals it serves) and returns
+ * the id, or returns 0 and writes in `why` what stopped every step. The costs are the tables' base costs: a
+ * cost reduction the account has makes the real one lower, so a step just out of reach here can still be
+ * started from the game itself.
+ *
+ * auto_mode (the automatic research): the stock counts only what is left after `research.reserve_*`, and a
+ * research the server just refused is left alone for a while. */
+uint16_t ResearchPickNext(const Connection *c, uint8_t kind, uint16_t only_id, ResearchPick *pick, char *why, size_t why_size, bool auto_mode) {
+	uint8_t academy = AcademyLevel(c);
+	uint64_t spendable[5];
+	const int64_t stock[5] = { c->resources.food, c->resources.rock, c->resources.wood, c->resources.ore, c->resources.gold };
+	const uint32_t reserve[5] = { c->research_auto.reserve.food, c->research_auto.reserve.rock, c->research_auto.reserve.wood,
+		c->research_auto.reserve.ore, c->research_auto.reserve.gold };
+	for (int i = 0; i < 5; i++) {
+		uint64_t have = stock[i] > 0 ? (uint64_t)stock[i] : 0;
+		uint64_t held = auto_mode ? reserve[i] : 0;
+		spendable[i] = have > held ? have - held : 0;
+	}
+	uint64_t now = now_ms();
+
+	enum { MAX_STEPS = 64 };
+	struct { ResearchStep step; uint16_t for_id; uint16_t unlocks; } steps[MAX_STEPS];
+	int step_count = 0;
+	uint16_t goals = 0, maxed = 0, unresolved = 0;
+
+	for (uint16_t id = 1; id <= RESEARCH_TECH_COUNT; id++) {
+		const ResearchTechInfo *t = ResearchTech(id);
+		if ((kind && t->kind != kind) || (only_id && id != only_id) || t->locked)
+			continue;
+		goals++;
+		if (ResearchLevel(&c->research, id) >= t->max_level) { maxed++; continue; }
+
+		ResearchStep step;
+		uint16_t stack_id[RESEARCH_CHAIN_MAX];
+		uint8_t stack_level[RESEARCH_CHAIN_MAX];
+		if (!ResearchResolveStep(c, id, t->max_level, &step, stack_id, stack_level, 0)) { unresolved++; continue; }
+
+		int at = -1;
+		for (int i = 0; i < step_count; i++)
+			if (steps[i].step.id == step.id && steps[i].step.level == step.level)
+				at = i;
+		if (at >= 0) {
+			steps[at].unlocks++;
+		} else if (step_count < MAX_STEPS) {
+			steps[step_count].step = step;
+			steps[step_count].for_id = id;
+			steps[step_count].unlocks = 1;
+			step_count++;
+		}
+	}
+
+	int best = -1;
+	uint32_t best_time = 0;
+	uint16_t need_academy = 0, need_res = 0, waiting = 0;
+	uint8_t academy_needed = 0;
+
+	for (int i = 0; i < step_count; i++) {
+		const ResearchStep *s = &steps[i].step;
+		const ResearchLevelInfo *row = ResearchLevelRow(ResearchTech(s->id), s->level);
+
+		if (auto_mode && c->research_auto.retry_at[s->id] > now) { waiting++; continue; }
+		if (academy < row->academy) {
+			if (need_academy++ == 0 || row->academy < academy_needed) academy_needed = row->academy;
+			continue;
+		}
+		if (spendable[0] < row->cost[0] || spendable[1] < row->cost[1] || spendable[2] < row->cost[2]
+			|| spendable[3] < row->cost[3] || spendable[4] < row->cost[4]) { need_res++; continue; }
+
+		if (best < 0 || steps[i].unlocks > steps[best].unlocks
+			|| (steps[i].unlocks == steps[best].unlocks && row->time < best_time)) {
+			best = i;
+			best_time = row->time;
+		}
+	}
+
+	if (best >= 0) {
+		pick->id = steps[best].step.id;
+		pick->level = steps[best].step.level;
+		pick->for_id = steps[best].for_id;
+		pick->unlocks = steps[best].unlocks;
+		return pick->id;
+	}
+
+	if (why && why_size) {
+		if (goals == 0)                 snprintf(why, why_size, "Aucune recherche correspondante.");
+		else if (maxed == goals)        snprintf(why, why_size, "Tout est déjà au maximum.");
+		else if (need_res)              snprintf(why, why_size, "Ressources insuffisantes pour %u étape(s) (coût de base).", need_res);
+		else if (need_academy)          snprintf(why, why_size, "Académie niveau %u requise (actuellement %u).", academy_needed, academy);
+		else if (waiting)               snprintf(why, why_size, "Recherches en attente après un refus du serveur.");
+		else                            snprintf(why, why_size, "Prérequis introuvables pour %u recherche(s).", unresolved);
+	}
+	return 0;
+}
+
 void RequestResearchCancel(Connection *c, uint16_t tech_id, uint8_t level) {
 	c->size = 2;
 	write_u16(c->data + c->size, _MSG_REQUEST_RESEARCH_EVENT_CANCEL); c->size += 2;
@@ -6037,11 +6303,23 @@ void RecvResearchStart(Connection *c, const uint8_t *data, uint16_t size) {
 	uint8_t status = read_u8(data);
 	if (status != 0) {
 		LOGW("[RESEARCH] Lancement refusé (code %u)\n", status);
+		ResearchAutoSettings *a = &c->research_auto;
+		if (a->pending) {
+			// Left alone for a while: the same research would just be refused again. The code is not known
+			// (the game never sent a refused start in any capture), so it is logged and shown as is.
+			if (a->pending_tech <= RESEARCH_ID_MAX)
+				a->retry_at[a->pending_tech] = now_ms() + 10 * 60 * 1000;
+			a->pending = false;
+			a->next_check_at = now_ms() + 5000;
+			snprintf(a->state, sizeof(a->state), "Lancement refusé par le serveur (code %u) : %s laissée de côté 10 minutes.",
+				status, ResearchTech(a->pending_tech) ? ResearchTech(a->pending_tech)->name_fr : "?");
+		}
 		return;
 	}
 
 	uint16_t tech  = read_u16(data + 1);
 	uint8_t  level = read_u8(data + 3);
+	c->research_auto.pending = false;
 
 	c->research.in_progress = tech;
 	c->research.start_time  = (int64_t)read_u64(data + 4);
@@ -6078,6 +6356,7 @@ void RecvResearchComplete(Connection *c, const uint8_t *data, uint16_t size) {
 	ResearchSetLevel(&c->research, tech, level);
 	if (c->research.in_progress == tech)
 		c->research.in_progress = 0;
+	c->research_auto.next_check_at = 0; // the automatic research looks again after a human-like pause
 
 	// The rate read from the last delivery is out of date once Tax Break goes up, and the capacity
 	// once a "Bigger Bags" does.
@@ -6088,6 +6367,775 @@ void RecvResearchComplete(Connection *c, const uint8_t *data, uint16_t size) {
 
 	const char *name = ResearchKnownName(tech);
 	LOGI("[RESEARCH] Terminée : #%u%s%s niveau %u\n", tech, name ? " " : "", name ? name : "", level);
+}
+
+/* Automatic research (see ResearchAutoSettings): when no research is running, starts the next one of the
+ * configured categories, first category first. Says in `state` what it did or why it did nothing. */
+void ResearchAutoTick(Connection *c) {
+	ResearchAutoSettings *a = &c->research_auto;
+	if (!a->enabled || a->kind_count == 0 || !c->research.loaded)
+		return;
+	if (AcademyLevel(c) == 0)
+		return; // the building list has not arrived: the Academy would look too low
+
+	uint64_t now = now_ms();
+
+	if (a->pending) {
+		if (now - a->pending_since < 20000)
+			return;
+		// No answer: whatever was sent did not go through, do not insist right away.
+		a->pending = false;
+		if (a->pending_tech <= RESEARCH_ID_MAX)
+			a->retry_at[a->pending_tech] = now + 2 * 60 * 1000;
+		snprintf(a->state, sizeof(a->state), "Pas de réponse du serveur au lancement de %s.",
+			ResearchTech(a->pending_tech) ? ResearchTech(a->pending_tech)->name_fr : "?");
+		return;
+	}
+
+	if (ResearchInProgress(&c->research)) {
+		const ResearchTechInfo *t = ResearchTech(c->research.in_progress);
+		snprintf(a->state, sizeof(a->state), "En cours : %s.", t ? t->name_fr : "?");
+		return;
+	}
+
+	if (a->next_check_at == 0) {   // arm first, act after the pause: never the instant a slot is free
+		a->next_check_at = GatherHumanDelay() + (uint64_t)(rand() % 4000);
+		return;
+	}
+	if (now < a->next_check_at)
+		return;
+
+	char why[160], all_why[192] = "";
+	for (uint8_t i = 0; i < a->kind_count; i++) {
+		ResearchPick pick;
+		uint16_t id = ResearchPickNext(c, a->kinds[i], 0, &pick, why, sizeof(why), true);
+		const ResearchKindInfo *k = ResearchKind(a->kinds[i]);
+
+		if (id) {
+			const ResearchTechInfo *t = ResearchTech(id);
+			const ResearchTechInfo *goal = ResearchTech(pick.for_id);
+			char reason[96] = "";
+			if (pick.for_id != id && goal)
+				snprintf(reason, sizeof(reason), ", prérequis de %s", goal->name_fr);
+			else if (pick.unlocks > 1)
+				snprintf(reason, sizeof(reason), ", débloque %u recherches", pick.unlocks);
+			RequestResearchStartPlain(c, id, pick.level);
+			a->pending = true;
+			a->pending_tech = id;
+			a->pending_since = now;
+			snprintf(a->state, sizeof(a->state), "Lancement demandé : %s niveau %u (%s%s).", t->name_fr, pick.level, k ? k->name_fr : "?", reason);
+			LOGI("[RESEARCH] Automatique : lancement de #%u %s niveau %u%s\n", id, t->label_en, pick.level, reason);
+			return;
+		}
+
+		size_t used = strlen(all_why);
+		snprintf(all_why + used, sizeof(all_why) - used, "%s%s : %s", used ? " " : "", k ? k->name_fr : "?", why);
+	}
+
+	if (strcmp(a->state, all_why) != 0)
+		LOGI("[RESEARCH] Automatique : rien à lancer - %s\n", all_why);
+	snprintf(a->state, sizeof(a->state), "%s", all_why);
+	a->next_check_at = now + 5 * 60 * 1000 + (uint64_t)(rand() % 30000); // a research finishing re-arms it sooner
+}
+
+/* ---- Automatic construction: the planner (see BuildAutoSettings) ---- */
+
+/* Building types a query designates: its build_id, or its name (French or English, accents optional). A whole
+ * name wins over a part of one ("Castle" is not also "Castle Wall"). Only the types the automatic construction
+ * can work on (BuildingSelectable). */
+size_t BuildFindTypes(const char *query, const BuildingTypeInfo **found, size_t max)
+{
+	size_t count = 0;
+	char needle[64], hay[128];
+	FoldForSearch(query, needle, sizeof(needle));
+
+	if (needle[0] == 0)
+		return 0;
+
+	char *end;
+	long number = strtol(needle, &end, 10);
+	bool is_number = (*end == 0);
+
+	for (int pass = 0; pass < 2 && count == 0; pass++) {
+		for (uint16_t i = 0; i < BUILDING_TYPE_COUNT && count < max; i++) {
+			const BuildingTypeInfo *t = &BUILDING_TYPES[i];
+			if (!BuildingSelectable(t))
+				continue;
+
+			bool match = false;
+			if (is_number) {
+				match = (t->id == number);
+			} else {
+				FoldForSearch(t->name_fr, hay, sizeof(hay));
+				match = pass == 0 ? strcmp(hay, needle) == 0 : strstr(hay, needle) != NULL;
+				if (!match) {
+					FoldForSearch(t->name_en, hay, sizeof(hay));
+					match = pass == 0 ? strcmp(hay, needle) == 0 : strstr(hay, needle) != NULL;
+				}
+			}
+
+			if (match)
+				found[count++] = t;
+		}
+		if (is_number)
+			break;
+	}
+
+	return count;
+}
+
+typedef struct {
+	int      instance;    // index in c->building
+	uint8_t  level;       // the level to reach
+} BuildStep;
+
+typedef enum { BUILD_BLOCK_NONE, BUILD_BLOCK_MISSING, BUILD_BLOCK_RESEARCH, BUILD_BLOCK_RESERVED } BuildBlockKind;
+
+/* How many constructions can run at once: the base queue, plus the second one while its ExpireTime is ahead (or permanent).
+ * Before the packet arrives only the base queue is counted. */
+static int BuildQueuesAvailable(const Connection *c)
+{
+	if (!c->construction_loaded)
+		return 1;
+	int64_t now = c->server_time ? (int64_t)c->server_time : (int64_t)time(NULL);
+	return c->construction_extra_expires > now ? 2 : 1;
+}
+
+typedef struct {
+	BuildBlockKind kind;
+	uint16_t       id;       // the missing building type, or the research
+	uint8_t        level;    // the research level
+} BuildBlock;
+
+#define BUILD_CHAIN_MAX 24
+
+/* The farm kept at a low level on every account, for $askhelp (it starts an upgrade of it and cancels it again and again): the
+ * farm with the lowest level, the lowest slot on a tie. The automatic construction never upgrades it. -1 when the account has
+ * no farm. It stays the lowest as long as it is left alone: the other farms only go up. */
+#define BUILD_ID_FARM 4
+int BuildingReservedFarm(const Connection *c)
+{
+	int best = -1;
+	for (int i = 0; i < c->building_count; i++) {
+		if (c->building[i].build_id != BUILD_ID_FARM)
+			continue;
+		if (best < 0 || c->building[i].level < c->building[best].level
+			|| (c->building[i].level == c->building[best].level && c->building[i].position_id < c->building[best].position_id))
+			best = i;
+	}
+	return best;
+}
+
+static bool BuildingUnderConstruction(const Connection *c, uint16_t slot)
+{
+	for (int i = 0; i < BUILDING_QUEUE_SLOTS; i++)
+		if (c->construction[i].used && c->construction[i].slot == slot)
+			return true;
+	// a start just sent for it, not answered yet - or left alone after the server refused it
+	if (c->build_auto.pending && c->build_auto.pending_slot == slot)
+		return true;
+	uint64_t now = now_ms();
+	for (int i = 0; i < 16; i++)
+		if (c->build_auto.blocked_slot[i] == slot && c->build_auto.blocked_until[i] > now)
+			return true;
+	return false;
+}
+
+/* The account's building of that type with the highest level, or -1 when it has none. */
+static int BuildingBestInstance(const Connection *c, uint16_t build_id)
+{
+	// the farm kept at a low level for $askhelp is never the one to raise: another farm is preferred when there is one
+	const int reserved = build_id == BUILD_ID_FARM ? BuildingReservedFarm(c) : -1;
+	int best = -1;
+	for (int i = 0; i < c->building_count; i++)
+		if (c->building[i].build_id == build_id && i != reserved && (best < 0 || c->building[i].level > c->building[best].level))
+			best = i;
+	return best >= 0 ? best : reserved;
+}
+
+/* The next step toward taking building `instance` to level `target`: its next level, unless that level asks for
+ * another building at a level it has not reached - then the step is that building's, the highest one of its type,
+ * and so on. Returns 1 with the step, 0 when there is nothing to start for it now (already there, or under
+ * construction), -1 when it cannot be done by upgrading: a building of the type is missing, or a research is short
+ * (`block` says which). The prerequisites are per level in the table; a quest step of the game (`quest`) cannot be
+ * seen and is left to the server. */
+static int BuildResolveStep(const Connection *c, int instance, uint8_t target, BuildStep *out, BuildBlock *block,
+                            int *stack_inst, uint8_t *stack_level, int depth)
+{
+	const BuildingInfo *b = &c->building[instance];
+	const BuildingTypeInfo *t = BuildingType(b->build_id);
+	if (!t || depth >= BUILD_CHAIN_MAX)
+		return 0;
+	if (b->level >= target || b->level >= t->max_level)
+		return 0;
+	if (instance == BuildingReservedFarm(c)) {
+		// the farm kept for $askhelp is never upgraded, not even as a prerequisite: say so when something waits for it
+		if (depth > 0) {
+			block->kind = BUILD_BLOCK_RESERVED;
+			return -1;
+		}
+		return 0;
+	}
+	if (BuildingUnderConstruction(c, b->position_id))
+		return 0;
+
+	for (int i = 0; i < depth; i++)
+		if (stack_inst[i] == instance && stack_level[i] == target)
+			return 0;
+	stack_inst[depth] = instance;
+	stack_level[depth] = target;
+
+	const BuildingLevelInfo *row = BuildingLevelRow(t, (uint8_t)(b->level + 1));
+	if (!row)
+		return 0;
+
+	for (int r = 0; r < BUILDING_REQ_MAX; r++) {
+		if (!row->req_id[r])
+			continue;
+		int need = BuildingBestInstance(c, row->req_id[r]);
+		if (need < 0) {
+			block->kind = BUILD_BLOCK_MISSING;
+			block->id = row->req_id[r];
+			return -1;
+		}
+		if (c->building[need].level >= row->req_level[r])
+			continue;
+		return BuildResolveStep(c, need, row->req_level[r], out, block, stack_inst, stack_level, depth + 1);
+	}
+
+	if (row->research_id && ResearchLevel(&c->research, row->research_id) < row->research_level) {
+		block->kind = BUILD_BLOCK_RESEARCH;
+		block->id = row->research_id;
+		block->level = row->research_level;
+		return -1;
+	}
+
+	out->instance = instance;
+	out->level = (uint8_t)(b->level + 1);
+	return 1;
+}
+
+/* Next construction, for the buildings of type `build_id`: every one of them is a goal, taken to its maximum level.
+ * As for the researches (ResearchPickNext): the steps that can be started now compete - resources (the five basic
+ * ones; the mana costs are not checked, the server refuses what is short), a free construction queue - and the one
+ * that unblocks the most goals comes first, then the shortest. Returns true and fills `pick`, or false with `why`. */
+static bool BuildPickImpl(const Connection *c, uint16_t build_id, BuildPick *pick, char *why, size_t why_size)
+{
+	const BuildingTypeInfo *type = BuildingType(build_id);
+	uint64_t spendable[5];
+	const int64_t stock[5] = { c->resources.food, c->resources.rock, c->resources.wood, c->resources.ore, c->resources.gold };
+	const uint32_t reserve[5] = { c->build_auto.reserve.food, c->build_auto.reserve.rock, c->build_auto.reserve.wood,
+		c->build_auto.reserve.ore, c->build_auto.reserve.gold };
+	for (int i = 0; i < 5; i++) {
+		uint64_t have = stock[i] > 0 ? (uint64_t)stock[i] : 0;
+		spendable[i] = have > reserve[i] ? have - reserve[i] : 0;
+	}
+
+	int busy = 0;
+	const int queues = BuildQueuesAvailable(c);
+	for (int i = 0; i < BUILDING_QUEUE_SLOTS; i++)
+		if (c->construction[i].used)
+			busy++;
+
+	enum { MAX_STEPS = 64 };
+	struct { BuildStep step; int for_instance; uint16_t unlocks; } steps[MAX_STEPS];
+	int step_count = 0;
+	uint16_t goals = 0, maxed = 0, waiting = 0;
+	BuildBlock block = { BUILD_BLOCK_NONE, 0, 0 }, first_block = { BUILD_BLOCK_NONE, 0, 0 };
+
+	if (!type) {
+		snprintf(why, why_size, "Bâtiment inconnu.");
+		return false;
+	}
+
+	const int reserved_farm = BuildingReservedFarm(c);
+	bool skipped_reserved = false;
+
+	for (int i = 0; i < c->building_count; i++) {
+		if (c->building[i].build_id != build_id)
+			continue;
+		if (i == reserved_farm) { skipped_reserved = true; continue; }
+		goals++;
+		if (c->building[i].level >= type->max_level) { maxed++; continue; }
+
+		BuildStep step;
+		int stack_inst[BUILD_CHAIN_MAX];
+		uint8_t stack_level[BUILD_CHAIN_MAX];
+		block.kind = BUILD_BLOCK_NONE;
+		int r = BuildResolveStep(c, i, type->max_level, &step, &block, stack_inst, stack_level, 0);
+		if (r < 0) { if (first_block.kind == BUILD_BLOCK_NONE) first_block = block; continue; }
+		if (r == 0) { waiting++; continue; }
+
+		int at = -1;
+		for (int k = 0; k < step_count; k++)
+			if (steps[k].step.instance == step.instance && steps[k].step.level == step.level)
+				at = k;
+		if (at >= 0) {
+			steps[at].unlocks++;
+		} else if (step_count < MAX_STEPS) {
+			steps[step_count].step = step;
+			steps[step_count].for_instance = i;
+			steps[step_count].unlocks = 1;
+			step_count++;
+		}
+	}
+
+	int best = -1;
+	uint32_t best_time = 0;
+	uint16_t need_res = 0;
+	for (int k = 0; k < step_count; k++) {
+		const BuildingInfo *b = &c->building[steps[k].step.instance];
+		const BuildingLevelInfo *row = BuildingLevelRow(BuildingType(b->build_id), steps[k].step.level);
+		if (busy >= queues)
+			continue;
+		if (spendable[0] < row->cost[0] || spendable[1] < row->cost[1] || spendable[2] < row->cost[2]
+			|| spendable[3] < row->cost[3] || spendable[4] < row->cost[4]) { need_res++; continue; }
+		if (best < 0 || steps[k].unlocks > steps[best].unlocks || (steps[k].unlocks == steps[best].unlocks && row->time < best_time)) {
+			best = k;
+			best_time = row->time;
+		}
+	}
+
+	if (best >= 0) {
+		const BuildingInfo *b = &c->building[steps[best].step.instance];
+		const BuildingInfo *goal = &c->building[steps[best].for_instance];
+		pick->slot = b->position_id;
+		pick->build_id = b->build_id;
+		pick->level = steps[best].step.level;
+		pick->for_slot = goal->position_id;
+		pick->for_id = goal->build_id;
+		pick->unlocks = steps[best].unlocks;
+		return true;
+	}
+
+	if (why && why_size) {
+		if (goals == 0 && skipped_reserved) snprintf(why, why_size, "La seule ferme est gardée à bas niveau pour les demandes d'aide.");
+		else if (goals == 0)               snprintf(why, why_size, "Aucun bâtiment de ce type sur le compte.");
+		else if (maxed == goals)           snprintf(why, why_size, "Tout est déjà au maximum.");
+		else if (step_count && busy >= queues) snprintf(why, why_size, queues == 1 ? "La file de construction est occupée (une seule file)." : "Les files de construction sont occupées.");
+		else if (need_res)                 snprintf(why, why_size, "Ressources insuffisantes pour %u étape(s) (coût de base).", need_res);
+		else if (first_block.kind == BUILD_BLOCK_MISSING) {
+			const BuildingTypeInfo *m = BuildingType(first_block.id);
+			snprintf(why, why_size, "Il faut d'abord construire : %s.", m ? m->name_fr : "?");
+		} else if (first_block.kind == BUILD_BLOCK_RESERVED) {
+			snprintf(why, why_size, "La ferme gardée pour les demandes d'aide est la seule : construisez-en une autre pour continuer.");
+		} else if (first_block.kind == BUILD_BLOCK_RESEARCH) {
+			const ResearchTechInfo *r = ResearchTech(first_block.id);
+			snprintf(why, why_size, "Recherche requise : %s niveau %u.", r ? r->name_fr : "?", first_block.level);
+		} else if (waiting)                snprintf(why, why_size, "En cours de construction.");
+		else                               snprintf(why, why_size, "Rien à construire pour l'instant.");
+	}
+	return false;
+}
+
+bool BuildPickNext(const Connection *c, uint16_t build_id, BuildPick *pick, char *why, size_t why_size)
+{
+	return BuildPickImpl(c, build_id, pick, why, why_size);
+}
+
+/* Leaves a slot alone for `ms` (after a refusal, or when the server did not answer). */
+static void BuildBlockSlot(Connection *c, uint16_t slot, uint64_t ms)
+{
+	BuildAutoSettings *a = &c->build_auto;
+	a->blocked_slot[a->blocked_next] = slot;
+	a->blocked_until[a->blocked_next] = now_ms() + ms;
+	a->blocked_next = (uint8_t)((a->blocked_next + 1) % 16);
+}
+
+/* The plain start of a construction, captured from the PC client (a farm, level 23 -> 24, no item used):
+ * _MSG_REQUEST_BUILDBEGIN (2003), payload seq(4), slot(2), build_id(2), one byte that was 2 in both captured starts
+ * (meaning unknown: it is not the queue, the server picks the queue itself - two starts went to two queues). There is
+ * no level: the server builds the next one. The answer is _MSG_RESP_BUILDBEGIN (2004). */
+void RequestBuildStart(Connection *c, uint16_t slot, uint16_t build_id)
+{
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_BUILDBEGIN);            c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);               c->size += 4;
+	write_u16(c->data + c->size, slot);                                c->size += 2;
+	write_u16(c->data + c->size, build_id);                            c->size += 2;
+	write_u8 (c->data + c->size, 2);                                   c->size += 1;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/* The alliance help request the game sends by itself after every construction it starts (captured: 2852,
+ * `_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP` is the constant's name but it is a client request): `u32 seq, u8 1`. The research
+ * one sends 0 in that byte, so it is most likely the kind (1 = construction). It carries no building: the server helps
+ * the one just started (its answer, 2853, is `00 01 <build_id> <level> 1e`). */
+void RequestBuildHelp(Connection *c)
+{
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);                 c->size += 4;
+	write_u8 (c->data + c->size, 1);                                     c->size += 1;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/* Cancel: _MSG_REQUEST_BUILDCANCEL (2006), captured: `u32 seq, u8 queue` (0 = the base queue). */
+void RequestBuildCancel(Connection *c, uint8_t queue)
+{
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_BUILDCANCEL);             c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);                 c->size += 4;
+	write_u8 (c->data + c->size, queue);                                 c->size += 1;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/* _MSG_RESP_BUILDCANCEL (2007), 23 bytes of scrambled values (the refund, as in the research cancel's answer): no field
+ * is read. What is known is which queue was asked to cancel: only $askhelp does, so it frees that entry. */
+void RecvBuildCancel(Connection *c, const uint8_t *data, uint16_t size)
+{
+	(void)data;
+	AskHelpState *h = &c->askhelp;
+
+	if (h->active && h->phase == ASKHELP_WAIT_CANCEL_ANSWER) {
+		if (h->queue >= 0 && h->queue < BUILDING_QUEUE_SLOTS)
+			c->construction[h->queue].used = 0;
+		h->queue = -1;
+		h->done++;
+		LOGI("[AIDE] Cycle %u/%u terminé (annulation confirmée, %u octet(s))\n", h->done, h->total, size);
+		if (h->done >= h->total) {
+			AskHelpStop(c, NULL);
+		} else {
+			h->phase = ASKHELP_PAUSE;
+			h->next_at = now_ms() + 1000 + (uint64_t)(rand() % 1500);
+		}
+		return;
+	}
+
+	LOGW("[BUILD] Annulation reçue (%u octet(s)) sans que le bot l'ait demandée : les files ne sont plus sûres\n", size);
+}
+
+/* _MSG_RESP_BUILDBEGIN (2004), 40 bytes, confirmed: slot(2), build_id(2), TARGET level(1), start time i64, duration u32,
+ * then 23 bytes that look scrambled (the stocks, as in the research start's answer). No status byte: a refusal is
+ * _MSG_RESP_BUILDINGERROR (2013), whose layout has not been seen. */
+void RecvBuildBegin(Connection *c, const uint8_t *data, uint16_t size)
+{
+	if (size < 17)
+		return;
+
+	uint16_t slot = read_u16(data), build_id = read_u16(data + 2);
+	uint8_t level = read_u8(data + 4);
+
+	int at = -1;
+	for (int i = 0; i < BUILDING_QUEUE_SLOTS && at < 0; i++)
+		if (!c->construction[i].used)
+			at = i;
+	if (at >= 0) {
+		BuildingConstruction *q = &c->construction[at];
+		q->used = 1;
+		q->slot = slot;
+		q->build_id = build_id;
+		q->level = level;
+		q->start_time = (int64_t)read_u64(data + 5);
+		q->duration = read_u32(data + 13);
+	}
+
+	if (c->askhelp.active && c->askhelp.phase == ASKHELP_WAIT_BEGIN && c->askhelp.slot == slot) {
+		AskHelpState *h = &c->askhelp;
+		h->queue = (int8_t)at;
+		if (at < 0) {
+			AskHelpStop(c, "aucune file libre dans le suivi du bot : je m'arrête sans rien annuler");
+		} else {
+			RequestBuildHelp(c);
+			h->phase = ASKHELP_WAIT_CANCEL_TIMER;
+			h->phase_since = now_ms();
+			h->next_at = now_ms() + 3000 + (uint64_t)(rand() % 1001);   // 3 to 4 s, then the cancel
+		}
+	}
+
+	if (c->build_auto.pending && c->build_auto.pending_slot == slot) {
+		c->build_auto.pending = false;
+		c->build_auto.next_check_at = GatherHumanDelay() + (uint64_t)(rand() % 4000); // the second queue, a moment later
+	}
+
+	const BuildingTypeInfo *t = BuildingType(build_id);
+	char text[64];
+	FormatBuildingLevel(level, text, sizeof(text));
+	LOGI("[BUILD] Lancée : #%u %s(emplacement %u) vers %s, durée %.1f h\n", build_id, t ? t->name_en : "", slot, text,
+		read_u32(data + 13) / 3600.0);
+}
+
+/* _MSG_RESP_BUILDCOMPLETE (2005), 6 bytes, confirmed: slot(2), build_id(2), level reached(1), one byte (0). The level of
+ * the building in the list is updated - until now it was the login's, and went stale - and its queue entry is freed. */
+void RecvBuildComplete(Connection *c, const uint8_t *data, uint16_t size)
+{
+	if (size < 5)
+		return;
+
+	uint16_t slot = read_u16(data), build_id = read_u16(data + 2);
+	uint8_t level = read_u8(data + 4);
+
+	for (int i = 0; i < c->building_count; i++)
+		if (c->building[i].position_id == slot && c->building[i].build_id == build_id)
+			c->building[i].level = level;
+	for (int i = 0; i < BUILDING_QUEUE_SLOTS; i++)
+		if (c->construction[i].used && c->construction[i].slot == slot)
+			c->construction[i].used = 0;
+
+	c->build_auto.next_check_at = 0; // looks again after a human-like pause
+
+	const BuildingTypeInfo *t = BuildingType(build_id);
+	char text[64];
+	FormatBuildingLevel(level, text, sizeof(text));
+	LOGI("[BUILD] Terminée : #%u %s(emplacement %u) niveau %s\n", build_id, t ? t->name_en : "", slot, text);
+}
+
+/* _MSG_RESP_BUILDINGERROR (2013): the layout was never seen (no capture of a refused start), so what it says is logged
+ * as it comes. If the automatic construction has a start waiting for its answer, that slot is left alone for a while. */
+void RecvBuildingError(Connection *c, const uint8_t *data, uint16_t size)
+{
+	char hex[64] = "";
+	for (uint16_t i = 0; i < size && i < 16; i++)
+		snprintf(hex + i * 3, sizeof(hex) - i * 3, "%02x ", data[i]);
+	LOGW("[BUILD] Erreur du serveur (%u octet(s)) : %s\n", size, hex);
+
+	if (c->askhelp.active) {
+		char text[128];
+		snprintf(text, sizeof(text), "le serveur a répondu par une erreur (%s)", hex);
+		AskHelpStop(c, text);
+		return;
+	}
+
+	BuildAutoSettings *a = &c->build_auto;
+	if (a->pending) {
+		BuildBlockSlot(c, a->pending_slot, 10 * 60 * 1000);
+		snprintf(a->state, sizeof(a->state), "Lancement refusé par le serveur (emplacement %u laissé de côté 10 minutes) : %s", a->pending_slot, hex);
+		a->pending = false;
+		a->next_check_at = now_ms() + 5000;
+	}
+}
+
+/* Automatic construction: whenever a construction queue is free, starts the next step the planner picks, first type of
+ * the list first (see BuildPickNext). Says in `state` what it did or why it did nothing. */
+void BuildAutoTick(Connection *c)
+{
+	BuildAutoSettings *a = &c->build_auto;
+	if (!a->enabled || a->type_count == 0 || c->building_count == 0 || !c->construction_loaded || c->askhelp.active)
+		return;
+
+	uint64_t now = now_ms();
+
+	if (a->pending) {
+		if (now - a->pending_since < 20000)
+			return;
+		// No answer: whatever was sent did not go through, do not insist on that slot right away.
+		BuildBlockSlot(c, a->pending_slot, 2 * 60 * 1000);
+		a->pending = false;
+		snprintf(a->state, sizeof(a->state), "Pas de réponse du serveur au lancement (emplacement %u).", a->pending_slot);
+		return;
+	}
+
+	if (now < a->next_check_at)
+		return;
+	a->next_check_at = now + 30000;
+
+	char why[160], all_why[224] = "", text[224];
+	for (uint8_t i = 0; i < a->type_count; i++) {
+		BuildPick pick;
+		const BuildingTypeInfo *t = BuildingType(a->types[i]);
+
+		if (BuildPickNext(c, a->types[i], &pick, why, sizeof(why))) {
+			const BuildingTypeInfo *pt = BuildingType(pick.build_id), *gt = BuildingType(pick.for_id);
+			char level[64], reason[96] = "";
+			FormatBuildingLevel(pick.level, level, sizeof(level));
+			if (pick.slot != pick.for_slot && gt)
+				snprintf(reason, sizeof(reason), ", prérequis de %s", gt->name_fr);
+			else if (pick.unlocks > 1)
+				snprintf(reason, sizeof(reason), ", débloque %u bâtiments", pick.unlocks);
+
+			RequestBuildStart(c, pick.slot, pick.build_id);
+			a->pending = true;
+			a->pending_slot = pick.slot;
+			a->pending_since = now;
+			a->plan_slot = pick.slot;
+			a->plan_build_id = pick.build_id;
+			a->plan_level = pick.level;
+			snprintf(text, sizeof(text), "Lancement demandé : %s (emplacement %u) vers %s%s.", pt ? pt->name_fr : "?", pick.slot, level, reason);
+			LOGI("[BUILD] Automatique : %s\n", text);
+			snprintf(a->state, sizeof(a->state), "%s", text);
+			return;
+		}
+
+		size_t used = strlen(all_why);
+		snprintf(all_why + used, sizeof(all_why) - used, "%s%s : %s", used ? " " : "", t ? t->name_fr : "?", why);
+	}
+
+	if (strcmp(a->state, all_why) != 0)
+		LOGI("[BUILD] Automatique : rien à construire - %s\n", all_why);
+	snprintf(a->state, sizeof(a->state), "%s", all_why);
+	a->plan_slot = 0;
+	a->plan_build_id = 0;
+	a->plan_level = 0;
+}
+
+/* ---- $askhelp: many alliance help requests ---- */
+
+static const char *const RESOURCE_LABEL_FR[5] = { "nourriture", "pierre", "bois", "minerai", "or" };
+
+void AskHelpStop(Connection *c, const char *why)
+{
+	AskHelpState *h = &c->askhelp;
+	if (!h->active)
+		return;
+
+	char text[512];
+	size_t n = (size_t)snprintf(text, sizeof(text), "%s : %u cycle(s) sur %u.", why ? "Arrêté" : "Terminé", h->done, h->total);
+	if (why)
+		n += (size_t)snprintf(text + n, sizeof(text) - n, " Raison : %s.", why);
+
+	const int64_t now_stock[5] = { c->resources.food, c->resources.rock, c->resources.wood, c->resources.ore, c->resources.gold };
+	bool moved = false;
+	for (int i = 0; i < 5; i++) {
+		int64_t delta = now_stock[i] - h->stock_before_raw[i];
+		if (delta == 0)
+			continue;
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "%s%s %+lld", moved ? ", " : " Stock depuis le début : ", RESOURCE_LABEL_FR[i], (long long)delta);
+		moved = true;
+	}
+	if (why && h->queue >= 0)
+		n += (size_t)snprintf(text + n, sizeof(text) - n, " Une construction lancée n'a pas été annulée (emplacement %u).", h->slot);
+
+	LOGI("[AIDE] %s\n", text);
+	BotReply(c, h->requester, "Demandes d'aide", "%s", text);
+	h->active = false;
+	h->phase = ASKHELP_IDLE;
+}
+
+/* What $askhelp starts: the next level of the account's low-level farm (BuildingReservedFarm), and only that - never a
+ * prerequisite of it. False, with `why`, when it cannot be started now: no farm, already at its maximum, being built, a
+ * prerequisite or a research short, not enough of the five basic resources, mana items needed, or both queues busy. */
+static bool AskHelpTarget(const Connection *c, uint16_t *slot, char *why, size_t why_size)
+{
+	int idx = BuildingReservedFarm(c);
+	if (idx < 0) { snprintf(why, why_size, "Le compte n'a aucune ferme."); return false; }
+
+	const BuildingInfo *b = &c->building[idx];
+	const BuildingTypeInfo *t = BuildingType(b->build_id);
+	const BuildingLevelInfo *row = t ? BuildingLevelRow(t, (uint8_t)(b->level + 1)) : NULL;
+	if (!row) { snprintf(why, why_size, "La ferme gardée (emplacement %u) est au maximum.", b->position_id); return false; }
+	if (BuildingUnderConstruction(c, b->position_id)) { snprintf(why, why_size, "La ferme gardée (emplacement %u) est déjà en construction.", b->position_id); return false; }
+
+	for (int r = 0; r < BUILDING_REQ_MAX; r++) {
+		if (!row->req_id[r]) continue;
+		int need = BuildingBestInstance(c, row->req_id[r]);
+		if (need < 0 || c->building[need].level < row->req_level[r]) {
+			const BuildingTypeInfo *m = BuildingType(row->req_id[r]);
+			snprintf(why, why_size, "La ferme gardée (niveau %u) demande d'abord : %s niveau %u.", b->level, m ? m->name_fr : "?", row->req_level[r]);
+			return false;
+		}
+	}
+	if (row->research_id && ResearchLevel(&c->research, row->research_id) < row->research_level) {
+		snprintf(why, why_size, "La ferme gardée demande une recherche (n°%u niveau %u).", row->research_id, row->research_level);
+		return false;
+	}
+	if (row->cost[5] || row->cost[6] || row->cost[7]) { snprintf(why, why_size, "La ferme gardée demande des objets de mana."); return false; }
+	if (c->resources.food < row->cost[0] || c->resources.rock < row->cost[1] || c->resources.wood < row->cost[2]
+		|| c->resources.ore < row->cost[3] || c->resources.gold < row->cost[4]) {
+		snprintf(why, why_size, "Pas assez de ressources pour monter la ferme gardée.");
+		return false;
+	}
+
+	int busy = 0;
+	for (int i = 0; i < BUILDING_QUEUE_SLOTS; i++)
+		if (c->construction[i].used) busy++;
+	if (busy >= BuildQueuesAvailable(c)) { snprintf(why, why_size, "Les files de construction sont occupées."); return false; }
+
+	*slot = b->position_id;
+	return true;
+}
+
+/* Starts `total` cycles on the low-level farm. On false, `error` says why. */
+bool AskHelpStart(Connection *c, const char *requester, uint16_t total, char *error, size_t error_size)
+{
+	AskHelpState *h = &c->askhelp;
+	uint16_t slot;
+	char why[160];
+
+	if (h->active) { snprintf(error, error_size, "Une série est déjà en cours (%u/%u).", h->done, h->total); return false; }
+	if (!c->construction_loaded || c->building_count == 0) { snprintf(error, error_size, "Les bâtiments et les files de construction ne sont pas encore reçus du serveur."); return false; }
+	if (MarchesPaused()) { snprintf(error, error_size, "Le bot est en pause après un rappel."); return false; }
+	if (!AskHelpTarget(c, &slot, why, sizeof(why))) { snprintf(error, error_size, "%s", why); return false; }
+
+	memset(h, 0, sizeof(*h));
+	h->active = true;
+	snprintf(h->requester, sizeof(h->requester), "%s", requester);
+	h->total = total;
+	h->queue = -1;
+	h->stock_before_raw[0] = c->resources.food;
+	h->stock_before_raw[1] = c->resources.rock;
+	h->stock_before_raw[2] = c->resources.wood;
+	h->stock_before_raw[3] = c->resources.ore;
+	h->stock_before_raw[4] = c->resources.gold;
+	h->phase = ASKHELP_PAUSE;
+	h->next_at = now_ms() + 500;
+	LOGI("[AIDE] %u cycle(s) demandés par %s\n", total, requester);
+	return true;
+}
+
+/* One step at a time: start, wait for the answer, ask for help, wait 3 to 4 s, cancel, wait for the answer, a short pause. Any
+ * missing answer, any server error, any unexpected state stops the series: it never goes on blindly. */
+void AskHelpTick(Connection *c)
+{
+	AskHelpState *h = &c->askhelp;
+	if (!h->active)
+		return;
+
+	uint64_t now = now_ms();
+
+	switch (h->phase) {
+	case ASKHELP_PAUSE: {
+		if (now < h->next_at)
+			return;
+		uint16_t slot;
+		char why[160];
+		if (!AskHelpTarget(c, &slot, why, sizeof(why))) {
+			AskHelpStop(c, why);
+			return;
+		}
+		// Only ever cancel what this series started: the entry it lands in must be a free one the bot knows about.
+		int free_entry = -1;
+		for (int i = 0; i < BUILDING_QUEUE_SLOTS && free_entry < 0; i++)
+			if (!c->construction[i].used)
+				free_entry = i;
+		if (free_entry < 0) {
+			AskHelpStop(c, "les deux files de construction sont occupées");
+			return;
+		}
+		h->slot = slot;
+		h->build_id = BUILD_ID_FARM;
+		h->queue = -1;
+		RequestBuildStart(c, slot, BUILD_ID_FARM);
+		h->phase = ASKHELP_WAIT_BEGIN;
+		h->phase_since = now;
+		return;
+	}
+	case ASKHELP_WAIT_BEGIN:
+		if (now - h->phase_since > 10000)
+			AskHelpStop(c, "pas de réponse du serveur au lancement");
+		return;
+	case ASKHELP_WAIT_CANCEL_TIMER:
+		if (now < h->next_at)
+			return;
+		if (h->queue < 0 || h->queue >= BUILDING_QUEUE_SLOTS || !c->construction[h->queue].used
+			|| c->construction[h->queue].slot != h->slot) {
+			AskHelpStop(c, "la construction lancée n'est plus dans la file attendue : je n'annule rien");
+			return;
+		}
+		RequestBuildCancel(c, (uint8_t)h->queue);
+		h->phase = ASKHELP_WAIT_CANCEL_ANSWER;
+		h->phase_since = now;
+		return;
+	case ASKHELP_WAIT_CANCEL_ANSWER:
+		if (now - h->phase_since > 10000)
+			AskHelpStop(c, "pas de réponse du serveur à l'annulation");
+		return;
+	case ASKHELP_WAIT_HELP:
+	case ASKHELP_IDLE:
+		return;
+	}
 }
 
 /*

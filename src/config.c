@@ -18,6 +18,7 @@
 
 #include "config.h"
 #include "command.h"
+#include "protocol.h"
 #include "log.h"
 #include <stdlib.h>
 
@@ -290,6 +291,90 @@ static bool ParseGatherKindPriority(Connection *c, const char *value)
     return true;
 }
 
+/* "Sigils, Gear" - the categories the automatic research works on, in priority order. Each entry is a category
+ * name (French or English, accents optional) or its number in the game's tabs (1-16), matching exactly one. */
+static bool ParseResearchCategories(Connection *c, const char *value)
+{
+    char buffer[256];
+    strncpy(buffer, value, sizeof(buffer));
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    c->research_auto.kind_count = 0;
+
+    for (char *token = strtok(buffer, ","); token; token = strtok(NULL, ",")) {
+        while (*token == ' ')
+            token++;
+        char *end = token + strlen(token);
+        while (end > token && end[-1] == ' ')
+            *--end = '\0';
+        if (*token == '\0')
+            continue;
+
+        const ResearchKindInfo *found[RESEARCH_KIND_COUNT_MAX];
+        size_t matches = ResearchFindKinds(token, found, RESEARCH_KIND_COUNT_MAX);
+        if (matches != 1) {
+            printf("Invalid research.categories entry: %s (%s)\n", token, matches ? "matches several categories" : "unknown category");
+            return false;
+        }
+
+        bool duplicate = false;
+        for (uint8_t i = 0; i < c->research_auto.kind_count; i++)
+            if (c->research_auto.kinds[i] == found[0]->kind)
+                duplicate = true;
+        if (duplicate)
+            continue;
+        if (c->research_auto.kind_count >= RESEARCH_KIND_COUNT_MAX) {
+            printf("Too many research.categories entries\n");
+            return false;
+        }
+        c->research_auto.kinds[c->research_auto.kind_count++] = found[0]->kind;
+    }
+
+    return true;
+}
+
+/* "Castle, Barracks" - the building types the automatic construction works on, in priority order. Each entry is a
+ * name (French or English, accents optional) or a build_id, matching exactly one type it can work on. */
+static bool ParseBuildTypes(Connection *c, const char *value)
+{
+    char buffer[512];
+    strncpy(buffer, value, sizeof(buffer));
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    c->build_auto.type_count = 0;
+
+    for (char *token = strtok(buffer, ","); token; token = strtok(NULL, ",")) {
+        while (*token == ' ')
+            token++;
+        char *end = token + strlen(token);
+        while (end > token && end[-1] == ' ')
+            *--end = '\0';
+        if (*token == '\0')
+            continue;
+
+        const BuildingTypeInfo *found[8];
+        size_t matches = BuildFindTypes(token, found, 8);
+        if (matches != 1) {
+            printf("Invalid build.buildings entry: %s (%s)\n", token, matches ? "matches several buildings" : "unknown building");
+            return false;
+        }
+
+        bool duplicate = false;
+        for (uint8_t i = 0; i < c->build_auto.type_count; i++)
+            if (c->build_auto.types[i] == found[0]->id)
+                duplicate = true;
+        if (duplicate)
+            continue;
+        if (c->build_auto.type_count >= sizeof(c->build_auto.types) / sizeof(c->build_auto.types[0])) {
+            printf("Too many build.buildings entries\n");
+            return false;
+        }
+        c->build_auto.types[c->build_auto.type_count++] = found[0]->id;
+    }
+
+    return true;
+}
+
 uint64_t parse_number_u64(const char *str); // command.c - accepts a plain number or one with a K/M/B suffix
 
 /* One box of the 4x5 grid (see AutoTrainSettings' comment): autotrain.<kind>_t<N> = target,
@@ -523,6 +608,36 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 			return true;
 		}
 	}
+
+	if (strcmp(key, "build.enabled") == 0) {
+		c->build_auto.enabled = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "build.buildings") == 0) {
+		return ParseBuildTypes(c, value);
+	}
+
+	if (strcmp(key, "build.reserve_food") == 0) { c->build_auto.reserve.food = (uint32_t)parse_number_u64(value); return true; }
+	if (strcmp(key, "build.reserve_rock") == 0) { c->build_auto.reserve.rock = (uint32_t)parse_number_u64(value); return true; }
+	if (strcmp(key, "build.reserve_wood") == 0) { c->build_auto.reserve.wood = (uint32_t)parse_number_u64(value); return true; }
+	if (strcmp(key, "build.reserve_ore") == 0)  { c->build_auto.reserve.ore  = (uint32_t)parse_number_u64(value); return true; }
+	if (strcmp(key, "build.reserve_gold") == 0) { c->build_auto.reserve.gold = (uint32_t)parse_number_u64(value); return true; }
+
+	if (strcmp(key, "research.enabled") == 0) {
+		c->research_auto.enabled = (strcmp(value, "true") == 0);
+		return true;
+	}
+
+	if (strcmp(key, "research.categories") == 0) {
+		return ParseResearchCategories(c, value);
+	}
+
+	if (strcmp(key, "research.reserve_food") == 0) { c->research_auto.reserve.food = (uint32_t)parse_number_u64(value); return true; }
+	if (strcmp(key, "research.reserve_rock") == 0) { c->research_auto.reserve.rock = (uint32_t)parse_number_u64(value); return true; }
+	if (strcmp(key, "research.reserve_wood") == 0) { c->research_auto.reserve.wood = (uint32_t)parse_number_u64(value); return true; }
+	if (strcmp(key, "research.reserve_ore") == 0)  { c->research_auto.reserve.ore  = (uint32_t)parse_number_u64(value); return true; }
+	if (strcmp(key, "research.reserve_gold") == 0) { c->research_auto.reserve.gold = (uint32_t)parse_number_u64(value); return true; }
 
 	if (strcmp(key, "gather.radius") == 0) {
 		c->gather.radius = (uint16_t)strtoul(value, NULL, 10);

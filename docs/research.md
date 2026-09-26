@@ -46,8 +46,9 @@ from the network:
 - costs (resources, time) and prerequisites,
 - the order in which the game displays them.
 
-They are in the client's own data, which is packed in compressed Unity bundles that could not be
-read as plain files. The community wiki lists them: see the next section.
+They are in the client's own data tables, which the bot ships a copy of: see
+[The game's own tables](#the-games-own-tables-every-id-its-category-its-levels). (They were first thought unreadable - packed in
+Unity bundles - and taken from the community wiki, next section; the bundles turned out to be readable.)
 
 ## The research table (from the wiki)
 
@@ -106,50 +107,55 @@ python3 tools/fetch_research_images.py --from-dir D    # otherwise: import icons
 **Licence and attribution.** The wiki's text is CC BY-SA 3.0 (Lords Mobile Wiki contributors); the icons are game
 artwork belonging to IGG, taken from the wiki. The `source` block of both files says so: keep it.
 
-### Which of these is which number in the game
+### The game's own tables: every id, its category, its levels
 
-The wiki has no protocol ids, and the server sends levels by id. So the table cannot yet be read against the levels
-the bot receives. `game_id` is filled for the 14 researches whose id is known:
+The wiki cannot say which number is which research, but the game can: the client ships its data tables, and the
+ids the server sends are the ones in them. They are Unity text assets in `Loading/Table.unity3d` (in the APK, and in the PC
+client's `Download/6000/Loading/`, the more recent copy - identical for research), names in the string bundles next to it.
+The record layouts (`TechKindTbl`, `TechDataTbl`, `TechLevelTbl`) come from an Il2CppDumper dump of the game
+([apk-analysis.md](apk-analysis.md)), and every table's size is checked against its record count, so nothing here is guessed.
 
-| Id | Research | |
-|---|---|---|
-| 6 | Construction Speed | confirmed (game UI) |
-| 8 | Gem Harvesting I | confirmed |
-| 74 | Energy Recovery I | confirmed |
-| 123 | More Gatherers | confirmed |
-| 125 | Bigger Bags I | confirmed |
-| **126** | **Tax Break** | **inferred** (below) |
-| 143 | Gold Storage I | confirmed |
-| 229, 234 | Gem Harvesting II, Bigger Bags II | confirmed |
-| 299, 301, 302, 303, 305 | Barracks Expansion II, Ration Run IV, Forced March III, Bigger Bags III, Quick Maneuvers III | confirmed |
+```
+python3 tools/extract_game_tables.py --table .../Table.unity3d --strings .../StringFre.unity3d [--strings-en .../String.unity3d]
+```
 
-Two identified ones are not mapped because the wiki names them differently: #228 "Wonder March I" (the wiki has
-"Wonder March") and #54 "Fire Trebuchet" (the wiki has "Fire Trebuchet Subsidy"), and #57, the rampart defence
-research of the captures, has no name yet.
+It writes `gamedata/game_research.json` (everything) and `src/research_table.c` (what the bot uses, declared in
+`include/research_table.h`). What it holds: **403 researches, 16 categories, 3,425 levels**; per research its category, name
+(French and English), maximum level and whether the game marks it not researchable (`locked`: #238, #242, #246, #347); per level the
+base duration in seconds (before any speed bonus), the five resource costs, the Academy level needed, the prerequisites
+(research + level), the might and the effect (id and value).
 
-**What was tried to map the rest, and why it does not work** (so it is not tried again):
+**Confirmed against the game**: the 14 ids known from the game's UI all carry the name it showed, and **#126 is Tax Break**
+(Army Leadership, prerequisite #142 at level 3, Academy 22, +0.1% per level - what this page had only inferred). Gear, which
+holds #299-#305, is category 13. The maximum levels agree with the wiki (Wonder Battles has 27 researchable, Advanced Wonder
+Battles 32, as the wiki counts them, once the `locked` ones are left out). **Guild Duel**, which the wiki lacks, is in the game's
+table: 26 researches, #378-#403.
 
-- *Order in the grid.* The known ids do not follow the tree's layout: in Gear, 299, 301, 302, 303, 305 sit at rows 3,
-  1, 1, 2, 0. No reading order of the grid reproduces them.
-- *Constraints from the two accounts* (each level must be at most the research's maximum, and the Academy level required
-  by each level reached must not exceed the account's Academy, 30 and 24): a wiki research is still compatible with
-  438 of the 500 ids on average. The 14 known ones all pass, which validates the check, but it identifies nothing.
-- *Level signatures.* The two accounts' levels for an id, (level on account 1, level on account 2), take only 26 different
-  values over the 297 started researches (101 of them are (10, 0)), and only 3 are unique.
-- *Durations.* The real duration of a research the bot saw start (#57: 3069 s at level 4, 8503 s at level 5) does not
-  match any wiki research at a constant speed factor: the wiki's "Orig. Time" is out of date for the current game version.
-- *Files of the game.* `Download/Data` only holds per-account saves; the tables are inside the compressed bundles
-  (about 4 GB), not extracted.
+**Ids do not follow the categories** (later additions took the numbers after the first 257: Defense is #10-#72 with holes,
+Familiar Battles #258-#287, Gear #288-#317...): always go through the table, never through ranges.
 
-An id can only be learned **from the game side**: the game never shows it, the server sends it when a research changes
-level. So the bot now records it by itself: at every login it compares the levels with the ones saved at the previous
-login (`<data.path>/research_levels.bin`) and logs each change:
+| Tab | Category | Wiki name | Ids | Researches | Academy |
+|---|---|---|---|---|---|
+| 1 | Économie | Economy | 1-9 | 9 | - |
+| 2 | Défense | Defense | 10-72 | 19 | - |
+| 3 | Militaire | Military | 26-323 | 36 | - |
+| 4 | Chasse au monstre | Monster Hunt | 73-94 | 22 | - |
+| 5 | Améliorer la défense | Upgrade Defenses | 56-69 | 14 | 10 |
+| 6 | Améliorer l'Armée | Upgrade Military | 95-191 | 27 | 10 |
+| 7 | Direction Armée | Army Leadership | 121-144 | 24 | 17 |
+| 8 | Commandement Militaire | Military Command | 145-227 | 23 | 17 |
+| 9 | Familiers | Familiars | 167-190 | 24 | - |
+| 10 | Batailles de familiers | Familiar Battles | 258-287 | 30 | 21 |
+| 11 | Sceaux | Sigils | 192-226 | 35 | 24 |
+| 12 | Batailles de Merveille | Wonder Battles | 228-257 | 30 (27 researchable) | 24 |
+| 13 | Équipement | Gear | 288-317 | 30 | 25 |
+| 14 | Batailles de merveilles avancée | Advanced Wonder Battles | 324-356 | 33 (32) | 25 |
+| 15 | Éveil du mana | Mana Awakening | 357-377 | 21 | 25 |
+| 16 | Duel de guildes | *(not on the wiki)* | 378-403 | 26 | 15 |
 
-    [RESEARCH] #57 : niveau 2 -> 5 depuis la dernière connexion
-
-Anyone who plays between two logins and notes what they researched gives one id per line; the same holds for the
-`[RESEARCH] Lancée : #<id>` and `Terminée : #<id>` lines the bot logs when it starts or sees a research finish. Add the pair to
-`KNOWN_GAME_IDS` in `tools/import_wiki_research.py` and run it again.
+(The ids given are the lowest and highest of each category, not a range: they interleave.) The `game_id` field of the wiki
+table (`tools/import_wiki_research.py`, 14 of 347 filled) is superseded by this; the wiki file is still where its own
+effects text comes from.
 
 ### The delivery tax: the Trading Post, minus Tax Break
 
@@ -172,34 +178,10 @@ the estimate is rougher there and the report corrects it after the first deliver
 
 ## Categories (the game's order)
 
-Économie, Défense, Militaire, Chasse au monstre, Améliorer la défense, Améliorer l'armée,
-Direction armée, Commandement militaire, Familiers, Batailles de familiers, Sceaux, Batailles de
-merveille, Équipement, Batailles de merveille avancée, Éveil du mana, Duel de guilde.
-
-Ids identified so far (from the game's UI), which also show roughly where the categories sit in the
-numbering. The ranges are a deduction from these few points, not a fact:
-
-| Id | Name |
-|---|---|
-| 6 | Economy: Construction Speed |
-| 8 | Economy: Gem Harvesting I |
-| 54 | Military: Fire Trebuchet |
-| 57 | rampart defence research (the player calls it « déf rempart »); exact name not read |
-| 74 | Monster hunt: Energy Recovery I |
-| 123 | Army Leadership: More gatherers |
-| 125 | Army Leadership: Bigger Bags I (supply capacity) |
-| 126 | in progress in the capture, same category (Army Leadership); name not read |
-| 143 | Army Leadership: Gold Storage I |
-| 228 | Wonder Battles: Wonder March I |
-| 229 | Wonder Battles: Gem Harvesting II |
-| 234 | Wonder Battles: Bigger Bags II (supply capacity) |
-| 299 | Gear: Barrack Expansion II |
-| 301 | Gear: Ration Run IV |
-| 302 | Gear: Forced March III |
-| 303 | Gear: Bigger Bags III (supply capacity) |
-| 305 | Gear: Quick Maneuvers III |
-
-Effect values are known only for the researches in `include/tech_research.h`.
+Économie, Défense, Militaire, Chasse au monstre, Améliorer la défense, Améliorer l'armée, Direction armée,
+Commandement militaire, Familiers, Batailles de familiers, Sceaux, Batailles de merveille, Équipement, Batailles de
+merveille avancée, Éveil du mana, Duel de guilde. Which id belongs to which one is in the game's table (previous
+section); `$research` lists them with how many are finished.
 
 ## Starting, cancelling, finishing
 
@@ -239,26 +221,56 @@ Things to know:
 - After a start the game also sends an alliance help request (`_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP`,
   2852, 5 bytes, sent by the client; the answer comes back as 2853). Its meaning was not analysed.
 
-**Not seen yet** (so not implemented): a start that needs no item at all (all four captured starts used
-items, so it is not known whether the game then sends the same request with `n = 0` or the plain
-`_MSG_REQUEST_RESEARCH_EVENT_START`, 3202), the "free" (3204/3205) and "instant" (3209/3210) requests, and
-the error codes of a refused start or cancel.
+### The plain start (no item), confirmed
 
-In the bot: `RequestResearchStart()`, `RequestResearchCancel()`, and `RecvResearchStart/Cancel/Complete()`
-in `src/protocol.c`. The answers keep `Connection.research` up to date (research in progress, level reached
-when one completes). Nothing sends a research by itself.
+Captured from the PC client on research **#221** (Furious Defense (Ranged), level 8 -> 9), with enough resources in stock so that
+no item had to be used: `_MSG_REQUEST_RESEARCH_EVENT_START` (**3202**), payload `u32 seq, u16 tech id, u8 target level, 3 zero
+bytes` (10 bytes, `1a000000 dd00 09 000000`), the same shape as the cancel. The answer is the same 44-byte 3203 as the smart-use
+start's (status 0, tech, level, start time, duration). It was followed at once by the client's alliance help request (2852, 5 bytes)
+and the server's 2853 - the game asks for help by itself after every start.
+
+The base duration of that level is 4,258,620 s (49 days); the answer said **926,108 s** (10.7 days): the account's research speed
+divides the table's `time` by about 4.6. So the table gives an order of magnitude, the answer gives the real duration.
+
+Also seen in the same capture: an item speed-up (1427, kind 5, five speed-up items: 1257, 1259, 1262 (3 h), 1263, 1265, answered by
+1428 with what is left) finishes the research in progress at once, followed by the completion push 3208. Trying to start a second
+research **while one is running sent no packet at all**: the client refuses on its own, so the server's error code for that is still
+unknown - the bot checks it itself before sending (`ResearchInProgress`).
+
+**Not seen yet**: the "free" (3204/3205) and "instant" (3209/3210) requests, and the error codes of a refused start or cancel.
+
+In the bot: `RequestResearchStartPlain()` (the plain start), `RequestResearchStart()` (with items), `RequestResearchCancel()`, and
+`RecvResearchStart/Cancel/Complete()` in `src/protocol.c`. The answers keep `Connection.research` up to date (research in progress,
+level reached when one completes). `$research start <category>|#<id>` (commands.md) starts, on request, the next research the account
+can start now (`ResearchPickNext()`, see [the order](#prerequisites-and-the-order)). The automatic research
+(`research.enabled` / `research.categories`, `ResearchAutoTick()`) does the same by itself whenever no research is running
+([configuration.md](configuration.md#automatic-research)).
+
+### Prerequisites and the order
+
+Each level of a research has its own prerequisites in the table: up to 4 `(research, level)` pairs that must be reached, and an Academy
+level. **They are per level** (381 of the 403 researches ask something for level 1, and many again for levels 2 to 10), **not just for
+the first one**. Checked against a real account (the captured one, 297 researches started): none of the levels it reached breaks
+its prerequisites, which is what confirms the reading. 43 of the 2,365 prerequisites point to a research of **another category**, and
+some researches need each other at different levels (#14 and #15), so a chain has to be followed level by level, never research by
+research. The Academy level counts its mana part: the Mana Awakening researches ask for 30 to 55.
+
+The bot's order (`ResearchPickNext()`): every research of the chosen category is a goal, taken to its maximum. For a goal, the step is
+its next level, or, when that level needs a research the account has not reached, the step of that prerequisite (recursively, any
+category, a chain deeper than 24 or a loop is dropped). The steps that can be started (Academy, base cost against the stock) compete:
+the one that unblocks the most goals first - a prerequisite several researches wait for before one nothing waits for - then the
+shortest. `tests/bot_logic_test.c` runs every one of the 16 categories from a blank account to its maximum through this rule: it never
+dead-ends and every step it starts has its prerequisites met at that moment.
 
 ## To start researches from the bot on its own
 
-1. **The missing captures** (one action each, `pktmon`, PC client): start a research when you have enough
-   resources so that no item is needed; finish one for free and one instantly with the game's own buttons;
-   try a refused start (not enough resources, another research already running) to see the error code.
-2. **The research table**: now in `gamedata/research.json` (see above), except the 16th category (Guild Duel)
-   and the numbers the game uses for each research (`game_id`, 14 of 347 known). Those numbers are what is left to
-   map before the bot can look up a research from what the server sends.
-3. With both, "which is done, which is left" is `ResearchLevel()` against the maximum level, and choosing the
-   next one is a matter of prerequisites and priorities set in the configuration.
+1. ~~The missing captures~~ - the plain start was captured (previous section). Still missing, and only useful to handle a refusal
+   cleanly: the server's error code for a start it refuses, and the "free"/"instant" finishes.
+2. ~~The research table~~ - done: every id, category, maximum level, cost, duration and prerequisite is in
+   `src/research_table.c` (see [The game's own tables](#the-games-own-tables-every-id-its-category-its-levels)).
+3. With both, choosing the next research of a category is a matter of prerequisites (`req_id`/`req_level`), the
+   Academy level, the resources and a priority set in the configuration.
 
-Without 2 the bot can already start and cancel a research it is told to (by id and level), but it cannot
-tell what is worth researching, nor whether the maximum level is reached. Without 1 it does not know how to
-start one when no item has to be used.
+Today the bot can tell which researches are done and what is left in a category (`$research`), start the next one of a category on
+request (`$research start`), and work through chosen categories by itself (`research.enabled`, `research.categories`). The automatic
+mode spends the stock, guild bank deposits included (`research.reserve_*` keeps some back).

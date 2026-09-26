@@ -162,3 +162,12 @@ Training section): since the cap can't be predicted without finding that formula
 across every kind/tier, `AutoTrainTick` learns it live - starts from a modest guess, then reuses
 whatever the server actually granted last time (+50% headroom) for every subsequent request,
 account-wide. This needs no formula and adapts automatically as the real cap changes over time.
+
+### The game's data tables (research and others)
+
+The APK's `assets/Loading/Table.unity3d` (9.5 MB, 556 tables) and `String.unity3d` are plain Unity bundles: `pip install UnityPy`
+reads them, every table is a `TextAsset` (u16 version, u16 record count, then fixed-size records - the layouts are the structs of
+the same names in `dump.cs`, e.g. `TechDataTbl`, `TechLevelTbl`). The PC client keeps a more recent copy under
+`Lords Mobile PC_Data/Download/6000/Loading/`. Strings: `StringTable` is an index of (offset, length) pairs followed by the text
+blob, and `StringTable2` maps a string id (what a table stores) to the 1-based position of that text. Research uses it, see
+[research.md](research.md) and `tools/extract_game_tables.py`; the same method opens any other table.

@@ -30,6 +30,7 @@
 #include "des.h"
 #include "research.h"
 #include "buildings.h"
+#include "building_table.h"
 
 typedef enum {
 	EMS_Null,
@@ -504,6 +505,13 @@ typedef struct {
     uint64_t next_rescan_at;
 
     uint8_t  active_marches; // gather marches this code has out right now (subset of player.current_marches)
+    /* Marches already out when the bot connected (restart/reconnect): it never sent them, so
+     * active_marches starts at 0 and, counting only its own, let it fill the whole march budget on
+     * top of them - with 2 out and 3 reserved it went to 5/5. The login snapshot only gives a count,
+     * not which are gather marches, so they are all charged against gather.max_marches (the safe
+     * side: never more than reserved in total). See GatherInheritedMarches. */
+    uint8_t  inherited_marches;
+    bool     inherited_set;  // taken once, from the first march snapshot
     uint64_t next_march_at;  // now_ms() deadline: do not send another gather march before this
 
     /* Committed to a tile (targeted, slot reserved) but the march itself still waits: a
@@ -909,6 +917,66 @@ typedef struct {
 	uint16_t consecutive_refusals[4][5];         // [kind][tier], resets on any accepted order for that pair
 	uint64_t next_action_at;        // now_ms(): at most one new training order per tick, paced like gather
 } AutoTrainSettings;
+
+/* Automatic research: `research.categories` lists, in priority order, the categories (the game's own category
+ * numbers, research_table.h) the bot researches by itself. Whenever no research is running it starts the next
+ * one it can (ResearchPickNext, auto mode: prerequisites first, in any category; Academy; cost against what is left
+ * after research.reserve_*). The guild bank's deposits are NOT held back. The game runs one research at a time. */
+typedef struct {
+	bool         enabled;
+	uint8_t      kinds[RESEARCH_KIND_COUNT_MAX];  // category numbers, priority order
+	uint8_t      kind_count;
+	ResourceStock reserve;                         // never spent by research
+
+	bool         pending;                          // a start was sent, its answer (3203) not received yet
+	uint16_t     pending_tech;
+	uint64_t     pending_since;                    // now_ms()
+	uint64_t     next_check_at;                    // now_ms(): 0 = arm on the first look
+	uint64_t     retry_at[RESEARCH_ID_MAX + 1];    // per research: left alone until then after a refusal
+	char         state[192];                       // last decision in words, shown by the console
+} ResearchAutoSettings;
+
+/* $askhelp: start a construction, ask the alliance for help, wait a few seconds, cancel it, again and again. One
+ * cycle = RequestBuildStart -> (answer 2004) -> RequestBuildHelp -> 3 to 4 s -> RequestBuildCancel -> (answer 2007). */
+typedef enum { ASKHELP_IDLE, ASKHELP_WAIT_BEGIN, ASKHELP_WAIT_HELP, ASKHELP_WAIT_CANCEL_TIMER, ASKHELP_WAIT_CANCEL_ANSWER, ASKHELP_PAUSE } AskHelpPhase;
+
+typedef struct {
+	bool           active;
+	AskHelpPhase  phase;
+	char           requester[64];   // who is told how it went
+	uint16_t       total;           // cycles asked for
+	uint16_t       done;            // cycles completed (cancel answered)
+	uint16_t       slot;            // the building being started / cancelled
+	uint16_t       build_id;
+	int8_t         queue;           // the queue entry the start went to, -1 = not known yet
+	uint64_t       phase_since;     // now_ms()
+	uint64_t       next_at;         // now_ms(): when the current wait ends
+	ResourceStock  stock_before;    // to tell what the whole thing cost in the end
+	int64_t        stock_before_raw[5];
+} AskHelpState;
+
+/* Automatic construction: `build.buildings` lists, in priority order, the building types (the game's build_id) whose
+ * buildings the bot takes to their maximum level. The planner (BuildPickNext) follows the prerequisites from building to
+ * building; the tick starts what it picks with the plain start (RequestBuildStart, captured from the PC client) whenever a
+ * construction queue is free. */
+typedef struct {
+	bool         enabled;
+	uint16_t     types[32];                       // build_id, priority order
+	uint8_t      type_count;
+	ResourceStock reserve;                         // never spent by construction
+
+	uint64_t     next_check_at;                    // now_ms()
+	bool         pending;                          // a start was sent, its answer (2004) not received yet
+	uint16_t     pending_slot;
+	uint64_t     pending_since;                    // now_ms()
+	uint16_t     blocked_slot[16];                 // slots left alone for a while after a refusal or a missing answer
+	uint64_t     blocked_until[16];                // now_ms()
+	uint8_t      blocked_next;                     // round-robin cursor in the two arrays above
+	uint16_t     plan_slot;                        // the step the planner picked last (0 = none)
+	uint16_t     plan_build_id;
+	uint8_t      plan_level;
+	char         state[224];                       // last decision in words, shown by the console
+} BuildAutoSettings;
 
 typedef struct {
 	bool loaded;
@@ -1331,6 +1399,8 @@ typedef struct {
 	
 	uint8_t building_count;
 	BuildingInfo building[256];
+	int64_t  construction_extra_expires;  // the 8 bytes after the entries of _MSG_RESP_BUILDINGEVENT: when the second queue stops (INT64_MAX = permanent)
+	bool     construction_loaded;         // that packet was received
 	BuildingConstruction construction[BUILDING_QUEUE_SLOTS]; // what is being built, from _MSG_RESP_BUILDINGEVENT
 	
 	AllianceGiftList alliance_gifts;
@@ -1364,6 +1434,9 @@ typedef struct {
 	
 	TroopData troop;
 	AutoTrainSettings autotrain;
+	ResearchAutoSettings research_auto;
+	BuildAutoSettings build_auto;
+	AskHelpState askhelp;
 	TrainingSlot training[4]; // indexed by TroopKind - see TrainingSlot's comment
 
 	WoundedTroopData wounded;

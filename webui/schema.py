@@ -46,6 +46,31 @@ CHANNELS = [
 
 RESOURCES = [("food", "Nourriture"), ("rock", "Pierre"), ("wood", "Bois"), ("ore", "Minerai"), ("gold", "Or")]
 
+# The game's 16 research categories, in the order of its tabs: (name written in the config file, label). The config
+# keeps the English name so it stays readable and stable; the bot also accepts the French one or the tab number.
+# Checked against gamedata/game_research.json by tests.
+RESEARCH_CATEGORIES = [
+    ("Economy", "Économie"), ("Defense", "Défense"), ("Military", "Militaire"), ("Monster Hunt", "Chasse au monstre"),
+    ("Upgrade Defenses", "Améliorer la défense"), ("Upgrade Military", "Améliorer l'armée"),
+    ("Army Leadership", "Direction armée"), ("Military Command", "Commandement militaire"),
+    ("Familiars", "Familiers"), ("Familiar Battles", "Batailles de familiers"), ("Sigils", "Sceaux"),
+    ("Wonder Battles", "Batailles de merveille"), ("Gear", "Équipement"),
+    ("Advanced Wonder Battles", "Batailles de merveille avancée"), ("Mana Awakening", "Éveil du mana"),
+    ("Guild Duel", "Duel de guilde"),
+]
+
+# The buildings the automatic construction can work on (build_id order): (name written in the config file, label).
+# Checked against gamedata/game_buildings.json by tests. The special ones (residence, towers, hero statue...) are left out.
+BUILD_BUILDINGS = [
+    ("Lumber Mill", "Scierie"), ("Quarry", "Carrière"), ("Mines", "Mines"), ("Farm", "Ferme"), ("Manor", "Manoir"),
+    ("Barracks", "Caserne"), ("Infirmary", "Infirmerie"), ("Castle", "Château"), ("Vault", "Chambre forte"),
+    ("Academy", "Académie"), ("Battle Hall", "Hall de bataille"), ("Castle Wall", "Remparts"), ("Watchtower", "Tour de guet"),
+    ("Embassy", "Ambassade"), ("Workshop", "Atelier"), ("Treasure Trove", "Salle au trésor"), ("Trading Post", "Comptoir"),
+    ("Prison", "Prison"), ("Altar", "Autel"), ("Monsterhold", "Hall des Monstres"), ("Spring", "Source"),
+    ("Mystic Spire", "Cime Mystique"), ("Gym", "Camp"), ("Lunar Foundry", "Fonderie lunaire"), ("Mana Lode", "Filon de mana"),
+    ("Mana Chamber", "Chambre de mana"),
+]
+
 TROOP_TIERS = ["T1", "T2", "T3", "T4", "T5"]
 TROOP_KINDS_FR = [("infantry", "Infanterie"), ("ranged", "Distance"), ("cavalry", "Cavalerie"), ("siege", "Siège")]
 GATHER_KINDS = ["INFANTRY", "RANGED", "CAVALRY", "SIEGE"]
@@ -314,6 +339,42 @@ CATEGORIES = [
         ],
     },
     {
+        "id": "research",
+        "label": "Recherche",
+        "description": "Le bot lance tout seul, dès que la file est libre, la prochaine recherche possible des catégories "
+                      "choisies, la première de la liste d'abord. Il connaît les prérequis : quand une recherche en demande une "
+                      "autre, il fait d'abord celle-là (même d'une autre catégorie), en commençant par ce qui débloque le plus de "
+                      "recherches, puis la plus courte. Le jeu ne fait qu'une recherche à la fois. En dessous : où en sont toutes "
+                      "vos recherches, catégorie par catégorie.",
+        "fields": [
+            _bool("research.enabled", "Activer la recherche automatique",
+                  "Le bot dépense le stock du compte pour lancer les recherches, y compris ce que les membres ont déposé à la "
+                  "banque de guilde : gardez une partie avec les réserves ci-dessous."),
+            {"key": "research.categories", "label": "Catégories à rechercher (par ordre de priorité)", "type": "ordered_list",
+             "options": RESEARCH_CATEGORIES, "default": "", "optional": True, "depends": "research.enabled",
+             "help": "Le bot cherche une recherche à lancer dans la première catégorie ; s'il n'y en a aucune de possible "
+                     "(Académie trop basse, ressources), il passe à la suivante."},
+        ] + _resource_sizes("research.reserve_", {}, "research.enabled"),
+    },
+    {
+        "id": "build",
+        "label": "Construction",
+        "description": "Le bot prépare la construction automatique : il choisit, dans les bâtiments listés (le premier d'abord), la "
+                      "prochaine amélioration possible, en suivant les prérequis (un bâtiment qui en demande un autre à un certain "
+                      "niveau passe après lui), en commençant par ce qui débloque le plus de bâtiments, puis la plus courte. Il lance "
+                      "une construction dès qu'une file est libre (deux files si la deuxième est active). Il n'améliore que les "
+                      "bâtiments existants. En dessous : vos bâtiments, où en est chacun.",
+        "fields": [
+            _bool("build.enabled", "Activer la construction automatique",
+                  "Le bot dépense le stock du compte pour lancer les constructions, y compris ce que les membres ont déposé à la "
+                  "banque de guilde : gardez une partie avec les réserves ci-dessous."),
+            {"key": "build.buildings", "label": "Bâtiments à améliorer (par ordre de priorité)", "type": "ordered_list",
+             "options": BUILD_BUILDINGS, "default": "", "optional": True, "depends": "build.enabled",
+             "help": "Chaque bâtiment de ce type est mené jusqu'à son niveau maximum. S'il en faut d'autres d'abord (prérequis), "
+                     "ils passent avant, même s'ils ne sont pas dans la liste."},
+        ] + _resource_sizes("build.reserve_", {}, "build.enabled"),
+    },
+    {
         "id": "guildbank",
         "label": "Banque de guilde",
         "description": "Chaque membre dépose des ressources en les envoyant au bot ; le bot note ce qu'il a réellement reçu "
@@ -477,6 +538,24 @@ COMMANDS = [
      "details": ["Le bot doit avoir déjà reçu les données de l'infirmerie du serveur (peu après la connexion) ; sinon il le dit.",
                  "Rien n'est envoyé s'il n'y a aucun blessé."],
      "example": "heal"},
+    {"group": "Administration", "name": "askhelp", "usage": "askhelp <fois>", "who": "Administrateurs",
+     "summary": "Améliore la ferme gardée à bas niveau, demande de l'aide à l'alliance, attend 3 à 4 secondes, annule la construction, et recommence : autant de cycles que demandé (100 au plus).",
+     "details": ["C'est toujours la ferme du compte qui a le niveau le plus bas (à égalité, l'emplacement le plus petit) : la construction automatique ne la monte jamais, "
+                 "pour qu'elle reste disponible. Pas de ferme, ferme au maximum, ressources ou prérequis manquants : la commande le dit.",
+                 "Il n'annule que la construction qu'il vient de lancer, dans la file où elle est entrée ; l'autre file n'est jamais touchée. Si une réponse manque, si le serveur renvoie une erreur ou si les deux files sont occupées, la série s'arrête et le dit.",
+                 "À la fin (ou à l'arrêt) le bot indique combien de cycles sont faits et ce que le stock a gagné ou perdu depuis le début : c'est la façon de voir si l'annulation rend tout. Chaque cycle envoie une demande d'aide à toute l'alliance.",
+                 "askhelp stop arrête la série. La construction automatique est suspendue pendant la série."],
+     "example": "askhelp 20"},
+    {"group": "Administration", "name": "research", "usage": "research [catégorie]", "who": "Administrateurs",
+     "summary": "Sans argument : la recherche en cours et, pour chaque catégorie, combien de recherches sont terminées. Avec une catégorie (nom ou numéro d'onglet) : ce qu'il y reste à faire.",
+     "details": ["Le nom peut être tapé sans accent, en français ou en anglais ; s'il correspond à plusieurs catégories, le bot les liste.",
+                 "Réservé aux administrateurs. Le même détail, plus complet, est dans l'onglet « Recherche » de la console."],
+     "example": "research sceaux"},
+    {"group": "Administration", "name": "research start", "usage": "research start <catégorie>|#<numéro>", "who": "Administrateurs",
+     "summary": "Lance tout de suite la prochaine recherche possible de cette catégorie (ou cette recherche précise).",
+     "details": ["Vérifie l'Académie, les prérequis et le coût de base contre le stock ; prend la recherche la plus courte. Dit pourquoi si rien ne peut être lancé.",
+                 "Ne fait rien pendant qu'une recherche tourne : le jeu n'en accepte qu'une à la fois. La recherche automatique (onglet « Recherche ») fait la même chose toute seule."],
+     "example": "research start sceaux"},
     {"group": "Administration", "name": "revive", "usage": "revive", "who": "Administrateurs",
      "summary": "Lance une résurrection gratuite (sanctuaire) pour tous les morts d'un coup - la version qui ne coûte rien mais demande d'attendre, pas la version instantanée avec des points.",
      "details": ["Le bot doit avoir déjà reçu les données du sanctuaire du serveur ; sinon il le dit.",
@@ -624,6 +703,13 @@ def validate(field, raw):
             raise ValueError("Liste anti-espionnage invalide.")
         if len(names) > 8:
             raise ValueError("Maximum 8 objets.")
+        return ", ".join(names)
+
+    if kind == "ordered_list":
+        names = [part.strip() for part in text.split(",") if part.strip()]
+        known = {name for name, _ in field["options"]}
+        if any(name not in known for name in names) or len(set(names)) != len(names):
+            raise ValueError("Liste invalide.")
         return ", ".join(names)
 
     if kind == "gather_kind_priority":

@@ -19,10 +19,10 @@
  *                ids 1..500. A level is 0..10 in every capture (15 is the most a nibble
  *                can hold, the game's own maximum per research is NOT in this packet).
  *
- * NOT sent by the server, so not available to the bot from the network: research names,
- * per-research maximum level, effects, costs, prerequisites, categories. Opening the
- * research window and all 16 categories sent no request at all (only keepalives): the client
- * reads them from its own data. See docs/research.md for what has to be filled in by hand.
+ * NOT sent by the server: research names, per-research maximum level, effects, costs,
+ * prerequisites, categories. Opening the research window and all 16 categories sent no request
+ * at all (only keepalives): the client reads them from its own data tables, which the bot
+ * ships a copy of (research_table.h, docs/research.md).
  *
  * Starting, cancelling and finishing (confirmed on one account, research #57, levels 3 to 5;
  * every payload below is what follows the 4-byte packet header, request payloads as they
@@ -36,19 +36,24 @@
  *             u32 duration in seconds (0 when the game finished it at once for free),
  *             u32 unknown, 6 x u32 that look like the resource stocks afterwards
  *           response 1431 _MSG_RESP_SMARTUSE_FOR_WORK: what is left in the bag of each item used
+ *   START   request  3202 _MSG_REQUEST_RESEARCH_EVENT_START (plain, no item - enough resources in stock;
+ *             confirmed on #221 level 8 -> 9): u32 seq, u16 tech id, u8 TARGET level, 3 zero bytes.
+ *             Same 44-byte answer 3203. Trying to start one while another runs sent nothing at all: the
+ *             client checks it itself, so the server's refusal code is still unknown.
  *   CANCEL  request  3206 u32 seq, u16 tech, u8 target level, 3 zero bytes
  *           response 3207, 32 bytes: u8 status, u16 tech, u8 level, u32 unknown, 6 x u32 stocks
  *   DONE    push     3208 _MSG_RESP_RESEARCH_EVENT_COMPLETE: u16 tech, u8 level reached
  *   SPEED   request  1427 _MSG_REQUEST_SMARTUSE_SPEEDUP: u32 seq, u16 kind (5 = research),
  *             u16 n, n x { u16 item id, u16 quantity }; or 1406 _MSG_REQUEST_USEITEM one by one
  *
- * Not seen: a plain start with no item to use (the 4 captured starts all used resource items),
- * the "free" (3204) and "instant" (3209) requests, and the meaning of the unknown fields.
+ * Not seen: the "free" (3204) and "instant" (3209) requests, the error codes of a refused start or
+ * cancel, and the meaning of the unknown fields.
  */
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "research_table.h"
 
 #define RESEARCH_ID_MAX        500
 #define RESEARCH_LEVEL_BYTES   (RESEARCH_ID_MAX / 2)
@@ -142,27 +147,11 @@ static inline double ResearchDeliveryTaxPercent(const ResearchState *r, double t
     return tax > 0.0 ? tax : 0.0;
 }
 
-/* Names known so far (from the game's UI, English). Every other id is unknown: NULL. */
+/* "Category: Name" in English, from the game's own tables (research_table.h), NULL for an unknown id. */
 static inline const char *ResearchKnownName(uint16_t id)
 {
-    switch (id) {
-        case 6:   return "Economy: Construction Speed";
-        case 8:   return "Economy: Gem Harvesting I";
-        case 54:  return "Military: Fire Trebuchet";
-        case 74:  return "Monster hunt: Energy Recovery I";
-        case 123: return "Army Leadership: More gatherers";
-        case 125: return "Army Leadership: Bigger Bags I";
-        case 143: return "Army Leadership: Gold Storage I";
-        case 228: return "Wonder Battles: Wonder March I";
-        case 229: return "Wonder Battles: Gem Harvesting II";
-        case 234: return "Wonder Battles: Bigger Bags II";
-        case 299: return "Gear: Barrack Expansion II";
-        case 301: return "Gear: Ration Run IV";
-        case 302: return "Gear: Forced March III";
-        case 303: return "Gear: Bigger Bags III";
-        case 305: return "Gear: Quick Maneuvers III";
-        default:  return NULL;
-    }
+    const ResearchTechInfo *t = ResearchTech(id);
+    return t ? t->label_en : NULL;
 }
 
 #endif

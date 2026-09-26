@@ -555,6 +555,72 @@ than mixing in 25% items for the tail end.
 
 ---
 
+## Automatic Research
+
+Researches the categories you pick, by itself. Whenever no research is running, the bot starts the next one it can, in the first
+category of the list that has one. It knows the prerequisites: when a research needs another one at some level, that one comes first,
+even from another category. Among what it can start, the research that unblocks the most others comes first, then the shortest.
+The game runs one research at a time.
+
+```cfg
+research.enabled = false
+research.categories = Sigils, Gear
+research.reserve_food = 0
+research.reserve_rock = 0
+research.reserve_wood = 0
+research.reserve_ore = 0
+research.reserve_gold = 0
+```
+
+`research.categories` is the priority order. Each entry is a category name - the English name of the game's tab (`Economy`,
+`Defense`, `Military`, `Monster Hunt`, `Upgrade Defenses`, `Upgrade Military`, `Army Leadership`, `Military Command`, `Familiars`,
+`Familiar Battles`, `Sigils`, `Wonder Battles`, `Gear`, `Advanced Wonder Battles`, `Mana Awakening`, `Guild Duel`), or the French
+one, accents optional - or its number in the tabs (1 to 16). An entry that matches nothing, or several categories, is a configuration
+error. The web console's *Recherche* tab writes it for you.
+
+**The order.** Every research of the chosen categories is a goal, taken to its maximum level. For each one, the bot looks at the next
+level it needs: if that level asks for another research at a level the account has not reached (the tables give each level its own
+prerequisites), that research's step comes first, and so on down the chain - in any category, 43 of the game's 2,365 prerequisites
+point to another one, so a category can pull a few researches from a neighbouring one. Among the steps it can start now, the one that
+unblocks the most goals wins (a prerequisite several researches wait for goes before one nothing waits for), then the shortest. A step
+can be started when the Academy is high enough for that level - counted with its mana levels, the last researches ask for 30 to 55 -
+and the stock covers its cost, the game's base cost (the tables do not know your cost reductions). What counts as available is the
+stock minus `research.reserve_*`, which is never spent. **The guild bank's deposits are not held back**: the research spends the
+stock like anything else, so keep a reserve if members' deposits must stay. The bot checks every 5 minutes when nothing can be started, and again a few seconds after a research finishes. A research
+the server refuses is left alone for 10 minutes and the next candidate is tried. Which one is being researched, and why nothing is,
+is shown in the *Recherche* tab and in the log (`[RESEARCH]`).
+
+Start one by hand with `$research start <category>` (docs/commands.md). What the protocol does, and what the tables hold: [research.md](research.md).
+
+---
+
+## Automatic Construction
+
+Upgrades the buildings you pick, by itself. Whenever a construction queue is free, the bot starts the next upgrade the planner picks, in the
+first building type of the list that has one. It only upgrades buildings that exist (it does not place new ones). The account's second
+queue is used when it has one (permanent, or rented and still running: read from the login, see [buildings.md](buildings.md)).
+
+```cfg
+build.enabled = false
+build.buildings = Castle, Barracks
+build.reserve_food = 0
+build.reserve_rock = 0
+build.reserve_wood = 0
+build.reserve_ore = 0
+build.reserve_gold = 0
+```
+
+`build.buildings` is the priority order. Each entry is a building name - English (`Lumber Mill`, `Quarry`, `Mines`, `Farm`, `Manor`, `Barracks`,
+`Infirmary`, `Castle`, `Vault`, `Academy`, `Battle Hall`, `Castle Wall`, `Watchtower`, `Embassy`, `Workshop`, `Treasure Trove`, `Trading Post`,
+`Prison`, `Altar`, `Monsterhold`, `Spring`, `Mystic Spire`, `Gym`, `Lunar Foundry`, `Mana Lode`, `Mana Chamber`), French, accents optional - or its
+`build_id`. A whole name wins over a part of one (`Castle` is the Castle, not the Castle Wall); an entry that matches nothing or several buildings
+is a configuration error. Every building of a chosen type is taken to its maximum level; the buildings it needs first (prerequisites) come first,
+even if they are not in the list, in the same order as the researches: what unblocks the most goes first, then the shortest. Costs are the tables'
+base costs and only the five basic resources are checked (the mana costs are not: the server refuses what is short). What counts as available is
+the stock minus `build.reserve_*`, which is never spent - **the guild bank's deposits are not held back**. **One farm is never upgraded**: the lowest-level one is kept for `$askhelp` (docs/commands.md), whatever the list says. A start the server refuses
+(`_MSG_RESP_BUILDINGERROR`, whose layout has not been seen: it is logged as it comes) leaves that building alone for 10 minutes. See
+[buildings.md](buildings.md#automatic-construction) for the order and for what is confirmed.
+
 ## Future Configuration
 
 The following features are planned or under development:

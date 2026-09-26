@@ -26,6 +26,8 @@
     importResult: null,
     importing: false,
     nav: 0,              // bumped on every navigation, so a late answer cannot pull you back
+    research: { table: null, loading: false, error: "", kind: null },
+    build: { table: null, loading: false, error: "", type: null },   // the construction tab: the game's table, the type shown   // the research tab: the game's table, the category shown
     tagFilter: "",        // sidebar filter: "" = tous les comptes, sinon un tag exact
   };
 
@@ -217,7 +219,9 @@
       main.innerHTML = accountView();
       applyDerived();
       if (S.tab === "logs") startLogs();
-      if (S.tab === "status" || S.tab === "chat") startGame();
+      if (S.tab === "status" || S.tab === "chat" || S.tab === "research" || S.tab === "build") startGame();
+      if (S.tab === "research") loadResearchTable();
+      if (S.tab === "build") { loadBuildTable(); loadResearchTable(); }
       if (S.tab === "bank") startBank();
     } else if (S.view === "add") {
       main.innerHTML = addView();
@@ -335,6 +339,8 @@
         <div class="fields">${block.fields.map(fieldHtml).join("")}</div></section>`;
     });
     if (category.id === "advanced") html += extraHtml();
+    if (category.id === "build") html += `<div id="build-browser">${buildBrowserHtml()}</div>`;
+    if (category.id === "research") html += `<div id="research-browser">${researchBrowserHtml()}</div>`;
     return html;
   }
 
@@ -393,7 +399,7 @@
       const hint = sizeHint(value);
       control = `<input type="text" id="${id}" class="${invalid}" data-key="${esc(key)}" spellcheck="false" value="${esc(value)}">
         <span class="hint ${hint.bad ? "bad" : ""}" data-hint="${esc(key)}">${esc(hint.text)}</span>`;
-    } else if (f.type === "shields" || f.type === "antiscout") {
+    } else if (f.type === "shields" || f.type === "antiscout" || f.type === "ordered_list") {
       control = shieldsHtml(f);
     } else if (f.type === "channels") {
       control = channelsHtml(f);
@@ -409,8 +415,8 @@
 
   function shieldsHtml(f) {
     const key = f.key, current = splitShields(S.form[key]);
-    const list = f.type === "antiscout" ? S.schema.antiscout : S.schema.shields;
-    const addLabel = f.type === "antiscout" ? "Ajouter un objet anti-espionnage…" : "Ajouter un bouclier…";
+    const list = f.type === "ordered_list" ? f.options : f.type === "antiscout" ? S.schema.antiscout : S.schema.shields;
+    const addLabel = f.type === "ordered_list" ? (key.startsWith("build.") ? "Ajouter un bâtiment…" : "Ajouter une catégorie…") : f.type === "antiscout" ? "Ajouter un objet anti-espionnage…" : "Ajouter un bouclier…";
     const label = (name) => (list.find(([n]) => n === name) || [name, name])[1];
     const rows = current.map((name, i) => `<div class="shield-row">
       <span class="n">${i + 1}.</span><span class="l">${esc(label(name))}</span>
@@ -907,15 +913,17 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
 
   async function pollGame() {
     clearTimeout(S.gameTimer);
-    if (S.view !== "account" || (S.tab !== "status" && S.tab !== "chat") || !S.acc) return;
+    if (S.view !== "account" || (S.tab !== "status" && S.tab !== "chat" && S.tab !== "research" && S.tab !== "build") || !S.acc) return;
     const id = S.id;
     try {
       const game = await api("GET", `/api/accounts/${enc(id)}/game`);
-      if (id === S.id && S.view === "account" && (S.tab === "status" || S.tab === "chat")) {
+      if (id === S.id && S.view === "account" && (S.tab === "status" || S.tab === "chat" || S.tab === "research" || S.tab === "build")) {
         game.fetched = Date.now();
         S.game = game;
         const box = $("#game");
         if (box) box.innerHTML = gameHtml(game);
+        refreshResearch();
+        refreshBuild();
         // the message list only: the input/form must survive the poll untouched (focus, draft text)
         const log = $("#chat-log");
         if (log) { const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 24;
@@ -925,6 +933,241 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
       if (error.status === 401) return authProblem();
     }
     S.gameTimer = setTimeout(pollGame, 4000);
+  }
+
+  // ------------------------------------------------------------ research
+
+  // The bot reports the level of each research by id (status.json, "research.levels": two 4-bit levels per byte, docs/research.md);
+  // the game's own table (gamedata/game_research.json, /api/research/table) says what each id is.
+  function researchLevels(hex) {
+    const levels = [0];
+    for (let id = 1; id <= 500; id++) {
+      const byte = parseInt(String(hex || "").substr(((id - 1) >> 1) * 2, 2), 16) || 0;
+      levels.push(id & 1 ? byte & 15 : byte >> 4);
+    }
+    return levels;
+  }
+
+  async function loadResearchTable() {
+    if (S.research.table || S.research.loading) return;
+    S.research.loading = true;
+    try {
+      const table = await api("GET", "/api/research/table");
+      table.byId = {};
+      table.techs.forEach((t) => { table.byId[t.id] = t; });
+      table.kinds.sort((a, b) => a.order - b.order);
+      S.research.table = table;
+    } catch (error) {
+      S.research.error = error.message || "Table des recherches indisponible.";
+    }
+    S.research.loading = false;
+    refreshResearch();
+  }
+
+  function refreshResearch() {
+    const box = $("#research-browser");
+    if (box) box.innerHTML = researchBrowserHtml();
+  }
+
+  const RESEARCH_COSTS = [["food", "food"], ["stone", "rock"], ["wood", "wood"], ["ore", "ore"], ["gold", "gold"]];
+
+  function researchBrowserHtml() {
+    const note = (text) => `<div class="card"><p class="help">${text}</p></div>`;
+    const T = S.research.table, game = S.game;
+    if (S.research.error) return note(esc(S.research.error));
+    if (!T || !game) return note("Chargement…");
+    if (!game.available) return note(game.running ? "Le bot démarre : vos recherches arrivent dès qu'il est en jeu." : "Démarrez le bot pour voir où en sont vos recherches.");
+    const R = game.data.research;
+    if (!R || !R.loaded) return note("Le bot n'a pas encore reçu vos recherches du serveur.");
+
+    const lv = researchLevels(R.levels), stock = game.data.resources, auto = R.auto || {};
+    const elapsed = game.fetched ? (Date.now() - game.fetched) / 1000 : 0;
+    const name = (id) => (T.byId[id] ? T.byId[id].name_fr : "#" + id);
+    const kindOf = (kind) => T.kinds.find((k) => k.kind === kind);
+    const progress = (kind) => {
+      const list = T.techs.filter((t) => t.kind === kind && !t.locked);
+      return { total: list.length, done: list.filter((t) => lv[t.id] >= t.max_level).length,
+        started: list.filter((t) => lv[t.id] > 0 && lv[t.id] < t.max_level).length };
+    };
+
+    // what runs now
+    let running = `<p class="help">Aucune recherche en cours.</p>`;
+    if (R.in_progress) {
+      const t = T.byId[R.in_progress], left = Math.max(0, R.remaining - game.age - elapsed);
+      const pct = R.total > 0 ? Math.min(100, (1 - left / R.total) * 100) : 0;
+      running = `<div class="atrow"><span class="atlabel" style="flex-basis:auto"><strong>${esc(t ? t.name_fr : "#" + R.in_progress)}</strong>
+        &nbsp;niveau ${lv[R.in_progress] + 1}${t ? ` / ${t.max_level}` : ""}</span>
+        <div class="atbar"><div class="atfill" style="width:${pct}%"></div></div>
+        <span class="atval">${fmtDuration(left)} restantes</span></div>`;
+    }
+    const names = (auto.kinds || []).map((k, i) => `${i + 1}. ${esc(kindOf(k) ? kindOf(k).name_fr : "#" + k)}`).join(" · ");
+    const autoHtml = auto.enabled
+      ? `<p class="help"><span class="pill ok">Recherche automatique active</span> ${names || "aucune catégorie choisie"}</p>
+         ${auto.state ? `<p class="help">${icon("clock", 14)} ${esc(auto.state)}</p>` : ""}`
+      : `<p class="help"><span class="pill">Recherche automatique désactivée</span> Réglez-la plus haut, puis redémarrez le bot.</p>`;
+
+    // the categories, in the order of the game's tabs
+    const selected = S.research.kind != null ? S.research.kind
+      : ((R.in_progress && T.byId[R.in_progress]) ? T.byId[R.in_progress].kind : (auto.kinds && auto.kinds.length ? auto.kinds[0] : T.kinds[0].kind));
+    const chips = T.kinds.map((k) => {
+      const p = progress(k.kind), rank = (auto.kinds || []).indexOf(k.kind);
+      return `<button class="rchip" data-act="research-kind" data-kind="${k.kind}" aria-pressed="${k.kind === selected}">
+        <span class="rname">${esc(k.name_fr)}${rank >= 0 ? ` <span class="pill ok">auto ${rank + 1}</span>` : ""}</span>
+        <span class="atbar"><span class="atfill${p.done === p.total ? " done" : ""}" style="width:${p.total ? (p.done / p.total) * 100 : 0}%"></span></span>
+        <span class="rsub">${p.done} / ${p.total} terminées${p.started ? ` · ${p.started} commencée${p.started > 1 ? "s" : ""}` : ""}</span></button>`;
+    }).join("");
+
+    // one category
+    const kind = kindOf(selected), p = progress(selected);
+    const rows = T.techs.filter((t) => t.kind === selected).map((t) => {
+      const l = lv[t.id];
+      let state, detail = "";
+      if (t.locked) {
+        state = `<span class="pill">non recherchable</span>`;
+      } else if (l >= t.max_level) {
+        state = `<span class="pill ok">Terminée</span>`;
+      } else if (R.in_progress === t.id) {
+        state = `<span class="pill warn">En cours</span>`;
+      } else {
+        const row = t.levels[l], why = [], first = [];
+        if (row.academy > R.academy) why.push(`Académie ${row.academy} requise (vous : ${R.academy})`);
+        row.req.forEach(([id, need]) => {
+          if (lv[id] >= need) return;
+          const other = T.byId[id] && T.byId[id].kind !== t.kind ? kindOf(T.byId[id].kind) : null;
+          first.push(`${esc(name(id))} niveau ${need} (vous : ${lv[id]})${other ? ` — ${esc(other.name_fr)}` : ""}`);
+        });
+        const short_of = RESEARCH_COSTS.filter(([field, key]) => stock[key] < row[field]).map(([, key]) => (RSS.find(([k]) => k === key) || [key, key])[1].toLowerCase());
+        state = why.length ? `<span class="pill bad">Académie</span>` : first.length ? `<span class="pill warn">Prérequis</span>`
+          : short_of.length ? `<span class="pill warn">Ressources</span>` : `<span class="pill ok">Prête</span>`;
+        detail = `<p class="help">Niveau ${l + 1} : ${fmtDuration(row.time)} de base · ${RESEARCH_COSTS.map(([field, key]) => row[field] ? `${icon(key, 13)} ${short(row[field])}` : "").filter(Boolean).join(" · ")}
+          ${why.length ? `<br>Manque : ${why.join(", ")}` : ""}${first.length ? `<br>À faire d'abord : ${first.join(", ")}` : ""}${!why.length && !first.length && short_of.length ? `<br>Ressources insuffisantes : ${esc(short_of.join(", "))}` : ""}</p>`;
+      }
+      return `<div class="rrow"><div class="rline"><span class="rtitle">${esc(t.name_fr)}</span>
+        <span class="atbar"><span class="atfill${l >= t.max_level ? " done" : ""}" style="width:${t.max_level ? (l / t.max_level) * 100 : 0}%"></span></span>
+        <span class="atval">${l} / ${t.max_level}</span>${state}</div>${detail}</div>`;
+    }).join("");
+
+    return `<div class="card"><h2>Recherche en cours</h2>${running}${autoHtml}
+        <p class="help">${icon("clock", 14)} Mis à jour il y a ${fmtDuration(game.age)} · Académie niveau ${R.academy}.</p></div>
+      <div class="card"><h2>Catégories</h2><div class="rchips">${chips}</div></div>
+      <div class="card"><h2>${esc(kind ? kind.name_fr : "")} <span class="help">${p.done} / ${p.total} terminées</span></h2>
+        <div class="rlist">${rows}</div></div>`;
+  }
+
+  // ------------------------------------------------------------ construction
+
+  // The bot reports every building (slot, build_id, level) in status.json ("build"); the game's own table
+  // (gamedata/game_buildings.json, /api/buildings/table) says what each build_id is and what each level needs.
+  async function loadBuildTable() {
+    if (S.build.table || S.build.loading) return;
+    S.build.loading = true;
+    try {
+      const table = await api("GET", "/api/buildings/table");
+      table.byId = {};
+      table.types.forEach((t) => { table.byId[t.id] = t; });
+      S.build.table = table;
+    } catch (error) {
+      S.build.error = error.message || "Table des bâtiments indisponible.";
+    }
+    S.build.loading = false;
+    refreshBuild();
+  }
+
+  function refreshBuild() {
+    const box = $("#build-browser");
+    if (box) box.innerHTML = buildBrowserHtml();
+  }
+
+  // "25 + mana 1, 2/5 vers mana 2", as the bot logs it
+  function fmtBuildLevel(level) {
+    if (level <= 25) return String(level);
+    const mana = Math.floor((level - 25) / 5), step = (level - 25) % 5;
+    return `25 + mana ${mana}${step ? `, ${step}/5 vers mana ${mana + 1}` : ""}`;
+  }
+
+  const BUILD_COSTS = [["food", "food", null], ["stone", "rock", null], ["wood", "wood", null], ["ore", "ore", null], ["gold", "gold", null],
+    ["mana_ore", null, "minerai de mana"], ["mana_crystal", null, "cristal de mana"], ["manasteel", null, "acier de mana"]];
+
+  function buildBrowserHtml() {
+    const note = (text) => `<div class="card"><p class="help">${text}</p></div>`;
+    const T = S.build.table, game = S.game;
+    if (S.build.error) return note(esc(S.build.error));
+    if (!T || !game) return note("Chargement…");
+    if (!game.available) return note(game.running ? "Le bot démarre : vos bâtiments arrivent dès qu'il est en jeu." : "Démarrez le bot pour voir vos bâtiments.");
+    const B = game.data.build;
+    if (!B || !B.count) return note("Le bot n'a pas encore reçu vos bâtiments du serveur.");
+
+    const stock = game.data.resources, auto = B.auto || {};
+    const R = game.data.research, rlv = R && R.loaded ? researchLevels(R.levels) : null;
+    const elapsed = game.fetched ? (Date.now() - game.fetched) / 1000 : 0;
+    const typeName = (id) => (T.byId[id] ? T.byId[id].name_fr : "#" + id);
+    const selectable = T.types.filter((t) => t.upgradeable && t.max_level > t.min_level && t.kind <= 3 && t.name_en);
+    const owned = (id) => B.buildings.filter((b) => b[1] === id);
+    const highest = (id) => owned(id).reduce((m, b) => Math.max(m, b[2]), 0);
+    const building = (slot) => B.queue.find((q) => q.slot === slot);
+
+    // what is being built
+    const queue = B.queue.length ? B.queue.map((q) => {
+      const left = Math.max(0, q.remaining - game.age - elapsed), pct = q.total > 0 ? Math.min(100, (1 - left / q.total) * 100) : 0;
+      return `<div class="atrow"><span class="atlabel" style="flex-basis:auto"><strong>${esc(typeName(q.id))}</strong>&nbsp;vers ${esc(fmtBuildLevel(q.level))}</span>
+        <div class="atbar"><div class="atfill" style="width:${pct}%"></div></div><span class="atval">${fmtDuration(left)} restantes</span></div>`;
+    }).join("") : `<p class="help">Rien en construction.</p>`;
+    const names = (auto.types || []).map((id, i) => `${i + 1}. ${esc(typeName(id))}`).join(" · ");
+    const autoHtml = auto.enabled
+      ? `<p class="help"><span class="pill ok">Construction automatique active</span> ${names || "aucun bâtiment choisi"}</p>
+         ${auto.state ? `<p class="help">${icon("clock", 14)} ${esc(auto.state)}</p>` : ""}`
+      : `<p class="help"><span class="pill">Construction automatique désactivée</span> Réglez-la plus haut, puis redémarrez le bot.</p>`;
+
+    const selected = S.build.type != null ? S.build.type
+      : (auto.types && auto.types.length ? auto.types[0] : (B.queue[0] ? B.queue[0].id : selectable[0].id));
+    const chips = selectable.map((t) => {
+      const list = owned(t.id), top = highest(t.id), rank = (auto.types || []).indexOf(t.id);
+      const pct = list.length ? Math.max(0, (top - t.min_level) / (t.max_level - t.min_level)) * 100 : 0;
+      return `<button class="rchip" data-act="build-type" data-type="${t.id}" aria-pressed="${t.id === selected}">
+        <span class="rname">${esc(t.name_fr)}${rank >= 0 ? ` <span class="pill ok">auto ${rank + 1}</span>` : ""}</span>
+        <span class="atbar"><span class="atfill${list.length && top >= t.max_level ? " done" : ""}" style="width:${pct}%"></span></span>
+        <span class="rsub">${list.length ? `${list.length} bâtiment${list.length > 1 ? "s" : ""} · niveau ${top} / ${t.max_level}` : "non construit"}</span></button>`;
+    }).join("");
+
+    // one type
+    const type = T.byId[selected], list = owned(selected).sort((a, b) => b[2] - a[2]);
+    const rows = list.map(([slot, id, level]) => {
+      let state, detail = "";
+      const busy = building(slot), kept = slot === B.reserved_farm;
+      if (kept) {
+        state = `<span class="pill">Gardée bas niveau</span>`;
+        detail = `<p class="help">Cette ferme est gardée à bas niveau : la commande askhelp la monte puis l'annule pour demander de l'aide, la construction automatique n'y touche jamais.</p>`;
+      } else if (busy) {
+        state = `<span class="pill warn">En construction</span>`;
+      } else if (level >= type.max_level) {
+        state = `<span class="pill ok">Terminé</span>`;
+      } else {
+        const row = type.levels.find((r) => r.level === level + 1);
+        if (!row) return "";
+        const unmet = [], short_of = [];
+        row.req_building.forEach(([bid, need]) => { const have = highest(bid); if (have < need) unmet.push(`${esc(typeName(bid))} niveau ${esc(fmtBuildLevel(need))} (vous : ${have ? esc(fmtBuildLevel(have)) : "non construit"})`); });
+        let research = "";
+        if (row.req_research.length && rlv) { const [rid, need] = row.req_research[0]; if (rlv[rid] < need) research = `recherche ${S.research.table && S.research.table.byId[rid] ? S.research.table.byId[rid].name_fr : "n°" + rid} niveau ${need} (vous : ${rlv[rid]})`; }
+        BUILD_COSTS.forEach(([field, key, label]) => { if (key && stock[key] < row.cost[field]) short_of.push((RSS.find(([k]) => k === key) || [key, key])[1].toLowerCase()); });
+        state = unmet.length ? `<span class="pill warn">Prérequis</span>` : research ? `<span class="pill bad">Recherche</span>`
+          : short_of.length ? `<span class="pill warn">Ressources</span>` : `<span class="pill ok">Prête</span>`;
+        const costs = BUILD_COSTS.map(([field, key, label]) => row.cost[field] ? `${key ? icon(key, 13) : esc(label)} ${short(row.cost[field])}` : "").filter(Boolean).join(" · ");
+        detail = `<p class="help">Niveau ${esc(fmtBuildLevel(level + 1))} : ${fmtDuration(row.time)} de base${costs ? " · " + costs : ""}
+          ${unmet.length ? `<br>À faire d'abord : ${unmet.join(", ")}` : ""}${research ? `<br>Manque : ${esc(research)}` : ""}
+          ${!unmet.length && !research && short_of.length ? `<br>Ressources insuffisantes : ${esc(short_of.join(", "))}` : ""}
+          ${row.req_quest.length ? `<br>Demande aussi une étape des quêtes du jeu (n°${row.req_quest.join(", ")}) : le bot ne peut pas la voir.` : ""}</p>`;
+      }
+      const planned = auto.plan && auto.plan.slot === slot ? ` <span class="pill ok">prochaine étape du bot</span>` : "";
+      return `<div class="rrow"><div class="rline"><span class="rtitle">${esc(type.name_fr)} <span class="help">emplacement ${slot}</span></span>
+        <span class="atbar"><span class="atfill${level >= type.max_level ? " done" : ""}" style="width:${(level - type.min_level) / (type.max_level - type.min_level) * 100}%"></span></span>
+        <span class="atval">${esc(fmtBuildLevel(level))} / ${type.max_level}</span>${state}${planned}</div>${detail}</div>`;
+    }).join("");
+
+    return `<div class="card"><h2>En construction</h2>${queue}${autoHtml}
+        <p class="help">${icon("clock", 14)} Mis à jour il y a ${fmtDuration(game.age)} · niveaux tenus à jour à chaque fin de construction.</p></div>
+      <div class="card"><h2>Bâtiments</h2><div class="rchips">${chips}</div></div>
+      <div class="card"><h2>${esc(type ? type.name_fr : "")} <span class="help">${list.length} bâtiment${list.length > 1 ? "s" : ""} sur le compte</span></h2>
+        <div class="rlist">${rows || `<p class="help">Aucun bâtiment de ce type sur le compte.</p>`}</div></div>`;
   }
 
   // ------------------------------------------------------------ guild chat
@@ -1364,6 +1607,8 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
     "add-view": () => showView("add"),
     "settings-view": () => showView("settings"),
     "help-view": () => showView("help"),
+    "build-type": (el) => { S.build.type = +el.dataset.type; refreshBuild(); },
+    "research-kind": (el) => { S.research.kind = +el.dataset.kind; refreshResearch(); },
     tab: (el) => { S.tab = el.dataset.tab; renderMain(); },
     start: () => control("start"),
     stop: () => control("stop"),

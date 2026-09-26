@@ -9,7 +9,7 @@
  * Build and run from the repository root:
  *
  *   gcc -std=gnu11 -Iinclude -o /tmp/bot_logic_test tests/bot_logic_test.c \
- *       src/log.c src/protocol.c src/des.c src/map_point.c src/command.c src/config.c src/guildbank.c
+ *       src/log.c src/protocol.c src/des.c src/map_point.c src/command.c src/config.c src/guildbank.c src/research_table.c src/building_table.c
  *   /tmp/bot_logic_test
  */
 #include <stdio.h>
@@ -968,7 +968,658 @@ int main(void)
 		CHECK(ResearchLevel(&c->research, 303) == 10, "research: Bigger Bags III (#303) is level 10");
 		CHECK(ResearchLevel(&c->research, 0) == 0 && ResearchLevel(&c->research, 501) == 0, "research: ids outside 1..500 read as 0");
 		CHECK(ResearchStartedCount(&c->research) == 297, "research: 297 researches with a level");
-		CHECK(ResearchKnownName(303) != NULL && ResearchKnownName(126) == NULL, "research: known names only for the ids that were identified");
+		/* the game's own tables (research_table.h): every id 1..403, all 16 categories */
+		CHECK(RESEARCH_TECH_COUNT == 403 && RESEARCH_KIND_COUNT == 16, "research table: 403 researches in 16 categories");
+		CHECK(ResearchKnownName(303) != NULL && strcmp(ResearchKnownName(303), "Gear: Bigger Bags III") == 0
+			&& strcmp(ResearchKnownName(126), "Army Leadership: Tax Break") == 0 && ResearchKnownName(404) == NULL,
+			"research table: #303 is Gear's Bigger Bags III, #126 is Army Leadership's Tax Break (was only inferred)");
+		{
+			static const struct { uint16_t id; const char *en; } KNOWN[] = {
+				{6,"Construction Speed"},{8,"Gem Harvesting I"},{54,"Fire Trebuchet"},{74,"Energy Recovery I"},{123,"More Gatherers"},
+				{125,"Bigger Bags I"},{143,"Gold Storage I"},{228,"Wonder March I"},{229,"Gem Harvesting II"},{234,"Bigger Bags II"},
+				{299,"Barracks Expansion II"},{301,"Ration Run IV"},{302,"Forced March III"},{305,"Quick Maneuvers III"},
+			};
+			bool all = true;
+			for (size_t i = 0; i < sizeof(KNOWN) / sizeof(KNOWN[0]); i++)
+				if (strcmp(ResearchTech(KNOWN[i].id)->name_en, KNOWN[i].en) != 0)
+					all = false;
+			CHECK(all, "research table: the 14 ids confirmed in the game's UI carry the names it showed");
+		}
+		{
+			const ResearchTechInfo *tb = ResearchTech(126);
+			const ResearchLevelInfo *l1 = ResearchLevelRow(tb, 1);
+			CHECK(tb->max_level == 10 && l1 && l1->academy == 22 && l1->req_id[0] == 142 && l1->req_level[0] == 3
+				&& ResearchLevelRow(tb, 11) == NULL && ResearchKind(tb->kind)->order == 7,
+				"research table: Tax Break has 10 levels, level 1 needs Academy 22 and #142 at level 3");
+			uint32_t rows = 0;
+			for (uint16_t i = 1; i <= RESEARCH_TECH_COUNT; i++)
+				rows += ResearchTech(i)->max_level;
+			CHECK(rows == 3425, "research table: one level row per level of every research");
+		}
+
+		/* the plain start, captured from the PC client: #221 (Furious Defense, Ranged) level 8 -> 9, no item used */
+		{
+			static const uint8_t req_start_plain_l9[] = { 0x1a, 0x00, 0x00, 0x00, 0xdd, 0x00, 0x09, 0x00, 0x00, 0x00 };
+			static const uint8_t resp_start_plain_l9[] = {
+				0x00, 0xdd, 0x00, 0x09, 0x90, 0xb0, 0xb7, 0x6a, 0x00, 0x00, 0x00, 0x00, 0x9c, 0x21, 0x0e, 0x00,
+				0x8d, 0xba, 0x98, 0xc0, 0x1b, 0xea, 0xe4, 0xe3, 0xac, 0xdf, 0x24, 0xed, 0xbb, 0x12, 0x68, 0xe7,
+				0x25, 0xde, 0x5f, 0x74, 0x9d, 0xc0, 0x4e, 0x00, 0x68, 0x87, 0x01, 0x00 };
+			Connection *pc = fresh("boss");
+			reset_sent();
+			pc->protocol.seq_id = 0x19;
+			RequestResearchStartPlain(pc, 221, 9);
+			int at = find_packet(3202);
+			CHECK(at >= 0 && sent_size[at] == 4 + sizeof(req_start_plain_l9)
+				&& memcmp(sent[at] + 4, req_start_plain_l9, sizeof(req_start_plain_l9)) == 0,
+				"research: the plain start (3202) is byte for byte the game's, no item needed");
+			RecvResearchStart(pc, resp_start_plain_l9, sizeof(resp_start_plain_l9));
+			CHECK(pc->research.in_progress == 221 && pc->research.total_time == 926108 && pc->research.start_time == 0x6ab7b090,
+				"research: the answer to a plain start is read like the smart-use one (926108s, 10.7 days)");
+			CHECK(strcmp(ResearchKnownName(221), "Sigils: Furious Defense (Ranged)") == 0, "research table: #221 is Furious Defense (Ranged)");
+			free(pc);
+		}
+
+		/* choosing the next research to start */
+		{
+			Connection *pc = fresh("boss");
+			ResearchPick pick;
+			char why[160];
+			pc->building_count = 1;
+			pc->building[0].build_id = BUILDING_ACADEMY;
+			pc->building[0].level = 30;
+			pc->resources.food = pc->resources.rock = pc->resources.wood = pc->resources.ore = pc->resources.gold = 1000000000LL;
+			uint16_t id = ResearchPickNext(pc, 1, 0, &pick, why, sizeof(why), false);
+			const ResearchLevelInfo *row = id ? ResearchLevelRow(ResearchTech(id), pick.level) : NULL;
+			bool req_ok = row != NULL;
+			for (int r = 0; row && r < 4; r++)
+				if (row->req_id[r] && ResearchLevel(&pc->research, row->req_id[r]) < row->req_level[r])
+					req_ok = false;
+			CHECK(id != 0 && pick.level == 1 && req_ok, "research pick: a first level whose prerequisites are met");
+
+			pc->building[0].level = 0;
+			CHECK(ResearchPickNext(pc, 1, 0, &pick, why, sizeof(why), false) == 0 && strstr(why, "Acad") != NULL,
+				"research pick: Academy too low, and it says so");
+			pc->building[0].level = 30;
+			pc->resources.gold = 0;
+			CHECK(ResearchPickNext(pc, 1, 0, &pick, why, sizeof(why), false) == 0 && strstr(why, "Ressources") != NULL,
+				"research pick: not enough resources, and it says so");
+			pc->resources.gold = 1000000000LL;
+
+			/* a research whose prerequisite is missing: the prerequisite is what gets started, for that research */
+			id = ResearchPickNext(pc, 0, 126, &pick, why, sizeof(why), false);
+			row = id ? ResearchLevelRow(ResearchTech(id), pick.level) : NULL;
+			req_ok = row != NULL;
+			for (int r = 0; row && r < 4; r++)
+				if (row->req_id[r] && ResearchLevel(&pc->research, row->req_id[r]) < row->req_level[r])
+					req_ok = false;
+			CHECK(id != 0 && id != 126 && pick.for_id == 126 && req_ok,
+				"research pick: #126 needs #142 at level 3, so a prerequisite is started first, for #126");
+
+			/* the whole game, category by category, from nothing: the chain always resolves (no dead end, no loop),
+			 * and every step started has its prerequisites at their level when it is started */
+			int kinds_done = 0, invalid = 0, stuck = 0;
+			for (uint16_t k = 0; k < RESEARCH_KIND_COUNT; k++) {
+				Connection *gc = fresh("boss");
+				gc->building_count = 1;
+				gc->building[0].build_id = BUILDING_ACADEMY;
+				gc->building[0].level = BUILDING_MAX_LEVEL; /* the mana levels count: the last researches ask for Academy 55 */
+				gc->resources.food = gc->resources.rock = gc->resources.wood = gc->resources.ore = gc->resources.gold = 4000000000LL;
+				uint8_t kind = RESEARCH_KINDS[k].kind;
+				int guard = 0;
+				while (ResearchPickNext(gc, kind, 0, &pick, why, sizeof(why), false) && guard++ < 5000) {
+					const ResearchLevelInfo *step_row = ResearchLevelRow(ResearchTech(pick.id), pick.level);
+					for (int r = 0; r < 4; r++)
+						if (step_row->req_id[r] && ResearchLevel(&gc->research, step_row->req_id[r]) < step_row->req_level[r])
+							invalid++;
+					if (ResearchLevel(&gc->research, pick.id) + 1 != pick.level)
+						invalid++;
+					ResearchSetLevel(&gc->research, pick.id, pick.level);
+				}
+				bool finished = strstr(why, "maximum") != NULL;
+				for (uint16_t i = 1; i <= RESEARCH_TECH_COUNT; i++)
+					if (ResearchTech(i)->kind == kind && !ResearchTech(i)->locked && ResearchLevel(&gc->research, i) < ResearchTech(i)->max_level)
+						finished = false;
+				if (finished) kinds_done++; else stuck++;
+				free(gc);
+			}
+			CHECK(kinds_done == 16 && stuck == 0 && invalid == 0,
+				"research pick: every category can be taken to its maximum, prerequisites first, each step valid when started");
+
+			for (uint16_t i = 1; i <= RESEARCH_TECH_COUNT; i++)
+				if (ResearchTech(i)->kind == 1)
+					ResearchSetLevel(&pc->research, i, ResearchTech(i)->max_level);
+			CHECK(ResearchPickNext(pc, 1, 0, &pick, why, sizeof(why), false) == 0 && strstr(why, "maximum") != NULL,
+				"research pick: everything at its maximum, and it says so");
+
+			/* the command itself */
+			pc->research.loaded = true;
+			for (uint16_t i = 1; i <= RESEARCH_TECH_COUNT; i++)
+				ResearchSetLevel(&pc->research, i, 0);
+			reset_sent();
+			say(pc, "eve", "$research start economie", COMMAND_CHANNEL_MAIL);
+			CHECK(find_packet(3202) < 0, "$research start: refused to a stranger");
+			say(pc, "boss", "$research start economie", COMMAND_CHANNEL_MAIL);
+			CHECK(find_packet(3202) >= 0 && replied("Lancement demand"), "$research start <category>: sends the plain start");
+			pc->research.in_progress = 126;
+			reset_sent();
+			say(pc, "boss", "$research start economie", COMMAND_CHANNEL_MAIL);
+			CHECK(find_packet(3202) < 0 && replied("d\xc3\xa9j\xc3\xa0 en cours"), "$research start: nothing sent while a research is running");
+			pc->research.in_progress = 0;
+			reset_sent();
+			say(pc, "boss", "$research start zzz", COMMAND_CHANNEL_MAIL);
+			CHECK(find_packet(3202) < 0, "$research start: unknown category sends nothing");
+			free(pc);
+		}
+
+		/* every category name the console writes, and the French ones, designates exactly its own category */
+		{
+			static const char *EN[] = { "Economy", "Defense", "Military", "Monster Hunt", "Upgrade Defenses", "Upgrade Military",
+				"Army Leadership", "Military Command", "Familiars", "Familiar Battles", "Sigils", "Wonder Battles", "Gear",
+				"Advanced Wonder Battles", "Mana Awakening", "Guild Duel" };
+			int exact = 0, exact_fr = 0;
+			for (uint8_t o = 0; o < 16; o++) {
+				const ResearchKindInfo *found[RESEARCH_KIND_COUNT_MAX], *found_fr[RESEARCH_KIND_COUNT_MAX];
+				size_t n = ResearchFindKinds(EN[o], found, RESEARCH_KIND_COUNT_MAX);
+				if (n == 1 && found[0]->order == o + 1) exact++;
+				for (uint16_t i = 0; i < RESEARCH_KIND_COUNT; i++)
+					if (RESEARCH_KINDS[i].order == o + 1) {
+						size_t nf = ResearchFindKinds(RESEARCH_KINDS[i].name_fr, found_fr, RESEARCH_KIND_COUNT_MAX);
+						if (nf == 1 && found_fr[0]->order == o + 1) exact_fr++;
+					}
+			}
+			CHECK(exact == 16 && exact_fr == 16, "research categories: each full name (English as the console writes it, French) finds exactly its own category");
+		}
+
+		/* automatic research: configuration */
+		{
+			char dir[] = "/tmp/lmbot-rs-XXXXXX";
+			mkdtemp(dir);
+			char cfg[300];
+			snprintf(cfg, sizeof(cfg), "%s/r.cfg", dir);
+			FILE *fp = fopen(cfg, "w");
+			fprintf(fp, "research.enabled = true\nresearch.categories = Sceaux, gear , 1, sigils\nresearch.reserve_gold = 5M\ndata.path = %s/data/\n", dir);
+			fclose(fp);
+			Connection *rc = calloc(1, sizeof(*rc));
+			bool ok = LoadConfig(rc, cfg);
+			CHECK(ok && rc->research_auto.enabled && rc->research_auto.kind_count == 3
+				&& rc->research_auto.kinds[0] == 12 && rc->research_auto.kinds[1] == 15 && rc->research_auto.kinds[2] == 1
+				&& rc->research_auto.reserve.gold == 5000000,
+				"research config: categories by name/number in priority order, duplicates dropped, reserve read");
+			free(rc);
+			fp = fopen(cfg, "w"); fprintf(fp, "research.categories = Sceaux, zzz\n"); fclose(fp);
+			rc = calloc(1, sizeof(*rc));
+			CHECK(!LoadConfig(rc, cfg), "research config: an unknown category is a configuration error");
+			free(rc);
+			fp = fopen(cfg, "w"); fprintf(fp, "research.categories = batailles\n"); fclose(fp);
+			rc = calloc(1, sizeof(*rc));
+			CHECK(!LoadConfig(rc, cfg), "research config: a name matching several categories is a configuration error");
+			free(rc);
+		}
+
+		/* automatic research: behaviour */
+		{
+			Connection *rc = fresh("boss");
+			rc->research.loaded = true;
+			rc->research_auto.enabled = true;
+			rc->research_auto.kinds[0] = 1;   /* Economy */
+			rc->research_auto.kind_count = 1;
+			rc->building_count = 1;
+			rc->building[0].build_id = BUILDING_ACADEMY;
+			rc->building[0].level = 30;
+			rc->resources.food = rc->resources.rock = rc->resources.wood = rc->resources.ore = rc->resources.gold = 1000000000LL;
+
+			reset_sent();
+			ResearchAutoTick(rc);
+			CHECK(find_packet(3202) < 0 && rc->research_auto.next_check_at != 0, "research auto: first look only arms the pause, nothing sent");
+			ResearchAutoTick(rc);
+			CHECK(find_packet(3202) < 0, "research auto: nothing sent before the pause is over");
+			rc->research_auto.next_check_at = 1;
+			ResearchAutoTick(rc);
+			int at = find_packet(3202);
+			uint16_t first = at >= 0 ? (uint16_t)(sent[at][8] | sent[at][9] << 8) : 0;
+			CHECK(at >= 0 && rc->research_auto.pending && ResearchTech(first) && ResearchTech(first)->kind == 1 && sent[at][10] == 1,
+				"research auto: starts a research of the configured category, level 1");
+			reset_sent();
+			rc->research_auto.next_check_at = 1;
+			ResearchAutoTick(rc);
+			CHECK(find_packet(3202) < 0, "research auto: never a second start while the first one is unanswered");
+
+			/* refused: that research is left alone, the next look picks another one */
+			uint8_t refused[44] = { 5 };
+			RecvResearchStart(rc, refused, sizeof(refused));
+			CHECK(!rc->research_auto.pending && rc->research_auto.retry_at[first] > now_ms() && strstr(rc->research_auto.state, "refus") != NULL,
+				"research auto: a refused start is remembered and the research left alone");
+			rc->research_auto.next_check_at = 1;
+			reset_sent();
+			ResearchAutoTick(rc);
+			at = find_packet(3202);
+			uint16_t second = at >= 0 ? (uint16_t)(sent[at][8] | sent[at][9] << 8) : 0;
+			CHECK(at >= 0 && second != first, "research auto: after a refusal it tries another research, not the same one");
+
+			/* accepted: nothing more while it runs */
+			uint8_t okresp[44] = { 0, (uint8_t)second, (uint8_t)(second >> 8), 1, 0x90, 0xb0, 0xb7, 0x6a, 0, 0, 0, 0, 0x10, 0x0e, 0, 0 };
+			RecvResearchStart(rc, okresp, sizeof(okresp));
+			reset_sent();
+			rc->research_auto.next_check_at = 1;
+			ResearchAutoTick(rc);
+			CHECK(rc->research.in_progress == second && find_packet(3202) < 0 && strstr(rc->research_auto.state, "En cours") != NULL,
+				"research auto: nothing sent while a research is running");
+
+			/* it finishes: looks again after a pause */
+			uint8_t done[3] = { (uint8_t)second, (uint8_t)(second >> 8), 1 };
+			RecvResearchComplete(rc, done, sizeof(done));
+			CHECK(!ResearchInProgress(&rc->research) && rc->research_auto.next_check_at == 0, "research auto: a completion re-arms the pause");
+
+			/* the reserve is never spent */
+			rc->research_auto.next_check_at = 1;
+			rc->research_auto.reserve.gold = 1000000000u;
+			for (int i = 0; i <= RESEARCH_ID_MAX; i++) rc->research_auto.retry_at[i] = 0;
+			reset_sent();
+			ResearchAutoTick(rc);
+			rc->research_auto.next_check_at = 1;
+			ResearchAutoTick(rc);
+			CHECK(find_packet(3202) < 0 && strstr(rc->research_auto.state, "Ressources") != NULL,
+				"research auto: nothing started when the reserve leaves too little, and the state says why");
+
+			/* disabled, or no category */
+			rc->research_auto.reserve.gold = 0;
+			rc->research_auto.enabled = false;
+			rc->research_auto.next_check_at = 1;
+			reset_sent();
+			ResearchAutoTick(rc);
+			CHECK(find_packet(3202) < 0, "research auto: disabled sends nothing");
+			free(rc);
+		}
+
+		/* automatic construction: names, configuration */
+		{
+			int unique = 0, selectable = 0, unique_fr = 0;
+			for (uint16_t i = 0; i < BUILDING_TYPE_COUNT; i++) {
+				const BuildingTypeInfo *t = &BUILDING_TYPES[i], *found[8];
+				if (!BuildingSelectable(t)) continue;
+				selectable++;
+				if (BuildFindTypes(t->name_en, found, 8) == 1 && found[0] == t) unique++;
+				if (BuildFindTypes(t->name_fr, found, 8) == 1 && found[0] == t) unique_fr++;
+			}
+			CHECK(selectable == 26 && unique == selectable && unique_fr == selectable,
+				"build: the 26 buildings the automatic construction can work on each have a full name (English, French) that finds only themselves");
+			const BuildingTypeInfo *f[8];
+			CHECK(BuildFindTypes("Castle", f, 8) == 1 && f[0]->id == 8 && BuildFindTypes("wall", f, 8) == 1 && f[0]->id == 12
+				&& BuildFindTypes("8", f, 8) == 1 && f[0]->id == 8 && BuildFindTypes("Residence", f, 8) == 0,
+				"build: \"Castle\" is the Castle (not the Castle Wall), a part of a name or a build_id works, special buildings are refused");
+
+			char dir[] = "/tmp/lmbot-bd-XXXXXX";
+			mkdtemp(dir);
+			char cfg[300];
+			snprintf(cfg, sizeof(cfg), "%s/b.cfg", dir);
+			FILE *fp = fopen(cfg, "w");
+			fprintf(fp, "build.enabled = true\nbuild.buildings = Castle, barracks , Castle Wall, castle\nbuild.reserve_wood = 2M\ndata.path = %s/data/\n", dir);
+			fclose(fp);
+			Connection *bc = calloc(1, sizeof(*bc));
+			bool ok = LoadConfig(bc, cfg);
+			CHECK(ok && bc->build_auto.enabled && bc->build_auto.type_count == 3 && bc->build_auto.types[0] == 8
+				&& bc->build_auto.types[1] == 6 && bc->build_auto.types[2] == 12 && bc->build_auto.reserve.wood == 2000000,
+				"build config: buildings by name in priority order, duplicates dropped, reserve read");
+			free(bc);
+			fp = fopen(cfg, "w"); fprintf(fp, "build.buildings = Castle, Nonexistent\n"); fclose(fp);
+			bc = calloc(1, sizeof(*bc));
+			CHECK(!LoadConfig(bc, cfg), "build config: an unknown building is a configuration error");
+			free(bc);
+		}
+
+		/* automatic construction: every building from its first level to its maximum, prerequisites first */
+		{
+			int reached = 0, stuck = 0, invalid = 0, total = 0;
+			for (uint16_t i = 0; i < BUILDING_TYPE_COUNT; i++) {
+				const BuildingTypeInfo *goal_type = &BUILDING_TYPES[i];
+				if (!BuildingSelectable(goal_type)) continue;
+				total++;
+
+				Connection *bc = fresh("boss");
+				bc->resources.food = bc->resources.rock = bc->resources.wood = bc->resources.ore = bc->resources.gold = 4000000000LL;
+				for (uint16_t r = 1; r <= RESEARCH_TECH_COUNT; r++)
+					ResearchSetLevel(&bc->research, r, ResearchTech(r)->max_level); /* the research prerequisites are met */
+				bc->building_count = 0;
+				for (uint16_t k = 0; k < BUILDING_TYPE_COUNT; k++) {
+					const BuildingTypeInfo *t = &BUILDING_TYPES[k];
+					if (!BuildingSelectable(t)) continue;
+					bc->building[bc->building_count].position_id = (uint16_t)(1000 + k);
+					bc->building[bc->building_count].build_id = t->id;
+					bc->building[bc->building_count].level = t->min_level;
+					bc->building_count++;
+				}
+				/* a second farm: the first one (lowest slot) is the one kept at a low level for $askhelp, never upgraded */
+				bc->building[bc->building_count++] = (BuildingInfo){ .position_id = 2000, .build_id = 4, .level = 1 };
+
+				BuildPick pick;
+				char why[160];
+				int guard = 0;
+				while (BuildPickNext(bc, goal_type->id, &pick, why, sizeof(why)) && guard++ < 20000) {
+					int at = -1;
+					for (int b = 0; b < bc->building_count; b++)
+						if (bc->building[b].position_id == pick.slot) at = b;
+					const BuildingTypeInfo *pt = BuildingType(pick.build_id);
+					const BuildingLevelInfo *row = BuildingLevelRow(pt, pick.level);
+					if (at < 0 || bc->building[at].level + 1 != pick.level || !row) { invalid++; break; }
+					for (int q = 0; q < BUILDING_REQ_MAX; q++) {
+						if (!row->req_id[q]) continue;
+						int best = 0;
+						for (int b = 0; b < bc->building_count; b++)
+							if (bc->building[b].build_id == row->req_id[q] && bc->building[b].level > best) best = bc->building[b].level;
+						if (best < row->req_level[q]) invalid++;
+					}
+					bc->building[at].level = pick.level;
+				}
+				bool finished = strstr(why, "maximum") != NULL;
+				for (int b2 = 0; b2 < bc->building_count; b2++)
+					if (bc->building[b2].position_id == 1003 && bc->building[b2].level != 1) invalid++; /* the kept farm stays at level 1 */
+				if (finished) reached++; else { stuck++; printf("  stuck: %s: %s\n", goal_type->name_en, why); }
+				free(bc);
+			}
+			CHECK(reached == total && stuck == 0 && invalid == 0,
+				"build plan: each of the 26 buildings can be taken to its maximum from its first level, prerequisites first, each step valid when started");
+		}
+
+		/* the plain start of a construction, captured from the PC client: a farm 23 -> 24 (slot 62162), then another (slot 62668) */
+		{
+			static const uint8_t req_build_1[] = { 0x14, 0x00, 0x00, 0x00, 0xd2, 0xf2, 0x04, 0x00, 0x02 };
+			static const uint8_t req_build_2[] = { 0x1e, 0x00, 0x00, 0x00, 0xcc, 0xf4, 0x04, 0x00, 0x02 };
+			static const uint8_t resp_begin_1[] = {
+				0xd2, 0xf2, 0x04, 0x00, 0x18, 0xf8, 0xbd, 0xb7, 0x6a, 0x00, 0x00, 0x00, 0x00, 0xff, 0x55, 0x02, 0x00, 0x4d, 0xf2, 0x8e, 0xbd,
+				0xe1, 0xcd, 0xcc, 0xe3, 0x72, 0xc3, 0x0c, 0xed, 0x81, 0xf6, 0x4f, 0xe7, 0x25, 0xde, 0x5f, 0x74, 0x00, 0x00, 0x00 };
+			static const uint8_t resp_complete_1[] = { 0xd2, 0xf2, 0x04, 0x00, 0x18, 0x00 };
+			Connection *bc = fresh("boss");
+			reset_sent();
+			bc->protocol.seq_id = 0x13;
+			RequestBuildStart(bc, 62162, 4);
+			int at = find_packet(2003);
+			CHECK(at >= 0 && sent_size[at] == 4 + sizeof(req_build_1) && memcmp(sent[at] + 4, req_build_1, sizeof(req_build_1)) == 0,
+				"build: the start request is byte for byte the game's (farm, slot 62162)");
+			reset_sent();
+			bc->protocol.seq_id = 0x1d;
+			RequestBuildStart(bc, 62668, 4);
+			at = find_packet(2003);
+			CHECK(at >= 0 && memcmp(sent[at] + 4, req_build_2, sizeof(req_build_2)) == 0, "build: the second captured start is byte for byte the game's too");
+
+			bc->building_count = 1;
+			bc->building[0] = (BuildingInfo){ .position_id = 62162, .build_id = 4, .level = 23 };
+			RecvBuildBegin(bc, resp_begin_1, sizeof(resp_begin_1));
+			CHECK(bc->construction[0].used && bc->construction[0].slot == 62162 && bc->construction[0].build_id == 4
+				&& bc->construction[0].level == 24 && bc->construction[0].start_time == 0x6ab7bdf8 && bc->construction[0].duration == 153087,
+				"build: the answer to a start fills the queue (farm to level 24, 153087 s)");
+			RecvBuildComplete(bc, resp_complete_1, sizeof(resp_complete_1));
+			CHECK(bc->building[0].level == 24 && !bc->construction[0].used, "build: a completion raises the building's level and frees the queue");
+			free(bc);
+		}
+
+		/* automatic construction: it starts what it plans, one start at a time, and follows the answers */
+		{
+			Connection *bc = fresh("boss");
+			bc->build_auto.enabled = true;
+			bc->build_auto.types[0] = 6; /* Barracks */
+			bc->build_auto.type_count = 1;
+			bc->resources.food = bc->resources.rock = bc->resources.wood = bc->resources.ore = bc->resources.gold = 1000000000LL;
+			bc->building_count = 3;
+			bc->building[0] = (BuildingInfo){ .position_id = 10, .build_id = 6, .level = 1 };
+			bc->building[1] = (BuildingInfo){ .position_id = 11, .build_id = 8, .level = 3 };
+			bc->building[2] = (BuildingInfo){ .position_id = 12, .build_id = 12, .level = 3 };
+			reset_sent();
+			BuildAutoTick(bc);
+			CHECK(sent_count == 0, "build auto: nothing before the construction packet of the login has told which queues exist");
+			bc->construction_loaded = true;
+			bc->construction_extra_expires = INT64_MAX; /* a permanent second queue */
+			BuildAutoTick(bc);
+			int at = find_packet(2003);
+			CHECK(at >= 0 && (uint16_t)(sent[at][8] | sent[at][9] << 8) == 10 && (uint16_t)(sent[at][10] | sent[at][11] << 8) == 6
+				&& bc->build_auto.pending && strstr(bc->build_auto.state, "Lancement demand") != NULL,
+				"build auto: starts the Barracks it planned (slot 10) and waits for the answer");
+			reset_sent();
+			bc->build_auto.next_check_at = 0;
+			BuildAutoTick(bc);
+			CHECK(sent_count == 0, "build auto: never a second start while the first one is unanswered");
+
+			uint8_t begin[40] = { 10, 0, 6, 0, 2, 0xf8, 0xbd, 0xb7, 0x6a, 0, 0, 0, 0, 0x10, 0x0e, 0, 0 };
+			RecvBuildBegin(bc, begin, sizeof(begin));
+			CHECK(!bc->build_auto.pending && bc->construction[0].used && bc->construction[0].slot == 10, "build auto: the answer clears the wait and fills a queue");
+
+			/* refused: the slot is left alone */
+			bc->build_auto.next_check_at = 0;
+			bc->construction[0].used = 0;
+			bc->build_auto.pending = true;
+			bc->build_auto.pending_slot = 10;
+			uint8_t err[4] = { 1, 0, 0, 0 };
+			RecvBuildingError(bc, err, sizeof(err));
+			CHECK(!bc->build_auto.pending && strstr(bc->build_auto.state, "refus") != NULL, "build auto: a server error is logged and the slot left alone");
+			bc->build_auto.next_check_at = 0;
+			reset_sent();
+			BuildAutoTick(bc);
+			at = find_packet(2003);
+			CHECK(at < 0 || (uint16_t)(sent[at][8] | sent[at][9] << 8) != 10, "build auto: the refused slot is not tried again right away");
+			free(bc);
+
+			/* the queues: one busy is enough without a second queue, not with one */
+			bc = fresh("boss");
+			bc->build_auto.enabled = true;
+			bc->build_auto.types[0] = 6;
+			bc->build_auto.type_count = 1;
+			bc->resources.food = bc->resources.rock = bc->resources.wood = bc->resources.ore = bc->resources.gold = 1000000000LL;
+			bc->building_count = 3;
+			bc->building[0] = (BuildingInfo){ .position_id = 10, .build_id = 6, .level = 1 };
+			bc->building[1] = (BuildingInfo){ .position_id = 11, .build_id = 8, .level = 3 };
+			bc->building[2] = (BuildingInfo){ .position_id = 12, .build_id = 12, .level = 3 };
+			bc->construction_loaded = true;
+			bc->construction_extra_expires = INT64_MAX;
+			bc->construction[0] = (BuildingConstruction){ .used = 1, .slot = 11, .build_id = 8, .level = 4, .start_time = 1, .duration = 100 };
+			bc->construction[1] = (BuildingConstruction){ .used = 1, .slot = 12, .build_id = 12, .level = 4, .start_time = 1, .duration = 100 };
+			reset_sent();
+			BuildAutoTick(bc);
+			CHECK(sent_count == 0 && strstr(bc->build_auto.state, "occup") != NULL, "build auto: nothing started while both construction queues are busy, and it says so");
+			bc->construction[1].used = 0;
+			bc->build_auto.next_check_at = 0;
+			BuildAutoTick(bc);
+			CHECK(find_packet(2003) >= 0, "build auto: with a permanent second queue, one busy queue still leaves a free one");
+			bc->build_auto.pending = false;
+			reset_sent();
+			bc->construction_extra_expires = 0;   /* no second queue */
+			bc->build_auto.next_check_at = 0;
+			BuildAutoTick(bc);
+			CHECK(sent_count == 0 && strstr(bc->build_auto.state, "une seule file") != NULL,
+				"build auto: without a second queue, one construction running occupies the only queue");
+			bc->construction_extra_expires = (int64_t)time(NULL) + 3600; /* rented, still running */
+			bc->build_auto.next_check_at = 0;
+			BuildAutoTick(bc);
+			CHECK(find_packet(2003) >= 0, "build auto: a rented second queue counts while its end date is ahead");
+			free(bc);
+		}
+
+		/* $askhelp: the requests are the game's, byte for byte, and the loop follows its own answers */
+		{
+			static const uint8_t req_help[] = { 0x15, 0x00, 0x00, 0x00, 0x01 };
+			static const uint8_t req_cancel[] = { 0x1f, 0x00, 0x00, 0x00, 0x00 };
+			Connection *ac = fresh("boss");
+			reset_sent();
+			ac->protocol.seq_id = 0x14;
+			RequestBuildHelp(ac);
+			int at = find_packet(_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP);
+			CHECK(at >= 0 && sent_size[at] == 4 + sizeof(req_help) && memcmp(sent[at] + 4, req_help, sizeof(req_help)) == 0,
+				"askhelp: the alliance help request is byte for byte the game's (u32 seq, 1)");
+			reset_sent();
+			ac->protocol.seq_id = 0x1e;
+			RequestBuildCancel(ac, 0);
+			at = find_packet(2006);
+			CHECK(at >= 0 && sent_size[at] == 4 + sizeof(req_cancel) && memcmp(sent[at] + 4, req_cancel, sizeof(req_cancel)) == 0,
+				"askhelp: the cancel request is byte for byte the game's (u32 seq, queue 0)");
+			free(ac);
+
+			/* two cycles, the Mana Lode running in the second queue must never be touched */
+			ac = fresh("boss");
+			ac->resources.food = ac->resources.rock = ac->resources.wood = ac->resources.ore = ac->resources.gold = 1000000000LL;
+			ac->building_count = 3;
+			ac->building[0] = (BuildingInfo){ .position_id = 50, .build_id = 4, .level = 1 };
+			ac->building[1] = (BuildingInfo){ .position_id = 51, .build_id = 8, .level = 5 };
+			ac->building[2] = (BuildingInfo){ .position_id = 52, .build_id = 4, .level = 9 };
+			ac->construction_loaded = true;
+			ac->construction_extra_expires = INT64_MAX;
+			ac->construction[1] = (BuildingConstruction){ .used = 1, .slot = 999, .build_id = 26, .level = 31, .start_time = 1, .duration = 100000 };
+			char error[200];
+			CHECK(AskHelpStart(ac, "boss", 2, error, sizeof(error)) && ac->askhelp.active, "askhelp: a series of 2 cycles starts");
+			CHECK(!AskHelpStart(ac, "boss", 2, error, sizeof(error)), "askhelp: a second series is refused while one runs");
+
+			uint8_t begin[40];
+			for (int cycle = 1; cycle <= 2; cycle++) {
+				reset_sent();
+				ac->askhelp.next_at = 0;
+				AskHelpTick(ac);
+				at = find_packet(2003);
+				uint16_t slot = at >= 0 ? (uint16_t)(sent[at][8] | sent[at][9] << 8) : 0;
+				CHECK(at >= 0 && slot == 50 && ac->askhelp.phase == ASKHELP_WAIT_BEGIN, "askhelp: starts the upgrade of the low-level farm (slot 50, not the level 9 one)");
+				reset_sent();
+				memset(begin, 0, sizeof(begin));
+				begin[0] = 50; begin[2] = 4; begin[4] = 2; begin[13] = 0x10; begin[14] = 0x0e;
+				RecvBuildBegin(ac, begin, sizeof(begin));
+				CHECK(find_packet(_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP) >= 0 && ac->askhelp.queue == 0
+					&& ac->askhelp.phase == ASKHELP_WAIT_CANCEL_TIMER, "askhelp: asks the alliance for help as soon as it is started, in the free queue (0)");
+				uint64_t wait = ac->askhelp.next_at - now_ms();
+				CHECK(wait >= 2900 && wait <= 4100, "askhelp: waits 3 to 4 seconds before cancelling");
+				reset_sent();
+				AskHelpTick(ac);
+				CHECK(find_packet(2006) < 0, "askhelp: does not cancel before the wait is over");
+				ac->askhelp.next_at = 0;
+				AskHelpTick(ac);
+				at = find_packet(2006);
+				CHECK(at >= 0 && sent[at][8] == 0 && ac->construction[1].used && ac->construction[1].slot == 999,
+					"askhelp: cancels queue 0 - the one it started - and never the other one");
+				uint8_t cancel_answer[23] = { 0 };
+				RecvBuildCancel(ac, cancel_answer, sizeof(cancel_answer));
+				CHECK(ac->askhelp.done == (uint16_t)cycle && !ac->construction[0].used, "askhelp: the cancel's answer counts the cycle and frees the queue");
+			}
+			CHECK(!ac->askhelp.active, "askhelp: stops by itself after the last cycle");
+			CHECK(ac->construction[1].used && ac->construction[1].slot == 999, "askhelp: the long construction in the other queue is still there");
+			free(ac);
+
+			/* what stops it */
+			ac = fresh("boss");
+			ac->resources.food = ac->resources.rock = ac->resources.wood = ac->resources.ore = ac->resources.gold = 1000000000LL;
+			ac->building_count = 3;
+			ac->building[0] = (BuildingInfo){ .position_id = 50, .build_id = 4, .level = 1 };
+			ac->building[1] = (BuildingInfo){ .position_id = 51, .build_id = 8, .level = 5 };
+			ac->building[2] = (BuildingInfo){ .position_id = 52, .build_id = 4, .level = 9 };
+			ac->construction_loaded = true;
+			ac->construction_extra_expires = INT64_MAX;
+			AskHelpStart(ac, "boss", 5, error, sizeof(error));
+			ac->askhelp.next_at = 0;
+			AskHelpTick(ac);
+			uint8_t err[4] = { 1, 0, 0, 0 };
+			reset_sent();
+			RecvBuildingError(ac, err, sizeof(err));
+			CHECK(!ac->askhelp.active && find_packet(2006) < 0, "askhelp: a server error stops the series and cancels nothing");
+
+			AskHelpStart(ac, "boss", 5, error, sizeof(error));
+			ac->askhelp.next_at = 0;
+			AskHelpTick(ac);
+			ac->askhelp.phase_since = 1;   /* the answer never came */
+			reset_sent();
+			AskHelpTick(ac);
+			CHECK(!ac->askhelp.active && find_packet(2006) < 0, "askhelp: no answer to the start stops the series, nothing cancelled");
+
+			ac->construction[0] = (BuildingConstruction){ .used = 1, .slot = 60, .build_id = 8, .level = 6, .start_time = 1, .duration = 100 };
+			ac->construction[1] = (BuildingConstruction){ .used = 1, .slot = 61, .build_id = 8, .level = 6, .start_time = 1, .duration = 100 };
+			CHECK(!AskHelpStart(ac, "boss", 3, error, sizeof(error)) && !ac->askhelp.active, "askhelp: refused when both construction queues are busy");
+			free(ac);
+
+			/* the command */
+			ac = fresh("boss");
+			ac->resources.food = ac->resources.rock = ac->resources.wood = ac->resources.ore = ac->resources.gold = 1000000000LL;
+			ac->building_count = 3;
+			ac->building[0] = (BuildingInfo){ .position_id = 50, .build_id = 4, .level = 1 };
+			ac->building[1] = (BuildingInfo){ .position_id = 51, .build_id = 8, .level = 5 };
+			ac->building[2] = (BuildingInfo){ .position_id = 52, .build_id = 4, .level = 9 };
+			ac->construction_loaded = true;
+			ac->construction_extra_expires = INT64_MAX;
+			say(ac, "eve", "$askhelp 3", COMMAND_CHANNEL_MAIL);
+			CHECK(!ac->askhelp.active, "$askhelp: refused to a stranger");
+			say(ac, "boss", "$askhelp 500", COMMAND_CHANNEL_MAIL);
+			CHECK(!ac->askhelp.active, "$askhelp: more than 100 cycles is refused");
+			say(ac, "boss", "$askhelp 3 farm", COMMAND_CHANNEL_MAIL);
+			CHECK(!ac->askhelp.active, "$askhelp: no building to name any more, it is always the low-level farm");
+			say(ac, "boss", "$askhelp 3", COMMAND_CHANNEL_MAIL);
+			CHECK(ac->askhelp.active && ac->askhelp.total == 3, "$askhelp <times>: starts a series on the low-level farm");
+			say(ac, "boss", "$askhelp stop", COMMAND_CHANNEL_MAIL);
+			CHECK(!ac->askhelp.active, "$askhelp stop: stops it");
+			free(ac);
+		}
+
+		/* the farm kept at a low level: never upgraded by the automatic construction */
+		{
+			Connection *fc = fresh("boss");
+			fc->build_auto.enabled = true;
+			fc->build_auto.types[0] = 4; /* Farm */
+			fc->build_auto.type_count = 1;
+			fc->resources.food = fc->resources.rock = fc->resources.wood = fc->resources.ore = fc->resources.gold = 1000000000LL;
+			fc->building_count = 3;
+			fc->building[0] = (BuildingInfo){ .position_id = 70, .build_id = 4, .level = 4 };
+			fc->building[1] = (BuildingInfo){ .position_id = 71, .build_id = 4, .level = 2 };
+			fc->building[2] = (BuildingInfo){ .position_id = 72, .build_id = 8, .level = 9 };
+			CHECK(BuildingReservedFarm(fc) == 1, "reserved farm: the farm with the lowest level (slot 71)");
+			BuildPick pick;
+			char why[160];
+			bool ok = BuildPickNext(fc, 4, &pick, why, sizeof(why));
+			CHECK(ok && pick.slot == 70, "reserved farm: the automatic construction upgrades the other farm, never the kept one");
+			fc->building[0].level = 55; /* the other farm is done */
+			ok = BuildPickNext(fc, 4, &pick, why, sizeof(why));
+			CHECK(!ok && strstr(why, "maximum") != NULL, "reserved farm: with the other farm done, nothing is left to do for the farms");
+			fc->building_count = 2;
+			fc->building[0] = (BuildingInfo){ .position_id = 71, .build_id = 4, .level = 2 };
+			fc->building[1] = (BuildingInfo){ .position_id = 72, .build_id = 8, .level = 9 };
+			ok = BuildPickNext(fc, 4, &pick, why, sizeof(why));
+			CHECK(!ok && strstr(why, "gardée") != NULL, "reserved farm: a single farm is kept as it is, and the plan says why");
+			char error[200];
+			fc->building_count = 1;
+			fc->building[0] = (BuildingInfo){ .position_id = 72, .build_id = 8, .level = 9 };
+			fc->construction_loaded = true;
+			fc->construction_extra_expires = INT64_MAX;
+			CHECK(!AskHelpStart(fc, "boss", 3, error, sizeof(error)) && strstr(error, "aucune ferme") != NULL, "askhelp: no farm on the account, and it says so");
+			free(fc);
+		}
+
+		/* the second queue's end date is read from the construction packet */
+		{
+			uint8_t pkt[BUILDING_QUEUE_INFO_SIZE];
+			memset(pkt, 0, sizeof(pkt));
+			for (int i = 0; i < 8; i++) pkt[BUILDING_QUEUE_SLOTS * BUILDING_QUEUE_ENTRY_SIZE + i] = i < 7 ? 0xff : 0x7f;
+			Connection *qc = fresh("boss");
+			RecvBuildingQueue(qc, pkt, sizeof(pkt));
+			CHECK(qc->construction_loaded && qc->construction_extra_expires == INT64_MAX, "build queue: the trailing i64 of the packet is the second queue's end date (INT64_MAX = permanent)");
+			free(qc);
+		}
+
+		/* $research: progress per category, remaining researches of one category */
+		{
+			Connection *rc = fresh("boss");
+			rc->research = c->research;
+			reset_sent();
+			say(rc, "eve", "$research", COMMAND_CHANNEL_MAIL);
+			CHECK(replied("Seuls les administrateurs peuvent consulter"), "$research: refused to a stranger");
+			reset_sent();
+			say(rc, "boss", "$research", COMMAND_CHANNEL_MAIL);
+			CHECK(replied("En cours") && replied("Sceaux") && replied("Duel de guildes"), "$research: research in progress and every category");
+			reset_sent();
+			say(rc, "boss", "$research sceaux", COMMAND_CHANNEL_MAIL);
+			CHECK(replied("Sceaux :") && replied("Reste"), "$research <category>: what is left in the category (by name)");
+			reset_sent();
+			say(rc, "boss", "$research 7", COMMAND_CHANNEL_MAIL);
+			CHECK(replied("Direction Arm"), "$research <n>: category by its position in the game's tabs");
+			reset_sent();
+			say(rc, "boss", "$research economie", COMMAND_CHANNEL_MAIL);
+			CHECK(replied("conomie"), "$research: accents do not have to be typed");
+			reset_sent();
+			say(rc, "boss", "$research batailles", COMMAND_CHANNEL_MAIL);
+			CHECK(replied("Plusieurs cat"), "$research: an ambiguous name lists the matching categories");
+			reset_sent();
+			say(rc, "boss", "$research zzz", COMMAND_CHANNEL_MAIL);
+			CHECK(replied("Cat") && replied("inconnue"), "$research: unknown category is said");
+			free(rc);
+		}
 
 		uint8_t idle[RESEARCH_INFO_SIZE];
 		memcpy(idle, research_info, sizeof(idle));
@@ -1571,6 +2222,32 @@ static const uint8_t build_event_none[] = {
 		GatherTick(c);
 		CHECK(c->gather.troops_out_by_kind[TROOP_INFANTRY] == 215 && c->gather.troops_out_by_kind[TROOP_CAVALRY] == 0,
 			"gather: the second kind is left alone when the first has enough");
+		free(c);
+
+		/* restart with marches already out: they count against gather.max_marches (2 out + 3 reserved = 1 more) */
+		c = fresh("boss");
+		c->gather.enabled = true;
+		c->gather.max_marches = 3;
+		c->gather.scan_done = true;
+		c->player.max_marches = 5;
+		{
+			uint8_t snap[2] = { 5, 2 };
+			RecvMarchData(c, snap);
+		}
+		c->gather.tile_count = 3;
+		c->gather.tiles[0] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 1, .level = 5, .amount = 5000 };
+		c->gather.tiles[1] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 2, .level = 5, .amount = 5000 };
+		c->gather.tiles[2] = (GatherTile){ .used = true, .zone_id = 1, .point_id = 3, .level = 5, .amount = 5000 };
+		for (int i = 0; i < 6; i++) {
+			c->gather.next_march_at = 1;
+			GatherTick(c);
+			c->gather.march_send_at = 1;
+			GatherTick(c);
+			uint8_t ok[2] = { 0, 1 };
+			if (c->gather.active_marches > 0 && c->gather.pending_count > 0 && (int)c->gather.pending_count > i)
+				RecvGatherMarchResp(c, ok, sizeof(ok));
+		}
+		CHECK(c->gather.active_marches == 1, "gather: marches already out at login count against gather.max_marches");
 		free(c);
 
 		/* a delivery already going on does not send its next march during the pause, and does after it */

@@ -35,6 +35,11 @@ Amounts accept the suffixes `K`, `M` and `B`: `500K`, `1.5M`, `2B`.
 | `$admin remove <player>` | administrators | Removes an administrator added in game |
 | `$recall` | administrators | Takes every march back, then the bot sends no march for 5 minutes (`recall.pause_seconds`) |
 | `$heal` | administrators | Heals every wounded troop at once (same as "heal all" in the infirmary) |
+| `$askhelp <times>` | administrators | Upgrades the account's **low-level farm** (the farm with the lowest level, kept for this: the automatic construction never upgrades it), asks the alliance for help, waits 3 to 4 s, cancels it, and does it again, `<times>` times (100 at most). It only cancels what it just started, in the queue it went to; a missing answer, a server error or two busy queues stop the series. The reply at the end gives the cycles done and the stock difference since the start, i.e. what the whole thing cost. The automatic construction pauses meanwhile |
+| `$askhelp stop` | administrators | Stops the series |
+| `$research` | administrators | Research in progress, and for each of the 16 categories how many researches are finished |
+| `$research <category>` | administrators | What is left in one category (name or tab number, accents optional), e.g. `$research sceaux`, `$research 7`; several matches are listed so you can be more precise |
+| `$research start <category>` / `$research start #<id>` | administrators | Starts the next research of that category (or that very research) the account can start right now, prerequisites first (a missing prerequisite is started instead, even from another category, and the reply says so): Academy level and base cost against the stock are checked, the step that unblocks the most researches wins, then the shortest. Says why when nothing can be started. One research runs at a time, so it does nothing while one is in progress |
 | `$revive` | administrators | Starts a free, wait-only sanctuary resurrection for every dead troop at once. Not the points-based "instant" resurrection - that one is not implemented yet |
 | `$relocate random` | administrators | Moves the castle to a place chosen by the game (uses a random relocator) |
 | `$relocate <x> <y>` | administrators | Moves the castle to these coordinates in the current kingdom (uses an advanced relocator) |

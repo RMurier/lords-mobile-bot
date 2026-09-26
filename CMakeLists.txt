@@ -16,6 +16,8 @@ add_executable(client
     src/config.c
     src/status.c
     src/guildbank.c
+    src/research_table.c
+    src/building_table.c
 )
 
 target_compile_definitions(client PRIVATE

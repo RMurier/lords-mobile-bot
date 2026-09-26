@@ -82,6 +82,12 @@ void BotTick(Connection *c)
 
 	AutoTrainTick(c);
 
+	ResearchAutoTick(c);
+
+	BuildAutoTick(c);
+
+	AskHelpTick(c);
+
 	MigrationTick(c);
 	
 	StatusTick(c);
@@ -404,6 +410,18 @@ static SessionResult ProcessConnection(Connection *c)
 					break;
 				case _MSG_REQUEST_ALLIANCE_INFO:
 					RecvAllianceInfo(c, s->buffer + s->parse_pos + 4);
+					break;
+				case _MSG_RESP_BUILDBEGIN:
+					RecvBuildBegin(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_BUILDCANCEL:
+					RecvBuildCancel(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_BUILDCOMPLETE:
+					RecvBuildComplete(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_BUILDINGERROR:
+					RecvBuildingError(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_BUILDINGEVENT: 
 					RecvBuildingQueue(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);

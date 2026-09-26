@@ -371,3 +371,23 @@ h2.subhead:first-of-type { margin-top: 18px; }
 .badge-out { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--warn-soft); color: var(--warn); margin-left: 6px; }
 .note { padding: 10px 12px; border-radius: 8px; background: var(--surface-2); margin-bottom: 10px; font-size: 14px; }
 .note.warn { background: var(--warn-soft); color: var(--warn); }
+
+/* research tab */
+.rchips { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; }
+.rchip { display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font: inherit; cursor: pointer; }
+.rchip:hover { border-color: var(--accent); }
+.rchip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.rchip .rname { font-weight: 600; font-size: 14px; }
+.rchip .rsub { font-size: 12px; color: var(--muted); }
+.rchip .atbar { display: block; flex: 0 0 8px; }
+.rchip .atfill { display: block; }
+.rlist { display: flex; flex-direction: column; }
+.rrow { padding: 9px 0; border-bottom: 1px solid var(--border); }
+.rrow:last-child { border-bottom: 0; }
+.rrow .help { margin: 4px 0 0; }
+.rline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rtitle { flex: 0 0 230px; font-size: 14px; font-weight: 500; }
+.rline .atbar { flex: 1 1 120px; display: block; height: 8px; }
+.rline .atfill { display: block; }
+.rline .atval { min-width: 56px; }
+@media (max-width: 640px) { .rtitle { flex-basis: 100%; } }

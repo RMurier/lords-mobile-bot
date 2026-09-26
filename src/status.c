@@ -7,6 +7,7 @@
 #include "status.h"
 #include "command.h"
 #include "map_point.h"
+#include "protocol.h"
 
 #define STATUS_INTERVAL 5
 
@@ -140,6 +141,50 @@ void StatusWrite(Connection *c, bool connected)
 			fprintf(f, "]}");
 		}
 		fprintf(f, "]},");
+	}
+
+	// Research: the levels of every research (the console maps them with the game's table), the one
+	// running, and what the automatic mode is doing.
+	{
+		int64_t now_s = c->server_time ? (int64_t)c->server_time : (int64_t)now;
+		fprintf(f, "\"research\":{\"loaded\":%s,\"in_progress\":%u,\"start\":%lld,\"total\":%u,\"remaining\":%lld,\"academy\":%u,\"levels\":\"",
+			c->research.loaded ? "true" : "false", ResearchInProgress(&c->research) ? c->research.in_progress : 0,
+			(long long)c->research.start_time, c->research.total_time,
+			(long long)ResearchSecondsLeft(&c->research, now_s), AcademyLevel(c));
+		for (int i = 0; i < RESEARCH_LEVEL_BYTES; i++)
+			fprintf(f, "%02x", c->research.levels[i]);
+		fprintf(f, "\",\"auto\":{\"enabled\":%s,\"kinds\":[", c->research_auto.enabled ? "true" : "false");
+		for (uint8_t i = 0; i < c->research_auto.kind_count; i++)
+			fprintf(f, "%s%u", i ? "," : "", c->research_auto.kinds[i]);
+		fputs("],\"state\":", f);
+		JsonString(f, c->research_auto.state);
+		fputs("}},", f);
+	}
+
+	// Construction: every building (where it stands, which, its level - the ones sent at login), what is being
+	// built, and what the automatic construction would do next.
+	{
+		int64_t now_s = c->server_time ? (int64_t)c->server_time : (int64_t)now;
+		fprintf(f, "\"build\":{\"reserved_farm\":%d,\"count\":%u,\"queues\":%d,\"permanent_queue\":%s,\"buildings\":[", BuildingReservedFarm(c) >= 0 ? c->building[BuildingReservedFarm(c)].position_id : 0, c->building_count,
+			!c->construction_loaded ? 1 : (c->construction_extra_expires > now_s ? 2 : 1), c->construction_extra_expires == INT64_MAX ? "true" : "false");
+		for (uint8_t i = 0; i < c->building_count; i++)
+			fprintf(f, "%s[%u,%u,%u]", i ? "," : "", c->building[i].position_id, c->building[i].build_id, c->building[i].level);
+		fputs("],\"queue\":[", f);
+		bool first = true;
+		for (int i = 0; i < BUILDING_QUEUE_SLOTS; i++) {
+			const BuildingConstruction *q = &c->construction[i];
+			if (!q->used) continue;
+			fprintf(f, "%s{\"slot\":%u,\"id\":%u,\"level\":%u,\"remaining\":%lld,\"total\":%u}", first ? "" : ",", q->slot, q->build_id,
+				q->level, (long long)BuildingConstructionSecondsLeft(q, now_s), q->duration);
+			first = false;
+		}
+		fprintf(f, "],\"auto\":{\"enabled\":%s,\"types\":[", c->build_auto.enabled ? "true" : "false");
+		for (uint8_t i = 0; i < c->build_auto.type_count; i++)
+			fprintf(f, "%s%u", i ? "," : "", c->build_auto.types[i]);
+		fprintf(f, "],\"plan\":{\"slot\":%u,\"id\":%u,\"level\":%u},\"state\":", c->build_auto.plan_slot, c->build_auto.plan_build_id,
+			c->build_auto.plan_level);
+		JsonString(f, c->build_auto.state);
+		fputs("}},", f);
 	}
 
 	fprintf(f, "\"wounded\":{\"loaded\":%s,\"total\":%u},",

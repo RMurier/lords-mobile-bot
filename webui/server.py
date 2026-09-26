@@ -806,6 +806,39 @@ def api_account_game(h, query, account_id):
             "age": max(0, int(age)), "data": data}
 
 
+_research_table = {"mtime": None, "data": None}
+
+
+@route("GET", "/api/research/table")
+def api_research_table(h, query):
+    """The game's own research table (categories, researches, levels, costs): gamedata/game_research.json,
+    made by tools/extract_game_tables.py. The console maps the levels the bot reports onto it."""
+    path = REPO / "gamedata" / "game_research.json"
+    try:
+        mtime = path.stat().st_mtime
+        if _research_table["mtime"] != mtime:
+            _research_table.update(mtime=mtime, data=json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        raise ApiError(404, "Table des recherches introuvable (gamedata/game_research.json).")
+    return _research_table["data"]
+
+
+_building_table = {"mtime": None, "data": None}
+
+
+@route("GET", "/api/buildings/table")
+def api_building_table(h, query):
+    """The game's own building table (types, per-level costs and prerequisites): gamedata/game_buildings.json."""
+    path = REPO / "gamedata" / "game_buildings.json"
+    try:
+        mtime = path.stat().st_mtime
+        if _building_table["mtime"] != mtime:
+            _building_table.update(mtime=mtime, data=json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        raise ApiError(404, "Table des bâtiments introuvable (gamedata/game_buildings.json).")
+    return _building_table["data"]
+
+
 @route("POST", "/api/accounts/([^/]+)/chat/send")
 def api_account_chat_send(h, query, account_id):
     """Queues a guild chat message: dropped where the bot polls for it (like admins.txt, the folder

@@ -1,6 +1,7 @@
 #include "command.h"
 #include <ctype.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <time.h>
 #ifdef _WIN32
   #include <direct.h>
@@ -678,6 +679,9 @@ static void ShowHelp(Connection *c, const char *player_name, bool is_admin)
 			"\n%cadminall <joueur> - vider le stock (réserve incluse) sur ce joueur, ex. %cadminall Bob (utile avant une migration)", p, p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crecall - rappeler toutes les troupes, aucune marche ensuite pendant un moment", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cheal - soigner tous les blessés à l'infirmerie", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%caskhelp <fois> - améliorer la ferme gardée à bas niveau, demander de l'aide, annuler 3 à 4 s plus tard, en boucle (askhelp stop pour arrêter)", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cresearch [catégorie] - recherches terminées par catégorie, ou ce qu'il reste dans une catégorie (nom ou numéro)", p);
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cresearch start <catégorie>|#<id> - lancer la prochaine recherche possible de cette catégorie", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crevive - ressusciter tous les morts au sanctuaire (gratuit, nécessite d'attendre)", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%crelocate random|<x> <y> - déplacer le château", p);
 		n += (size_t)snprintf(text + n, sizeof(text) - n, "\n%cmigrate <royaume> <x> <y> - migrer vers un autre royaume", p);
@@ -770,6 +774,214 @@ static void HealCommand(Connection *c, const char *player_name, bool is_admin)
 	BotReply(c, player_name, "Infirmerie", "Soin lancé pour %s troupe(s) blessée(s).", amt);
 }
 
+/* ------------------------------------------------------------------------
+ * $research: which researches are done, per category (research_table.h has the game's own tables)
+ * ------------------------------------------------------------------------ */
+
+/* Researches of one category the account can do at all (a few are marked not researchable by the game),
+ * and how many of them are at their maximum level. */
+static void ResearchKindProgress(const Connection *c, uint8_t kind, uint16_t *done, uint16_t *total)
+{
+	*done = 0;
+	*total = 0;
+
+	for (uint16_t id = 1; id <= RESEARCH_TECH_COUNT; id++) {
+		const ResearchTechInfo *t = ResearchTech(id);
+
+		if (t->kind != kind || t->locked)
+			continue;
+
+		(*total)++;
+		if (ResearchLevel(&c->research, id) >= t->max_level)
+			(*done)++;
+	}
+}
+
+/* $research start <category>|#<id>: starts the next research of that category (or that very research) the
+ * account can afford right now - see ResearchPickNext for how it is chosen. */
+static void ResearchStartCommand(Connection *c, const char *player_name, const char *target)
+{
+	uint8_t kind = 0;
+	uint16_t only_id = 0;
+	char why[160];
+
+	while (*target == ' ')
+		target++;
+
+	if (*target == '#') {
+		only_id = (uint16_t)atoi(target + 1);
+		if (!ResearchTech(only_id)) {
+			BotReply(c, player_name, "Recherches", "Recherche #%s inconnue (1 à %u).", target + 1, RESEARCH_TECH_COUNT);
+			return;
+		}
+	} else if (*target) {
+		const ResearchKindInfo *found[RESEARCH_KIND_COUNT_MAX];
+		size_t matches = ResearchFindKinds(target, found, RESEARCH_KIND_COUNT_MAX);
+
+		if (matches != 1) {
+			BotReply(c, player_name, "Recherches", matches ? "Plusieurs catégories correspondent à « %s », précisez ou donnez le numéro." :
+				"Catégorie inconnue : %s.", target);
+			return;
+		}
+		kind = found[0]->kind;
+	} else {
+		BotReply(c, player_name, "Recherches", "Usage : %cresearch start <catégorie>|#<numéro de recherche>", c->bot.command_prefix);
+		return;
+	}
+
+	if (ResearchInProgress(&c->research)) {
+		const ResearchTechInfo *running = ResearchTech(c->research.in_progress);
+		BotReply(c, player_name, "Recherches", "Une recherche est déjà en cours : %s. Le jeu n'en accepte qu'une à la fois.",
+			running ? running->name_fr : "?");
+		return;
+	}
+
+	ResearchPick pick;
+	uint16_t id = ResearchPickNext(c, kind, only_id, &pick, why, sizeof(why), false);
+	if (!id) {
+		BotReply(c, player_name, "Recherches", "Rien à lancer : %s", why);
+		return;
+	}
+
+	const ResearchTechInfo *t = ResearchTech(id);
+	const ResearchTechInfo *goal = ResearchTech(pick.for_id);
+	const ResearchLevelInfo *row = ResearchLevelRow(t, pick.level);
+	RequestResearchStartPlain(c, id, pick.level);
+	char note[96] = "";
+	if (pick.for_id != id && goal)
+		snprintf(note, sizeof(note), ", prérequis de %s", goal->name_fr);
+	BotReply(c, player_name, "Recherches", "Lancement demandé : %s niveau %u%s (durée de base %.1f h, la vraie dépend de vos bonus).",
+		t->name_fr, pick.level, note, row->time / 3600.0);
+}
+
+static void ResearchCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent consulter les recherches.");
+		return;
+	}
+
+	if (!c->research.loaded) {
+		BotReply(c, player_name, "Recherches", "Pas encore de données de recherche reçues du serveur.");
+		return;
+	}
+
+	char text[2000];
+	size_t n = 0;
+
+	while (*args == ' ')
+		args++;
+
+	if (strncmp(args, "start", 5) == 0 && (args[5] == 0 || args[5] == ' ')) {
+		ResearchStartCommand(c, player_name, args + 5);
+		return;
+	}
+
+	if (*args == 0) {
+		if (ResearchInProgress(&c->research)) {
+			const ResearchTechInfo *t = ResearchTech(c->research.in_progress);
+			int64_t now = c->server_time ? (int64_t)c->server_time : (int64_t)time(NULL);
+			n += (size_t)snprintf(text + n, sizeof(text) - n, "En cours : %s (niveau %u), reste %.1f h. ",
+				t ? t->name_fr : "?", ResearchLevel(&c->research, c->research.in_progress) + 1u,
+				ResearchSecondsLeft(&c->research, now) / 3600.0);
+		} else {
+			n += (size_t)snprintf(text + n, sizeof(text) - n, "Aucune recherche en cours. ");
+		}
+
+		for (uint8_t order = 1; order <= RESEARCH_KIND_COUNT; order++) {
+			const ResearchKindInfo *k = NULL;
+			for (uint16_t i = 0; i < RESEARCH_KIND_COUNT; i++)
+				if (RESEARCH_KINDS[i].order == order)
+					k = &RESEARCH_KINDS[i];
+			if (!k)
+				continue;
+
+			uint16_t done, total;
+			ResearchKindProgress(c, k->kind, &done, &total);
+			n += (size_t)snprintf(text + n, sizeof(text) - n, "%s%u %s %u/%u", order == 1 ? "" : " | ", order, k->name_fr, done, total);
+		}
+
+		BotReply(c, player_name, "Recherches", "%s", text);
+		return;
+	}
+
+	const ResearchKindInfo *found[RESEARCH_KIND_COUNT_MAX];
+	size_t matches = ResearchFindKinds(args, found, RESEARCH_KIND_COUNT_MAX);
+
+	if (matches == 0) {
+		BotReply(c, player_name, "Recherches", "Catégorie inconnue : %s. %cresearch seul liste les catégories.",
+			args, c->bot.command_prefix);
+		return;
+	}
+
+	if (matches > 1) {
+		for (size_t i = 0; i < matches; i++)
+			n += (size_t)snprintf(text + n, sizeof(text) - n, "%s%u %s", i ? ", " : "", found[i]->order, found[i]->name_fr);
+		BotReply(c, player_name, "Recherches", "Plusieurs catégories correspondent : %s. Précisez ou donnez le numéro.", text);
+		return;
+	}
+
+	const ResearchKindInfo *k = found[0];
+	uint16_t done, total;
+	ResearchKindProgress(c, k->kind, &done, &total);
+	n += (size_t)snprintf(text + n, sizeof(text) - n, "%s : %u/%u terminées.", k->name_fr, done, total);
+
+	bool any = false;
+	for (uint16_t id = 1; id <= RESEARCH_TECH_COUNT && n < sizeof(text) - 64; id++) {
+		const ResearchTechInfo *t = ResearchTech(id);
+		uint8_t level = ResearchLevel(&c->research, id);
+
+		if (t->kind != k->kind || t->locked || level >= t->max_level)
+			continue;
+
+		n += (size_t)snprintf(text + n, sizeof(text) - n, "%s%s %u/%u", any ? ", " : " Reste : ", t->name_fr, level, t->max_level);
+		any = true;
+	}
+
+	if (!any)
+		n += (size_t)snprintf(text + n, sizeof(text) - n, " Tout est au maximum.");
+
+	BotReply(c, player_name, "Recherches", "%s", text);
+}
+
+/* $askhelp <times>: start an upgrade of the account's low-level farm, ask the alliance for help, cancel it 3 to 4 s later,
+ * <times> times (see AskHelpTick). The farm is always the one kept at a low level (BuildingReservedFarm). */
+static void AskHelpCommand(Connection *c, const char *player_name, bool is_admin, const char *args)
+{
+	if (!is_admin) {
+		BotReply(c, player_name, "Non autorisé", "Seuls les administrateurs peuvent lancer des demandes d'aide en série.");
+		return;
+	}
+
+	while (*args == ' ')
+		args++;
+
+	if (strcmp(args, "stop") == 0) {
+		if (!c->askhelp.active)
+			BotReply(c, player_name, "Demandes d'aide", "Aucune série en cours.");
+		else
+			AskHelpStop(c, "arrêté sur demande");
+		return;
+	}
+
+	char *end;
+	long times = strtol(args, &end, 10);
+	while (*end == ' ')
+		end++;
+	if (end == args || *end || times < 1 || times > 100) {
+		BotReply(c, player_name, "Demandes d'aide", "Usage : %caskhelp <fois 1-100>  ou  %caskhelp stop", c->bot.command_prefix, c->bot.command_prefix);
+		return;
+	}
+
+	char error[200];
+	if (!AskHelpStart(c, player_name, (uint16_t)times, error, sizeof(error))) {
+		BotReply(c, player_name, "Demandes d'aide", "%s", error);
+		return;
+	}
+
+	BotReply(c, player_name, "Demandes d'aide", "C'est parti : %ld cycle(s) sur la ferme gardée à bas niveau (lancer, demander de l'aide, annuler 3 à 4 s plus tard). %caskhelp stop pour arrêter.", times, c->bot.command_prefix);
+}
+
 /* $revive: start a free (wait-only) sanctuary resurrection for every dead troop at once (see
  * RequestValhallaDivineRevive's comment) - not the points-based "instant" revival. */
 static void ReviveCommand(Connection *c, const char *player_name, bool is_admin)
@@ -852,6 +1064,16 @@ void command_handler(Connection *c, const char *player_name, const char *message
 
 	if (IsCommand(message, "heal", &args)) {
 		HealCommand(c, player_name, is_admin);
+		return;
+	}
+
+	if (IsCommand(message, "askhelp", &args)) {
+		AskHelpCommand(c, player_name, is_admin, args);
+		return;
+	}
+
+	if (IsCommand(message, "research", &args)) {
+		ResearchCommand(c, player_name, is_admin, args);
 		return;
 	}
 

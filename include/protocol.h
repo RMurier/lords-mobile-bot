@@ -220,6 +220,39 @@ void RequestSendMailFmt(Connection *c, const char *player_name, const char *subj
 void RecvSHelp(Connection *c, const uint8_t *data);
 void RecvHelp_Home(Connection *c, const uint8_t *data);
 void RequestResearchStart(Connection *c, uint16_t tech_id, uint8_t level, const ResearchItemUse *items, uint16_t item_count);
+void RequestResearchStartPlain(Connection *c, uint16_t tech_id, uint8_t level);
+uint8_t AcademyLevel(const Connection *c);
+typedef struct {
+    uint16_t id;        // the research to start
+    uint8_t  level;     // the level to request (its current level + 1)
+    uint16_t for_id;    // the research of the goal it serves (differs from id when id is a prerequisite)
+    uint16_t unlocks;   // how many goal researches wait for this very step
+} ResearchPick;
+uint16_t ResearchPickNext(const Connection *c, uint8_t kind, uint16_t only_id, ResearchPick *pick, char *why, size_t why_size, bool auto_mode);
+size_t ResearchFindKinds(const char *query, const ResearchKindInfo **found, size_t max);
+void ResearchAutoTick(Connection *c);
+typedef struct {
+    uint16_t slot;        // where the building stands
+    uint16_t build_id;
+    uint8_t  level;       // the level to build
+    uint16_t for_slot;    // the goal building it serves (differs from slot when this one is a prerequisite)
+    uint16_t for_id;
+    uint16_t unlocks;     // how many goals wait for this very step
+} BuildPick;
+bool BuildPickNext(const Connection *c, uint16_t build_id, BuildPick *pick, char *why, size_t why_size);
+size_t BuildFindTypes(const char *query, const BuildingTypeInfo **found, size_t max);
+void BuildAutoTick(Connection *c);
+void RequestBuildStart(Connection *c, uint16_t slot, uint16_t build_id);
+void RecvBuildBegin(Connection *c, const uint8_t *data, uint16_t size);
+void RecvBuildComplete(Connection *c, const uint8_t *data, uint16_t size);
+void RecvBuildingError(Connection *c, const uint8_t *data, uint16_t size);
+void RecvBuildCancel(Connection *c, const uint8_t *data, uint16_t size);
+void RequestBuildHelp(Connection *c);
+void RequestBuildCancel(Connection *c, uint8_t queue);
+bool AskHelpStart(Connection *c, const char *requester, uint16_t total, char *error, size_t error_size);
+int BuildingReservedFarm(const Connection *c);
+void AskHelpStop(Connection *c, const char *why);
+void AskHelpTick(Connection *c);
 void RequestResearchCancel(Connection *c, uint16_t tech_id, uint8_t level);
 uint16_t ResearchSnapshotDiff(Connection *c);
 void RecomputeSupplyCapacity(Connection *c);
