@@ -1439,10 +1439,15 @@ int main(void)
 			Connection *ac = fresh("boss");
 			reset_sent();
 			ac->protocol.seq_id = 0x14;
-			RequestBuildHelp(ac);
+			RequestBuildHelp(ac, 0);
 			int at = find_packet(2852);   /* the number the game sends (not the enum constant of that name: it is 2854) */
 			CHECK(at >= 0 && sent_size[at] == 4 + sizeof(req_help) && memcmp(sent[at] + 4, req_help, sizeof(req_help)) == 0,
-				"askhelp: the alliance help request is byte for byte the game's (u32 seq, 1)");
+				"askhelp: the alliance help request is byte for byte the game's (u32 seq, 1 for queue 0)");
+			reset_sent();
+			ac->protocol.seq_id = 0x14;
+			RequestBuildHelp(ac, 1);
+			at = find_packet(2852);
+			CHECK(at >= 0 && sent[at][8] == 2, "askhelp: for a construction in queue 1 the byte is 2 (queue + 1: 1 was refused live for queue 1)");
 			reset_sent();
 			ac->protocol.seq_id = 0x1e;
 			RequestBuildCancel(ac, 0);
@@ -1554,6 +1559,44 @@ int main(void)
 			say(ac, "boss", "$askhelp stop", COMMAND_CHANNEL_MAIL);
 			CHECK(!ac->askhelp.active, "$askhelp stop: stops it");
 			free(ac);
+		}
+
+		/* the server's answer to the help request: accepted, or refused (then this cycle's cancel goes through and the series stops) */
+		{
+			static const uint8_t ans_ok[] = { 0x00, 0x01, 0x04, 0x00, 0x18, 0x1e };          /* captured */
+			static const uint8_t ans_refused[] = { 0x02, 0x01, 0x5d, 0x87, 0x02, 0x00 };      /* live, farm in queue 1 asked with byte 1 */
+			Connection *hc = fresh("boss");
+			hc->resources.food = hc->resources.rock = hc->resources.wood = hc->resources.ore = hc->resources.gold = 1000000000LL;
+			hc->building_count = 2;
+			hc->building[0] = (BuildingInfo){ .position_id = 57584, .build_id = 4, .level = 12 };
+			hc->building[1] = (BuildingInfo){ .position_id = 51, .build_id = 8, .level = 13 };
+			hc->construction_loaded = true;
+			hc->construction_extra_expires = INT64_MAX;
+			char error[200];
+			uint8_t begin[40] = { 0xf0, 0xe0, 0x04, 0x00, 0x0d };
+			begin[37] = 1;
+			AskHelpStart(hc, "boss", 3, error, sizeof(error));
+			hc->askhelp.next_at = 0;
+			AskHelpTick(hc);
+			RecvBuildBegin(hc, begin, sizeof(begin));
+			hc->askhelp.next_at = 0;
+			reset_sent();
+			AskHelpTick(hc);
+			int at = find_packet(2852);
+			CHECK(at >= 0 && sent[at][8] == 2, "askhelp: the series asks for help with the queue's byte (queue 1 -> 2)");
+			RecvBuildHelpAnswer(hc, ans_ok, sizeof(ans_ok));
+			CHECK(!hc->askhelp.stop_after_cancel, "askhelp: an accepted help request changes nothing");
+			RecvBuildHelpAnswer(hc, ans_refused, sizeof(ans_refused));
+			CHECK(hc->askhelp.stop_after_cancel && hc->askhelp.active, "askhelp: a refused help request is noted, the series is not cut off in the middle of a cycle");
+			hc->askhelp.next_at = 0;
+			reset_sent();
+			AskHelpTick(hc);
+			CHECK(find_packet(2006) >= 0 && sent[find_packet(2006)][8] == 1, "askhelp: the construction is still cancelled after a refused help request");
+			uint8_t cancel_answer[23] = { 0 };
+			reset_sent();
+			RecvBuildCancel(hc, cancel_answer, sizeof(cancel_answer));
+			CHECK(!hc->askhelp.active && hc->askhelp.done == 1 && replied("refus"), "askhelp: then it stops, and says the server refused the help");
+			free(hc);
 		}
 
 		/* the queue a start went to is read from the answer (byte 37), not guessed: live, the farm went to queue 1 with queue 0 empty */

@@ -6760,22 +6760,52 @@ void RequestBuildStart(Connection *c, uint16_t slot, uint16_t build_id)
 }
 
 /* The alliance help request the game sends by itself after every construction it starts (captured: 2852,
- * `_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP` is the constant's name but it is a client request): `u32 seq, u8 1`. The research
- * one sends 0 in that byte, so it is most likely the kind (1 = construction). It carries no building: the server helps
- * the one just started (its answer, 2853, is `00 01 <build_id> <level> 1e`). */
-/* The number is written out on purpose: the enum constant of that name in packet_enum.h evaluates to 2854, two more than the
- * game's 2852 (packet_map.h and the capture agree on 2852). Sent with the enum, the server did not know the message and closed the
- * connection a few seconds later. Everything else this code sends was checked against the map. */
+ * `_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP` is the constant's name but it is a client request): `u32 seq, u8 q`.
+ * The byte is 1 for the captured farm, which ran in queue 0, and 0 for a research. It was first taken for the kind of thing
+ * (1 = construction) and sent as 1 whatever the queue - and the server refused it (status 2) for a farm in queue 1. So it is
+ * now `queue + 1`: INFERRED (queue 0 -> 1 as captured; queue 1 -> 2 never seen from the game). The request carries no
+ * building: the server helps the one in that queue. The number is written out on purpose: the enum constant of that name in
+ * packet_enum.h evaluates to 2854, two more than the game's 2852 (packet_map.h and the capture agree on 2852). Sent with the
+ * enum, the server did not know the message and closed the connection a few seconds later. */
 #define MSG_ALLIANCE_SOMEBODY_NEEDHELP_REQUEST 2852
 
-void RequestBuildHelp(Connection *c)
+void RequestBuildHelp(Connection *c, uint8_t queue)
 {
 	c->size = 2;
 	write_u16(c->data + c->size, MSG_ALLIANCE_SOMEBODY_NEEDHELP_REQUEST); c->size += 2;
 	write_u32(c->data + c->size, ++c->protocol.seq_id);                 c->size += 4;
-	write_u8 (c->data + c->size, 1);                                     c->size += 1;
+	write_u8 (c->data + c->size, (uint8_t)(queue + 1));                  c->size += 1;
 	write_u16(c->data, c->size);
 	send_packet(c, true);
+}
+
+/* The answer to it, message 2853 (dispatched from the enum's `_MSG_RESP_ALLIANCE_HELP`, which is 2853 in packet_enum.h). Captured, accepted:
+ * `00 01 04 00 18 1e` = u8 status 0, u8 the request's byte, u16 build_id, u8 level, u8 30 (helps wanted). Seen live, refused:
+ * `02 01 5d 87 02 00` and `02 01 22 00 01 00` = status 2, then things that are not a building. Only $askhelp sends a help request,
+ * so an answer while its series waits to cancel is its own: a refusal lets this cycle's cancel go through and stops the series after it
+ * (asking again would refuse again, and every cycle would start and cancel a construction for nothing). */
+void RecvBuildHelpAnswer(Connection *c, const uint8_t *data, uint16_t size)
+{
+	if (size < 1)
+		return;
+
+	AskHelpState *h = &c->askhelp;
+	uint8_t status = read_u8(data);
+
+	if (status == 0) {
+		LOGI("[AIDE] Demande d'aide acceptée par le serveur\n");
+		return;
+	}
+
+	char hex[64] = "";
+	for (uint16_t i = 0; i < size && i < 16; i++)
+		snprintf(hex + i * 3, sizeof(hex) - i * 3, "%02x ", data[i]);
+	LOGW("[AIDE] Demande d'aide refusée par le serveur (code %u) : %s\n", status, hex);
+
+	if (h->active && h->phase == ASKHELP_WAIT_CANCEL_TIMER) {
+		h->stop_after_cancel = true;
+		snprintf(h->help_refusal, sizeof(h->help_refusal), "%s", hex);
+	}
 }
 
 /* Cancel: _MSG_REQUEST_BUILDCANCEL (2006), captured: `u32 seq, u8 queue` (0 = the base queue). */
@@ -6810,7 +6840,11 @@ void RecvBuildCancel(Connection *c, const uint8_t *data, uint16_t size)
 		}
 		h->done++;
 		LOGI("[AIDE] Cycle %u/%u terminé (annulation confirmée, %u octet(s))\n", h->done, h->total, size);
-		if (h->done >= h->total) {
+		if (h->stop_after_cancel) {
+			char text[160];
+			snprintf(text, sizeof(text), "le serveur a refusé la demande d'aide (%s) : la construction est annulée, je m'arrête", h->help_refusal);
+			AskHelpStop(c, text);
+		} else if (h->done >= h->total) {
 			AskHelpStop(c, NULL);
 		} else {
 			h->phase = ASKHELP_PAUSE;
@@ -7236,6 +7270,7 @@ void AskHelpTick(Connection *c)
 		h->build_id = BUILD_ID_FARM;
 		h->queue = -1;
 		h->retried_other = false;
+		h->stop_after_cancel = false;
 		RequestBuildStart(c, slot, BUILD_ID_FARM);
 		h->phase = ASKHELP_WAIT_BEGIN;
 		h->phase_since = now;
@@ -7284,7 +7319,7 @@ void AskHelpTick(Connection *c)
 			AskHelpStop(c, "la construction lancée n'est plus dans la file attendue : je ne demande rien et n'annule rien");
 			return;
 		}
-		RequestBuildHelp(c);
+		RequestBuildHelp(c, (uint8_t)h->queue);
 		h->phase = ASKHELP_WAIT_CANCEL_TIMER;
 		h->phase_since = now;
 		h->next_at = now + 3000 + (uint64_t)(rand() % 1001);   // 3 to 4 s after the help request, then the cancel

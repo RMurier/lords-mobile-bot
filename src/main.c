@@ -375,8 +375,9 @@ static SessionResult ProcessConnection(Connection *c)
 				case _MSG_RESP_ALLYPOINT: 
 					RecvAllyPoint(c, s->buffer + s->parse_pos + 4);
 					break;
-				case _MSG_RESP_ALLIANCE_HELP: 
+				case _MSG_RESP_ALLIANCE_HELP:   // the enum is 2 behind the map here: this is the real 2853, the answer to a help request
 					printf("_MSG_RESP_ALLIANCE_HELP\n");
+					RecvBuildHelpAnswer(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					// RecvAllianceHelp(c, s->buffer + s->parse_pos + 4);
 					break;
 				case 0xB26:
