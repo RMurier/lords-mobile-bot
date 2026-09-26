@@ -67,6 +67,37 @@ class ResearchSettings(unittest.TestCase):
             self.assertIn(key, app_js)
 
 
+class MonsterSettings(unittest.TestCase):
+    def test_every_setting_is_read_by_the_bot(self):
+        config_c = (REPO / "src" / "config.c").read_text(encoding="utf-8")
+        monster = next(c for c in schema.CATEGORIES if c["id"] == "monster")
+        for f in monster["fields"]:
+            self.assertIn(f'"{f["key"]}"', config_c, f["key"])
+
+    def test_validation(self):
+        self.assertEqual(schema.validate(field("monster.level"), "3"), "3")
+        self.assertEqual(schema.validate(field("monster.energy_max"), "64540"), "64540")
+        with self.assertRaises(ValueError):
+            schema.validate(field("monster.level"), "10")
+
+    def test_the_status_carries_what_the_console_reads(self):
+        status_c = (REPO / "src" / "status.c").read_text(encoding="utf-8")
+        for key in ("monster", "energy", "energy_max", "cost", "monsters", "kills"):
+            self.assertIn('\\"%s\\"' % key, status_c, key)
+        app_js = (REPO / "webui" / "static" / "app.js").read_text(encoding="utf-8")
+        for key in ("d.monster.energy", "d.monster.kills", "d.monster.monsters"):
+            self.assertIn(key, app_js)
+
+    def test_the_tables_are_the_games(self):
+        heroes = json.loads((REPO / "gamedata" / "game_heroes.json").read_text(encoding="utf-8"))["heroes"]
+        by_id = {h["id"]: h for h in heroes}
+        self.assertEqual([by_id[i]["title_en"] for i in (4, 5, 6, 16, 19)],
+                         ["Snow Queen", "Prima Donna", "Incinerator", "Bombin' Goblin", "Elementalist"])
+        self.assertTrue(all(by_id[i]["damage"] == "magic" for i in (4, 5, 6, 16, 19)))
+        monsters = {m["id"]: m for m in json.loads((REPO / "gamedata" / "game_monsters.json").read_text(encoding="utf-8"))["monsters"]}
+        self.assertEqual((monsters[39]["name_fr"], monsters[39]["defence_en"]), ("Gorzilla", "High PDEF"))
+
+
 class BuildSettings(unittest.TestCase):
     def test_buildings_are_the_ones_the_bot_can_work_on(self):
         selectable = [t for t in BUILDINGS["types"]

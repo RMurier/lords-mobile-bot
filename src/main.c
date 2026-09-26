@@ -82,6 +82,8 @@ void BotTick(Connection *c)
 
 	AutoTrainTick(c);
 
+	HuntTick(c);
+
 	ResearchAutoTick(c);
 
 	BuildAutoTick(c);
@@ -221,6 +223,7 @@ static SessionResult ProcessConnection(Connection *c)
 					// kind = read_u16(s->buffer + s->parse_pos + 4);
 					LOGI("Game login successful\n");
 					c->game_logged_in = true;
+					c->lord.dead = false; c->lord.where = LORD_HOME; // 4408 (or 4401) comes right after, at this login, only when the lord is dead
 					// ServerInitOver(c);
 					break;
 				case _MSG_LOGIN_LOGINERRORRESP: 
@@ -446,6 +449,26 @@ static SessionResult ProcessConnection(Connection *c)
 					break;
 				case _MSG_RESP_ADDSOLDIER_:
 					RecvAddSoldier(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_LORD_BEINGCAPTIVE:
+				case _MSG_RESP_LORD_BEINGRELEASED:
+				case _MSG_RESP_LORD_HOME:
+					RecvLordWhere(c, (uint16_t)s->packet_type, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_LORD_BEINGEXECUTED:
+					RecvLordBeingExecuted(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_HEROSAVE:
+					RecvHeroSave(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_SENDMONSTER:
+					RecvSendMonster(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_MONSTERREPORTINFO:
+					RecvMonsterReport(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
+				case _MSG_RESP_MONSTERHOME:
+					RecvMonsterHome(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
 				case _MSG_RESP_TRAININGINFO_:
 					RecvTrainingInfo(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);

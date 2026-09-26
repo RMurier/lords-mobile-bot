@@ -890,6 +890,7 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
         ${stat("alliance", "Alliance", `${RANKS[d.alliance.rank] || d.alliance.rank}${d.alliance.members ? ` · ${d.alliance.members} membres` : ""}`)}
       </div>
       <p class="help">${icon("clock", 14)} Mis à jour il y a ${fmtDuration(game.age)}.</p></div>
+      ${d.lord && d.lord.where !== "home" ? `<div class="card"><h2>${d.lord.where === "dead" ? "Chef mort" : "Chef emprisonné"}</h2><p>${d.lord.where === "dead" ? `Le chef de ce compte est mort${d.lord.since ? ` (depuis le ${new Date(d.lord.since * 1000).toLocaleDateString("fr-FR")})` : ""} : il attend d'être ressuscité.` : "Le chef de ce compte est dans une prison ennemie."}</p><p class="help">Fruits de résurrection : ${d.lord.fruits} · pièces de guilde : ${num(d.lord.guild_coins)}</p></div>` : ""}
       <div class="card"><h2>Ressources</h2><div class="rgrid">${tiles}</div></div>
       <div class="card"><h2>Troupes</h2>
         ${t.loaded ? `<div class="tgrid">
@@ -898,7 +899,12 @@ pktmon etl2pcap capture.etl -o capture.pcapng`;
           ${d.wounded.loaded ? troop("wounded", "Blessés", num(d.wounded.total)) : ""}</div>
           ${quickActionsHtml(d.wounded, d.valhalla)}
           ${troopTierTable(d.troops_by_tier)}${trainingRow(d.training)}${autotrainProgress(d.autotrain)}`
-          : `<p class="help">Pas encore reçues du serveur.</p>`}</div>`;
+          : `<p class="help">Pas encore reçues du serveur.</p>`}</div>
+      ${d.monster && d.monster.enabled ? `<div class="card"><h2>Chasse au monstre</h2>
+        <p>Énergie : <b>${num(d.monster.energy)}</b>${d.monster.energy_max ? ` / ${num(d.monster.energy_max)}` : ""}
+        · niveau ${d.monster.level}${d.monster.cost ? ` · coût d'une attaque : ${num(d.monster.cost)}` : ""}</p>
+        <p class="help">${d.monster.monsters} monstre(s) connu(s) · ${d.monster.heroes} héros · ${d.monster.attacks} attaque(s) · ${d.monster.kills} monstre(s) tué(s)${d.monster.series ? " · chasse en cours" : ""}
+        ${d.monster.energy_max ? "" : " · renseignez l'énergie maximum pour chasser"}</p></div>` : ""}`;
   }
 
   function startGame() {

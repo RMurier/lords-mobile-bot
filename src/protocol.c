@@ -7,6 +7,7 @@
 #include "log.h"
 #include "guildbank.h"
 #include "troop_table.h"
+#include "hunt_table.h"
 #include <stdlib.h>
 #include <ctype.h>
 #include <time.h>
@@ -1223,30 +1224,32 @@ void RequestUnknown(Connection *c) {
 	// 09 00 2d 25 0a 00 00 00 00 
 }
 
+/* The answer to a purchase (see the comment on SHOP_TYPE_GUILD in protocol.h). A migration that is buying scrolls goes on from here (MigrationTick). */
 void RecvBuyItem(Connection *c, const uint8_t *data, uint16_t size) {
-	return; // exit 
-	
-	uint16_t offset = 0;
-	
-	uint8_t b = read_u8(data + offset); offset += 1;
-	
-	printf("\nRecvBuyItem\n");
-	printf("b: %u\n", b);
-	printf("payload length: %u\n", size);
-	
-	// if (b != 0) return;
-	
-	uint8_t b2 = read_u8(data + offset); offset += 1;
-	uint16_t type = read_u16(data + offset); offset+= 2;
-	uint16_t item_id = read_u16(data + offset); offset+= 2;
-	uint16_t quantity = read_u16(data + offset); offset+= 2;
-	
-	printf("b2: %u\n", b2);
-	printf("type: %u\n", type);
-	printf("item_id: %u\n", item_id);
-	printf("quantity: %u\n", quantity);
-	
-	// if (b == 0) exit(0);
+	if (size < 1) return;
+	const uint8_t status = read_u8(data);
+	Migration *m = &c->migration;
+
+	if (status != 0) {
+		LOGW("[MAGASIN] Achat refuse par le serveur (code %u)\n", status);
+		if (m->state == MIGRATION_BUYING) {
+			BotReply(c, m->requester, "Migration", "Le magasin de guilde a refusé l'achat d'un vélin (code %u) : migration abandonnée.", status);
+			m->state = MIGRATION_IDLE;
+		}
+		return;
+	}
+	if (size < 12) return;
+	const uint16_t key = read_u16(data + 2), item = read_u16(data + 4), quantity = read_u16(data + 6);
+	const uint32_t coins = read_u32(data + 8);
+	c->items[item].quantity = quantity;
+	c->RoleAlliance.Money = coins;
+	LOGI("[MAGASIN] Achat accepte : objet %u (article %u), %u dans le sac, %u pieces de guilde restantes\n", item, key, quantity, coins);
+
+	if (m->state == MIGRATION_BUYING && item == MIGRATION_SCROLL) {
+		m->buy_in_flight = false;
+		m->buy_at = now_ms() + 1500 + (uint64_t)(rand() % 1500);   // a player takes a moment between two purchases
+		m->deadline = time(NULL) + 30;
+	}
 }
 
 void HandleLoginValidate(Connection *c, const uint8_t *data, uint16_t size)
@@ -1619,6 +1622,7 @@ void RecvLoginRoleInfo(Connection *c, const uint8_t *data, uint16_t size)
 	
 	c->player.zone_id  = read_u16(data + offset); offset += 2;
 	c->player.point_id = read_u8 (data + offset); offset += 1;
+	HuntReadLogin(c, data, size);
 	/*
 	uint16_t newZoneID = read_u16(data + offset); offset += 2;
 	uint8_t newPointID = read_u8(data + offset); offset += 1;
@@ -2946,9 +2950,11 @@ void RecvUseItem(Connection *c, const uint8_t *data, uint16_t size) {
 		AutoTrainBagAnswer(c, false, 0);
 		if (c->migration.state == MIGRATION_WAIT_SCROLL_RESULT) {
 			c->migration.state = MIGRATION_IDLE;
-			LOGW("[MIGRATION] Migration par vélin refusée par le serveur (code %d)\n", (int8_t)status);
+			// the refusals of a scroll seen so far: 27 = impossible during the RvR (KvK), told by the account's owner (the game shows it)
+			const char *why = status == 27 ? " : impossible pendant le RvR (KvK)" : "";
+			LOGW("[MIGRATION] Migration par vélin refusée par le serveur (code %d)%s\n", (int8_t)status, why);
 			BotReply(c, c->migration.requester, "Migration",
-				"Migration par vélin refusée par le serveur (code %d).", (int8_t)status);
+				"Migration par vélin refusée par le serveur (code %d)%s.", (int8_t)status, why);
 		} else {
 			// a relocation was asked from the chat: tell the administrator if the server refused
 			ReportRelocation(c, false, status);
@@ -3818,8 +3824,10 @@ void NotifyDiscord(Connection *c, const char *message) {
 
 static bool GatherTileInRange(Connection *c, uint16_t zone_id, uint8_t point_id);
 
+static bool HuntTrackMonsterAt(Connection *c, const uint8_t *rec, uint16_t room);
+
 void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
-	if (!c->war.enabled && !c->gather.enabled) return;
+	if (!c->war.enabled && !c->gather.enabled && !c->hunt.enabled) return;
 
 	// Compact single-point update: matches the shape seen, once, at the exact moment
 	// a shield bubble disappeared for a tracked point.
@@ -3857,12 +3865,14 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 	}
 	uint16_t matched = 0;
 	uint16_t pos = 3; // packet-level prefix, not decoded (kind + a count-like field)
-	while (pos + WAR_RECORD_SIZE <= size) {
+	// (a monster record is shorter than the 51 bytes of the others: with the hunt on, a monster in the last bytes still counts)
+	while (pos + (c->hunt.enabled ? 15 : WAR_RECORD_SIZE) <= size) {
+		const bool full = pos + WAR_RECORD_SIZE <= size;
 		uint16_t zone_id  = read_u16(data + pos);
 		uint8_t  point_id = read_u8(data + pos + 2);
 		uint8_t  tag      = read_u8(data + pos + 3);
 
-		if (zone_id < WAR_ZONE_COUNT && c->war.enabled && tag == WAR_RECORD_TAG) {
+		if (full && zone_id < WAR_ZONE_COUNT && c->war.enabled && tag == WAR_RECORD_TAG) {
 			WarPoint *p = WarTrackPoint(c, zone_id, point_id);
 			if (p) {
 				read_bytes((uint8_t*)p->name, data + pos + 4, 13);
@@ -3873,7 +3883,7 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 			}
 			matched++;
 			pos += WAR_RECORD_SIZE;
-		} else if (zone_id < WAR_ZONE_COUNT && c->gather.enabled && tag >= 1 && tag <= 5) {
+		} else if (full && zone_id < WAR_ZONE_COUNT && c->gather.enabled && tag >= 1 && tag <= 5) {
 			uint16_t kingdom_id = read_u16(data + pos + 20);
 			uint8_t  level  = read_u8(data + pos + 22);
 			uint32_t amount = read_u32(data + pos + 23);
@@ -3921,6 +3931,9 @@ void RecvMapInfoPlus(Connection *c, const uint8_t *data, uint16_t size) {
 			}
 			matched++;
 			pos += WAR_RECORD_SIZE;
+		} else if (c->hunt.enabled && HuntTrackMonsterAt(c, data + pos, (uint16_t)(size - pos))) {
+			matched++;
+			pos += 15; // zone, point, tag, level, key, serial, health: what a monster record is known to hold
 		} else {
 			pos += 1;
 		}
@@ -4011,9 +4024,8 @@ static bool GatherTileInRange(Connection *c, uint16_t zone_id, uint8_t point_id)
  * real MAPDATA requests (adjacent zones a capture batched together always
  * differ by exactly 1 or 16). Returns false past the last tile in the
  * rectangle (scan complete). */
-static bool GatherZoneAt(Connection *c, uint16_t index, uint16_t *zone_out) {
+static bool ScanZoneAt(Connection *c, int radius, uint16_t index, uint16_t *zone_out) {
 	map_pos_t castle = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
-	int radius = c->gather.radius > 0 ? c->gather.radius : 30;
 
 	int x_min = castle.x > radius ? castle.x - radius : 0;
 	int x_max = castle.x + radius < 511 ? castle.x + radius : 511;
@@ -4031,6 +4043,10 @@ static bool GatherZoneAt(Connection *c, uint16_t index, uint16_t *zone_out) {
 	int yz = yz_min + (index / width);
 	*zone_out = (uint16_t)(xz + yz * 16);
 	return true;
+}
+
+static bool GatherZoneAt(Connection *c, uint16_t index, uint16_t *zone_out) {
+	return ScanZoneAt(c, c->gather.radius > 0 ? c->gather.radius : 30, index, zone_out);
 }
 
 /* Confirmed from 2 live captures (one march of pure infantry, one of infantry+ranged+cavalry+
@@ -8765,6 +8781,22 @@ bool MigrationStart(Connection *c, const char *requester, uint16_t kingdom_id, u
 	return true;
 }
 
+/* The migration itself: a scroll when there are enough (it works whatever the account, and the free offer for returning players is rarely available), else the free offer. */
+static void MigrationSend(Connection *c)
+{
+	const uint16_t have   = c->items[MIGRATION_SCROLL].quantity;
+	const uint16_t needed = c->migration_scrolls_needed ? c->migration_scrolls_needed : 1;
+
+	if (c->items_loaded && have >= needed) {
+		RequestMigrationScroll(c, c->migration.kingdom_id, c->migration.zone_id, c->migration.point_id);
+		c->migration.state = MIGRATION_WAIT_SCROLL_RESULT;
+	} else {
+		RequestFreeCrossTeleport(c, c->migration.kingdom_id, c->migration.zone_id, c->migration.point_id);
+		c->migration.state = MIGRATION_WAIT_RESULT;
+	}
+	c->migration.deadline = time(NULL) + 15;
+}
+
 void RecvKingdomServer(Connection *c, const uint8_t *data, uint16_t size)
 {
 	if (c->migration.state != MIGRATION_WAIT_SERVER || size < 1)
@@ -8782,19 +8814,24 @@ void RecvKingdomServer(Connection *c, const uint8_t *data, uint16_t size)
 	if (size >= 6)
 		LOGI("[MIGRATION] Serveur du royaume %u : port %u\n", c->migration.kingdom_id, read_u32(data + 1));
 
-	// a migration scroll works regardless of the account: try one first if there are enough,
-	// since the free offer (for returning players) is rarely available and not worth trying first
-	uint16_t have   = c->items[MIGRATION_SCROLL].quantity;
-	uint16_t needed = c->migration_scrolls_needed ? c->migration_scrolls_needed : 1;
-
-	if (c->items_loaded && have >= needed) {
-		RequestMigrationScroll(c, c->migration.kingdom_id, c->migration.zone_id, c->migration.point_id);
-		c->migration.state = MIGRATION_WAIT_SCROLL_RESULT;
-	} else {
-		RequestFreeCrossTeleport(c, c->migration.kingdom_id, c->migration.zone_id, c->migration.point_id);
-		c->migration.state = MIGRATION_WAIT_RESULT;
+	// With migration.buy_scrolls, the scrolls that are missing are bought first, one at a time, in the guild shop.
+	const uint16_t have   = c->items[MIGRATION_SCROLL].quantity;
+	const uint16_t needed = c->migration_scrolls_needed ? c->migration_scrolls_needed : 1;
+	if (c->migration_buy_scrolls && c->items_loaded && have < needed) {
+		const uint32_t missing = needed - have;
+		if ((uint64_t)c->RoleAlliance.Money >= (uint64_t)missing * GUILD_SHOP_SCROLL_PRICE) {
+			c->migration.state = MIGRATION_BUYING;
+			c->migration.buy_in_flight = false;
+			c->migration.buy_at = now_ms() + 1000 + (uint64_t)(rand() % 1000);
+			c->migration.deadline = time(NULL) + 30 + (time_t)missing * 15;
+			BotReply(c, c->migration.requester, "Migration", "Achat de %u vélin(s) de migration au magasin de guilde (%u pièces chacun, %u pièces de guilde en stock) avant la migration.",
+				missing, GUILD_SHOP_SCROLL_PRICE, c->RoleAlliance.Money);
+			return;
+		}
+		BotReply(c, c->migration.requester, "Migration", "Pas assez de pièces de guilde pour acheter les %u vélin(s) qui manquent : il en faut %llu et le compte en a %u.",
+			missing, (unsigned long long)missing * GUILD_SHOP_SCROLL_PRICE, c->RoleAlliance.Money);
 	}
-	c->migration.deadline = time(NULL) + 15;
+	MigrationSend(c);
 }
 
 /*
@@ -8910,7 +8947,22 @@ void RecvCrossKingdomClose(Connection *c, const uint8_t *data, uint16_t size)
 /* Gives up when the server does not answer. */
 void MigrationTick(Connection *c)
 {
-	if (c->migration.state == MIGRATION_IDLE || time(NULL) <= c->migration.deadline)
+	Migration *m = &c->migration;
+	if (m->state == MIGRATION_BUYING && time(NULL) <= m->deadline) {
+		if (m->buy_in_flight || now_ms() < m->buy_at) return;
+		const uint16_t have   = c->items[MIGRATION_SCROLL].quantity;
+		const uint16_t needed = c->migration_scrolls_needed ? c->migration_scrolls_needed : 1;
+		if (have >= needed) { MigrationSend(c); return; }
+		if (c->RoleAlliance.Money < GUILD_SHOP_SCROLL_PRICE) {
+			BotReply(c, m->requester, "Migration", "Plus assez de pièces de guilde pour un vélin de plus (%u) : j'essaie la migration gratuite.", c->RoleAlliance.Money);
+			MigrationSend(c);
+			return;
+		}
+		RequestBuyItem(c, SHOP_TYPE_GUILD, GUILD_SHOP_SCROLL_KEY, MIGRATION_SCROLL, 1);   // one at a time
+		m->buy_in_flight = true;
+		return;
+	}
+	if (m->state == MIGRATION_IDLE || time(NULL) <= m->deadline)
 		return;
 
 	if (c->migration.state == MIGRATION_WAIT_SERVER)
@@ -8919,4 +8971,458 @@ void MigrationTick(Connection *c)
 		BotReply(c, c->migration.requester, "Migration", "Pas de réponse à la demande de migration : vérifiez dans le jeu où en est le château.");
 
 	c->migration.state = MIGRATION_IDLE;
+}
+
+
+/* Where the lord is, from the game's own messages (names and numbers from the client): _MSG_RESP_LORD_BEINGCAPTIVE (4401) = he was taken to a prison,
+ * _MSG_RESP_LORD_BEINGRELEASED (4407) and _MSG_RESP_LORD_HOME (4409) = he is back in the castle, _MSG_RESP_LORD_BEINGEXECUTED (4408) = dead. Only 4408 was captured
+ * (RecvLordBeingExecuted); the payload of the other three is not known, so it is only shown in the debug log until a capture reads it. With none of them,
+ * the lord is in the castle. */
+void RecvLordWhere(Connection *c, uint16_t type, const uint8_t *data, uint16_t size)
+{
+	LordState *l = &c->lord;
+	switch (type) {
+		case _MSG_RESP_LORD_BEINGCAPTIVE:
+			l->where = LORD_CAPTIVE; l->dead = false;
+			LOGW("[SEIGNEUR] Le chef est emprisonne (%u octet(s) recus)\n", size);
+			break;
+		case _MSG_RESP_LORD_BEINGRELEASED:
+		case _MSG_RESP_LORD_HOME:
+			l->where = LORD_HOME; l->dead = false;
+			LOGI("[SEIGNEUR] Le chef est de retour au chateau\n");
+			break;
+		default:
+			return;
+	}
+	if (size > 0) {
+		char hex[3 * 32 + 1] = "";
+		for (uint16_t i = 0; i < size && i < 32; i++)
+			snprintf(hex + i * 3, 4, "%02x ", data[i]);
+		LOGD("[SEIGNEUR] payload %u : %s\n", type, hex);
+	}
+}
+
+/* _MSG_RESP_LORD_BEINGEXECUTED (4408), 13 bytes, at the login of an account whose lord is dead (a capture of one: `d7 da a5 6a 00 00 00 00 | 80 3a 09 00 | 01` = a time
+ * (2026-09-12 23:05:59), 604800 seconds (7 days: the execution wait) and 1). The client keeps it as its "next execute time". Here the wait was over two weeks
+ * before the capture: the lord had been executed and waits for a resurrection (`_MSG_REQUEST_LORD_REVIVE`, 4410: its layout is not known, it needs a capture). */
+void RecvLordBeingExecuted(Connection *c, const uint8_t *data, uint16_t size)
+{
+	if (size < 13) return;
+	LordState *l = &c->lord;
+	l->dead  = true;
+	l->where = LORD_DEAD;
+	l->since = read_u64(data);
+	l->wait  = read_u32(data + 8);
+	l->flag  = read_u8(data + 12);
+
+	const int64_t now = c->server_time ? (int64_t)c->server_time : (int64_t)time(NULL);
+	const int64_t ends = (int64_t)l->since + l->wait;
+	char text[200];
+	if (now >= ends)
+		snprintf(text, sizeof(text), "Le chef est mort : capture il y a %lld jour(s), l'execution est passee depuis %lld jour(s) - il attend d'etre ressuscite",
+			(long long)((now - (int64_t)l->since) / 86400), (long long)((now - ends) / 86400));
+	else
+		snprintf(text, sizeof(text), "Le chef est en cours d'execution : il reste %lld heure(s) avant qu'il meure", (long long)((ends - now) / 3600));
+	LOGW("[SEIGNEUR] %s\n", text);
+	if (c->notify.on_lord_dead && !l->notified) {
+		l->notified = true;
+		char message[260];
+		snprintf(message, sizeof(message), "%s : %s", c->player.name, text);
+		NotifyDiscord(c, message);
+	}
+}
+
+
+/* ------------------------------------------------------------------------
+ * Automatic map monster hunt. See HuntSettings (connection.h) and docs/monster-hunt.md: every layout below was read from captures of the
+ * official client (a level 1 monster, then a level 3 Gorzilla attacked to its death).
+ * ------------------------------------------------------------------------ */
+
+#define HUNT_SCAN_RADIUS          64
+#define HUNT_MAX_KEY              100   // Monster.bin keys of the map monsters (Gorzilla = 39); Astra and the other event copies are above
+#define HUNT_RESCAN_INTERVAL_MS   (10 * 60 * 1000)
+#define HUNT_REPORTED_MS          (30 * 60 * 1000)
+#define HUNT_REFUSED_MS           (10 * 60 * 1000)
+#define HUNT_LEVEL_LOCKED_MS      (30 * 60 * 1000)
+#define HUNT_ANSWER_TIMEOUT_MS    20000
+#define HUNT_HOME_TIMEOUT_MS      45000
+
+static const HuntMonster *HuntMonsterByKey(uint16_t key)
+{
+	for (size_t i = 0; i < sizeof(HUNT_MONSTERS) / sizeof(HUNT_MONSTERS[0]); i++)
+		if (HUNT_MONSTERS[i].key == key)
+			return &HUNT_MONSTERS[i];
+	return NULL;
+}
+
+static uint8_t HuntHeroDamage(uint16_t id)
+{
+	for (size_t i = 0; i < sizeof(HUNT_HEROES) / sizeof(HUNT_HEROES[0]); i++)
+		if (HUNT_HEROES[i].id == id)
+			return HUNT_HEROES[i].damage;
+	return 0;
+}
+
+/* The login packet (_MSG_LOGIN_ROLEINFO, 705-byte payload) holds the hunt energy as the role's last stored value: u32 at 366, the server clock of that value
+ * (u64) at 370, and the recovery frequency (u16, milliseconds per point: 1201) at 378. From two captures: 872 stored 1009 s before the login = 1712 at the login,
+ * and the player read 1744 a few seconds later. */
+void HuntReadLogin(Connection *c, const uint8_t *data, uint16_t size)
+{
+	if (size < 380) return;
+	c->hunt.energy_stored  = read_u32(data + 366);
+	c->hunt.energy_time    = read_u64(data + 370);
+	c->hunt.energy_freq_ms = read_u16(data + 378);
+	c->hunt.energy_known   = c->hunt.energy_freq_ms > 0;
+}
+
+/* The energy now: the stored value plus what has recovered since, at the frequency, capped at the maximum the owner gave (the server does not send it). */
+uint32_t HuntEnergyNow(const Connection *c)
+{
+	const HuntSettings *h = &c->hunt;
+	if (!h->energy_known) return 0;
+	uint64_t total = h->energy_stored;
+	if (c->server_time > h->energy_time)
+		total += (c->server_time - h->energy_time) * 1000 / h->energy_freq_ms;
+	if (h->energy_max && total > h->energy_max)
+		total = h->energy_max;
+	return total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
+}
+
+/* _MSG_RESP_HEROSAVE (1201) at the login: `u64 account | u16 count`, then 20-byte records
+ *   id u16 | level u8 (60 at most) | exp u32 | rank u8 | star u8 | flags u8 | 6 zero bytes | 4 skill levels
+ * (a capture: 53 records, the level byte 0x3c = 60 on the fully raised heroes). */
+void RecvHeroSave(Connection *c, const uint8_t *data, uint16_t size)
+{
+	if (size < 10) return;
+	uint16_t count = read_u16(data + 8);
+	if (10u + (uint32_t)count * 20 > size)
+		count = (uint16_t)((size - 10) / 20);
+	c->hunt.hero_count = 0;
+	for (uint16_t i = 0; i < count && c->hunt.hero_count < HUNT_MAX_HEROES; i++) {
+		const uint8_t *r = data + 10 + i * 20;
+		if (read_u8(r + 8) == 0) continue; // no star: not a hero the account has
+		HuntHeroOwned *h = &c->hunt.heroes[c->hunt.hero_count++];
+		h->id    = read_u16(r);
+		h->level = read_u8(r + 2);
+		h->rank  = read_u8(r + 7);
+		h->star  = read_u8(r + 8);
+	}
+}
+
+/* The five heroes to send. Those that fight with the damage the monster is weak to come first (`weak_to` 1 = weak to magic, 2 = weak to physical, 0 = no
+ * preference), then by level, star and rank; the team is completed with the best of the others. False when the account owns fewer than five. */
+bool HuntPickHeroes(const Connection *c, uint8_t weak_to, uint16_t out[HUNT_TEAM_SIZE])
+{
+	const HuntSettings *h = &c->hunt;
+	if (h->hero_count < HUNT_TEAM_SIZE) return false;
+
+	const uint8_t wanted = weak_to == 1 ? 2 : weak_to == 2 ? 1 : 0;   // damage kind: 1 physical, 2 magic
+	bool used[HUNT_MAX_HEROES] = { false };
+	for (int slot = 0; slot < HUNT_TEAM_SIZE; slot++) {
+		int best = -1;
+		for (int i = 0; i < h->hero_count; i++) {
+			if (used[i]) continue;
+			if (best < 0) { best = i; continue; }
+			const HuntHeroOwned *a = &h->heroes[i], *b = &h->heroes[best];
+			const int ma = wanted && HuntHeroDamage(a->id) == wanted, mb = wanted && HuntHeroDamage(b->id) == wanted;
+			bool better = ma != mb ? ma > mb
+				: a->level != b->level ? a->level > b->level
+				: a->star != b->star ? a->star > b->star
+				: a->rank != b->rank ? a->rank > b->rank
+				: a->id < b->id;
+			if (better) best = i;
+		}
+		used[best] = true;
+		out[slot] = h->heroes[best].id;
+	}
+	return true;
+}
+
+/* A monster record of the map (_MSG_RESP_UPDATE_MAPINFO_PLUS): zone u16 | point u8 | tag u8 | level u8 | key u16 | serial u32 | health float. The tag is the
+ * kind byte of the monster's Monster.bin row, so a record only counts when the key is in the table with that same kind - which keeps chance matches out. */
+static bool HuntTrackMonsterAt(Connection *c, const uint8_t *rec, uint16_t room)
+{
+	if (room < 15) return false;
+	const uint16_t zone = read_u16(rec);
+	const uint8_t point = read_u8(rec + 2), tag = read_u8(rec + 3), level = read_u8(rec + 4);
+	const uint16_t key = read_u16(rec + 5);
+	if (zone >= WAR_ZONE_COUNT || tag < 6 || tag > 14 || level < 1 || level > HUNT_MAX_LEVEL) return false;
+	if (key >= HUNT_MAX_KEY) return false;   // the rows above are event copies (Astra ...): not the monsters of the map hunt
+	const HuntMonster *m = HuntMonsterByKey(key);
+	if (!m || m->tag != tag) return false;
+
+	HuntSettings *h = &c->hunt;
+	HuntMonsterTile *t = NULL;
+	for (uint8_t i = 0; i < h->monster_count && !t; i++)
+		if (h->monsters[i].zone_id == zone && h->monsters[i].point_id == point)
+			t = &h->monsters[i];
+	if (!t) {
+		if (h->monster_count >= HUNT_MAX_MONSTERS) return true;
+		t = &h->monsters[h->monster_count++];
+		memset(t, 0, sizeof(*t));
+		t->zone_id = zone;
+		t->point_id = point;
+	}
+	t->tag = tag;
+	t->level = level;
+	t->key = key;
+	t->serial = read_u32(rec + 7);
+	t->gen = h->scan_gen;
+	return true;
+}
+
+static void HuntDropMonster(HuntSettings *h, uint16_t zone, uint8_t point)
+{
+	for (uint8_t i = 0; i < h->monster_count; i++) {
+		if (h->monsters[i].zone_id == zone && h->monsters[i].point_id == point) {
+			memmove(&h->monsters[i], &h->monsters[i + 1], (size_t)(h->monster_count - i - 1) * sizeof(h->monsters[0]));
+			h->monster_count--;
+			return;
+		}
+	}
+}
+
+static HuntMonsterTile *HuntFindMonster(HuntSettings *h, uint16_t zone, uint8_t point)
+{
+	for (uint8_t i = 0; i < h->monster_count; i++)
+		if (h->monsters[i].zone_id == zone && h->monsters[i].point_id == point)
+			return &h->monsters[i];
+	return NULL;
+}
+
+/* The nearest monster of the level the account hunts, not one that was just reported to the chat or refused. */
+static HuntMonsterTile *HuntNearest(Connection *c)
+{
+	const uint64_t now = now_ms();
+	const map_pos_t castle = getTileMapPosbyPointCode(c->player.zone_id, c->player.point_id);
+	HuntMonsterTile *best = NULL;
+	long best_dist = 0;
+	for (uint8_t i = 0; i < c->hunt.monster_count; i++) {
+		HuntMonsterTile *t = &c->hunt.monsters[i];
+		if (t->level != c->hunt.level || t->reported_until > now || t->refused_until > now) continue;
+		const map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
+		const long dx = (long)pos.x - (long)castle.x, dy = (long)pos.y - (long)castle.y;
+		const long dist = dx * dx + dy * dy;
+		if (!best || dist < best_dist) { best = t; best_dist = dist; }
+	}
+	return best;
+}
+
+/* _MSG_REQUEST_SENDMONSTER (2488), 21 bytes, from a capture (level 1 monster; then a level 3 Gorzilla five times):
+ *   seq u32 | zone u16 | point u8 | 01 (constant in the captures) | 5 hero ids u16 | monster level u8 | monster key u16
+ *   1c000000 | c801 | ce | 01 | 1000 1300 0600 0400 0500 | 01 | 2700 */
+void RequestSendMonster(Connection *c, uint16_t zone_id, uint8_t point_id, const uint16_t heroes[HUNT_TEAM_SIZE], uint8_t level, uint16_t key)
+{
+	c->size = 2;
+	write_u16(c->data + c->size, _MSG_REQUEST_SENDMONSTER); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);     c->size += 4;
+	write_u16(c->data + c->size, zone_id);                  c->size += 2;
+	write_u8 (c->data + c->size, point_id);                 c->size += 1;
+	write_u8 (c->data + c->size, 1);                        c->size += 1;
+	for (int i = 0; i < HUNT_TEAM_SIZE; i++) {
+		write_u16(c->data + c->size, heroes[i]);        c->size += 2;
+	}
+	write_u8 (c->data + c->size, level);                    c->size += 1;
+	write_u16(c->data + c->size, key);                      c->size += 2;
+	write_u16(c->data, c->size);
+	send_packet(c, true);
+}
+
+/* The name, level and coordinates of the monster in the guild chat: "Gorzilla niveau 3 K:13 X:281 Y:471" (the game makes "K:13 X:281 Y:471" clickable). */
+static void HuntReportToChat(Connection *c, HuntMonsterTile *t)
+{
+	const HuntMonster *m = HuntMonsterByKey(t->key);
+	const map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
+	char message[160];
+	snprintf(message, sizeof(message), "%s niveau %u K:%u X:%u Y:%u", m ? m->name_fr : "Monstre", t->level, c->player.current_kingdom_id, pos.x, pos.y);
+	if (c->hunt.chat_report) {
+		LOGI("[CHASSE] Energie insuffisante pour finir le monstre : %s (chat de guilde)\n", message);
+		RequestSendChat(c, 1 /* alliance */, message);
+	} else {
+		LOGI("[CHASSE] Energie insuffisante pour finir le monstre : %s\n", message);
+	}
+	t->reported_until = now_ms() + HUNT_REPORTED_MS;
+}
+
+static void HuntEndSeries(Connection *c)
+{
+	c->hunt.series = false;
+	c->hunt.phase = HUNT_IDLE;
+}
+
+/* _MSG_RESP_SENDMONSTER (2489), 31 bytes, one per attack:
+ *   status u8 (0) | march index u8 | zone u16 | point u8 | start time u64 | travel seconds u32 | ENERGY LEFT u32 | the five heroes
+ * The energy left goes 21240, 16990, 12793, 8562, 4332, 101 over the level 1 attack and five level 3 attacks (the player read 500, 343, 112 the second time): the
+ * difference is what an attack costs. */
+void RecvSendMonster(Connection *c, const uint8_t *data, uint16_t size)
+{
+	HuntSettings *h = &c->hunt;
+	if (h->phase != HUNT_WAIT_ANSWER || size < 1) return;
+	HuntMonsterTile *t = h->target >= 0 && h->target < h->monster_count ? &h->monsters[h->target] : NULL;
+
+	const uint8_t status = read_u8(data);
+	if (status != 0) {
+		LOGW("[CHASSE] Attaque refusee par le serveur (code %u)\n", status);
+		const uint32_t need = h->level <= HUNT_MAX_LEVEL ? h->cost[h->level] : 0;
+		if (need && HuntEnergyNow(c) < need && t) {
+			HuntReportToChat(c, t);
+		} else {
+			// not the energy as far as the bot can tell (a level the researches have not unlocked, a monster already gone...)
+			if (t) t->refused_until = now_ms() + HUNT_REFUSED_MS;
+			if (++h->refusals >= 3) {
+				h->refused_until = now_ms() + HUNT_LEVEL_LOCKED_MS;
+				LOGW("[CHASSE] 3 refus de suite : le niveau %u n'est peut-etre pas debloque par les recherches, pause de %u min\n", h->level, HUNT_LEVEL_LOCKED_MS / 60000);
+			}
+		}
+		HuntEndSeries(c);
+		h->next_action_at = now_ms() + 3000;
+		return;
+	}
+	h->refusals = 0;
+	if (size >= 21) {
+		const uint64_t start = read_u64(data + 5);
+		const uint32_t left = read_u32(data + 17);
+		if (h->energy_before > left && h->level <= HUNT_MAX_LEVEL && h->energy_before - left > h->cost[h->level])
+			h->cost[h->level] = h->energy_before - left;   // the largest seen: recovery during the attack only makes it look smaller
+		h->energy_stored = left;
+		h->energy_time = start;
+		LOGI("[CHASSE] Attaque envoyee : energie restante %u (cout d'une attaque niveau %u : %u)\n", left, h->level, h->cost[h->level]);
+	}
+	h->phase = HUNT_WAIT_HOME;
+	h->phase_since = now_ms();
+}
+
+/* _MSG_RESP_MONSTERREPORTINFO (3422), the battle report, one per attack, before the heroes come back:
+ *   report id u32 | 00 | time u64 | u16 | zone u16 | point u8 | KILLED u8 | u16 | monster key u16 | level u8 | monster health before u32 | after u32 | ...
+ * (3 attacks: 5904091 -> 4083727, 4083726 -> 1902651, 1902650 -> 0, the killed byte 0, 0, 1). */
+void RecvMonsterReport(Connection *c, const uint8_t *data, uint16_t size)
+{
+	HuntSettings *h = &c->hunt;
+	if (size < 32 || h->phase == HUNT_IDLE) return;
+	if (read_u16(data + 15) != h->target_zone || read_u8(data + 17) != h->target_point) return;
+	if (read_u8(data + 18) != 0 || read_u32(data + 28) == 0)
+		h->killed = true;
+}
+
+/* _MSG_RESP_MONSTERHOME (2491): the heroes are back, the attack is over. */
+void RecvMonsterHome(Connection *c, const uint8_t *data, uint16_t size)
+{
+	(void)data; (void)size;
+	HuntSettings *h = &c->hunt;
+	if (h->phase != HUNT_WAIT_HOME) return;
+	h->phase = HUNT_IDLE;
+	h->next_action_at = now_ms() + 1500 + (uint64_t)(rand() % 2000);   // a player takes a moment before the next attack
+	if (h->killed) {
+		const HuntMonsterTile *t = HuntFindMonster(h, h->target_zone, h->target_point);
+		const HuntMonster *m = t ? HuntMonsterByKey(t->key) : NULL;
+		LOGI("[CHASSE] Monstre tue : %s niveau %u\n", m ? m->name_fr : "?", t ? t->level : h->level);
+		HuntDropMonster(h, h->target_zone, h->target_point);
+		h->kills++;
+		h->killed = false;
+		h->series = false;
+	}
+}
+
+/* The map is scanned like the gather tiles are: one zone at a time, the monsters come out of the answers (RecvMapInfoPlus). */
+static void HuntScanStep(Connection *c)
+{
+	HuntSettings *h = &c->hunt;
+	const uint64_t now = now_ms();
+	if (now < h->next_scan_at || h->series || h->phase != HUNT_IDLE) return;
+
+	if (h->scan_done) {
+		if (h->next_rescan_at == 0) h->next_rescan_at = now + HUNT_RESCAN_INTERVAL_MS;
+		if (now < h->next_rescan_at) return;
+		// a scan is a lot of requests: only when a hunt is near (the energy is within 10 minutes of its maximum), so that the list is fresh when it starts
+		if (HuntEnergyNow(c) + 600 * 1000 / (h->energy_freq_ms ? h->energy_freq_ms : 1201) < h->energy_max) return;
+		h->scan_done = false;
+		h->scan_cursor = 0;
+		h->scan_gen++;
+	}
+	h->next_scan_at = now + 1000 + (uint64_t)(rand() % 1000);
+	uint16_t zone;
+	if (ScanZoneAt(c, HUNT_SCAN_RADIUS, h->scan_cursor, &zone)) {
+		RequestMapData(c, zone);
+		h->scan_cursor++;
+		return;
+	}
+	// a whole scan done: the monsters it did not see are gone (killed by someone else, or the day changed)
+	for (int i = (int)h->monster_count - 1; i >= 0; i--)
+		if (h->monsters[i].gen != h->scan_gen)
+			HuntDropMonster(h, h->monsters[i].zone_id, h->monsters[i].point_id);
+	h->scan_done = true;
+	h->next_rescan_at = now + HUNT_RESCAN_INTERVAL_MS;
+	LOGI("[CHASSE] Scan termine : %u monstre(s) connu(s)\n", h->monster_count);
+}
+
+void HuntTick(Connection *c)
+{
+	HuntSettings *h = &c->hunt;
+	if (!h->enabled || h->level < 1 || h->level > HUNT_MAX_LEVEL) return;
+	if (c->player.zone_id == 0 && c->player.point_id == 0) return;   // the castle's place is not known yet
+	if (h->energy_max == 0) return;                                  // no maximum given: no hunt (the console says so)
+	const uint64_t now = now_ms();
+
+	HuntScanStep(c);
+
+	if (h->phase == HUNT_WAIT_ANSWER && now - h->phase_since > HUNT_ANSWER_TIMEOUT_MS) {
+		LOGW("[CHASSE] Pas de reponse du serveur a l'attaque : je m'arrete\n");
+		HuntEndSeries(c);
+		h->next_action_at = now + 10000;
+	}
+	if (h->phase == HUNT_WAIT_HOME && now - h->phase_since > HUNT_HOME_TIMEOUT_MS) {
+		LOGW("[CHASSE] Les heros ne sont pas rentres apres %u s : je reprends\n", HUNT_HOME_TIMEOUT_MS / 1000);
+		h->phase = HUNT_IDLE;
+		h->killed = false;
+	}
+	if (h->phase != HUNT_IDLE || now < h->next_action_at || now < h->refused_until) return;
+	if (!h->energy_known || h->energy_max == 0 || MarchesPaused()) return;
+	if (h->hero_count < HUNT_TEAM_SIZE) {
+		if (!h->no_team_logged) {
+			LOGW("[CHASSE] Il faut au moins %u heros et le compte en a %u : pas de chasse\n", HUNT_TEAM_SIZE, h->hero_count);
+			h->no_team_logged = true;
+		}
+		return;
+	}
+
+	const uint32_t energy = HuntEnergyNow(c);
+	HuntMonsterTile *t = NULL;
+	if (h->series) {
+		t = HuntFindMonster(h, h->target_zone, h->target_point);
+		if (!t) { h->series = false; return; }                        // gone from the map
+		const uint32_t need = h->cost[h->level];
+		if (need && energy < need) {                                  // not enough for another attack: the guild finishes it
+			HuntReportToChat(c, t);
+			h->series = false;
+			return;
+		}
+	} else {
+		if (energy < h->energy_max) return;                           // hunt when the energy is at its maximum
+		t = HuntNearest(c);
+		if (!t) {
+			if (now >= h->no_monster_log_at) {
+				LOGI("[CHASSE] Aucun monstre de niveau %u connu pour l'instant (%u monstre(s) vus)\n", h->level, h->monster_count);
+				h->no_monster_log_at = now + 10 * 60 * 1000;
+			}
+			return;
+		}
+		h->series = true;
+		h->target_zone = t->zone_id;
+		h->target_point = t->point_id;
+	}
+	h->target = (int)(t - h->monsters);
+
+	const HuntMonster *m = HuntMonsterByKey(t->key);
+	uint16_t team[HUNT_TEAM_SIZE];
+	if (!HuntPickHeroes(c, m ? m->weak_to : 0, team)) return;
+
+	h->energy_before = energy;
+	h->killed = false;
+	RequestSendMonster(c, t->zone_id, t->point_id, team, t->level, t->key);
+	h->phase = HUNT_WAIT_ANSWER;
+	h->phase_since = now;
+	h->attacks++;
+	const map_pos_t pos = getTileMapPosbyPointCode(t->zone_id, t->point_id);
+	LOGI("[CHASSE] Attaque de %s niveau %u (X:%u Y:%u), energie %u, heros %u %u %u %u %u\n", m ? m->name_fr : "?", t->level, pos.x, pos.y, energy,
+		team[0], team[1], team[2], team[3], team[4]);
 }

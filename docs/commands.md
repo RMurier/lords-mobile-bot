@@ -160,6 +160,14 @@ type the number shown by the migration screen. The message that follows `$migrat
 game's; the French wording of the less obvious ones (`PBF`, `ABF`, `DWZ`, `FLAG_LIMIT`, `INDEMNIFY`) is an interpretation,
 which is why the name always follows.
 
+**Buying the missing scrolls** (`migration.buy_scrolls = true`, off by default): when the bag has fewer scrolls than `migration.scrolls_needed`, the bot buys the
+missing ones in the **guild shop**, one at a time (810000 guild coins each, a short pause between two purchases), then migrates with them. If the guild coins do not
+cover them all, it buys nothing, says so and falls back to the free offer. The purchase is `_MSG_REQUEST_BUYITEM` (type 2 = the guild shop, key 212, item 1275, quantity 1),
+read from a capture; the same request buys the Revival Fruit (key 12, item 1117, 60000 guild coins), which the lord's resurrection will use.
+
+A migration **scroll** the server refuses is reported with its code. Code **27** is *"impossible pendant le RvR (KvK)"* (the game says so; the answer is
+`status u8 | scroll item u16 | zeros`): no migration while the kingdom war is on, whatever the scrolls.
+
 Other errors: unknown kingdom, invalid coordinates, already in that kingdom, a migration already running, or a server
 that does not answer.
 

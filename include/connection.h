@@ -621,6 +621,7 @@ typedef struct {
     bool on_shield_expiring;     // shield about to run out and no item left to renew it
     bool on_antiscout_expiring;  // same, for anti-scout
     bool on_transfer_done;       // a $bank resource delivery finished
+    bool on_lord_dead;           // the lord (the account's leader) is dead and waits for a resurrection
 } NotifySettings;
 
 typedef enum
@@ -1008,6 +1009,95 @@ typedef struct {
 	char         state[224];                       // last decision in words, shown by the console
 } BuildAutoSettings;
 
+/* The lord (the account's leader) when he is dead: _MSG_RESP_LORD_BEINGEXECUTED (4408) is sent at the login of such an account only (three healthy captures do not have
+ * it, the one of a dead lord does): `time u64 | wait u32 | flag u8` = 2026-09-12 23:05:59, 604800 s (7 days), 1. See RecvLordBeingExecuted. */
+typedef enum { LORD_HOME, LORD_CAPTIVE, LORD_DEAD } LordWhere;
+
+typedef struct {
+	LordWhere where;      // in the castle (nothing said), in a prison (_BEINGCAPTIVE 4401), dead (_BEINGEXECUTED 4408); _BEINGRELEASED 4407 and _HOME 4409 bring him back
+	bool     dead;
+	uint64_t since;      // server clock (seconds) the packet gives first
+	uint32_t wait;       // seconds: the execution wait (7 days)
+	uint8_t  flag;
+	bool     notified;   // the Discord alert went out (once per run)
+} LordState;
+
+/* Automatic map monster hunt (docs/monster-hunt.md). The account's own settings: the monster level to hunt (`monster.level`), its energy maximum
+ * (`monster.energy_max`: the server does not send it, the client computes it from the hunting gear and the researches). The bot starts a series when the
+ * energy reaches that maximum, attacks the nearest monster of that level one attack at a time (five heroes, the ones that fight with the damage the monster
+ * is weak to first, then by level) until it is dead, and when the energy no longer covers an attack it puts the monster's name, level and coordinates in the
+ * guild chat. The bag's energy items are never used. */
+#define HUNT_MAX_HEROES   128
+#define HUNT_MAX_MONSTERS 64
+#define HUNT_TEAM_SIZE    5
+#define HUNT_MAX_LEVEL    9
+
+typedef struct {
+	uint16_t id;
+	uint8_t  level;     // 1-60
+	uint8_t  star;
+	uint8_t  rank;
+} HuntHeroOwned;
+
+typedef struct {
+	uint16_t zone_id;
+	uint8_t  point_id;
+	uint8_t  tag;       // kind byte of its map record = the kind of its Monster.bin row
+	uint8_t  level;
+	uint16_t key;       // Monster.bin key (39 = Gorzilla)
+	uint32_t serial;
+	uint16_t gen;       // the scan that last saw it: a monster a whole scan did not see is gone
+	uint64_t reported_until;   // now_ms(): its coordinates went to the chat, leave it alone until then
+	uint64_t refused_until;    // now_ms(): the server refused an attack on it
+} HuntMonsterTile;
+
+typedef enum {
+	HUNT_IDLE,
+	HUNT_WAIT_ANSWER,   // attack sent, _MSG_RESP_SENDMONSTER not in yet
+	HUNT_WAIT_HOME      // the heroes are out: wait for _MSG_RESP_MONSTERHOME before the next attack
+} HuntPhase;
+
+typedef struct {
+	bool     enabled;
+	uint8_t  level;
+	uint32_t energy_max;
+	bool     chat_report;                // put the coordinates in the guild chat when the energy is short (default true)
+
+	// energy, as the login gives it (HuntReadLogin) and each attack's answer refreshes it
+	bool     energy_known;
+	uint32_t energy_stored;
+	uint64_t energy_time;                // server clock (seconds) of that value
+	uint16_t energy_freq_ms;             // milliseconds per point recovered
+	uint32_t cost[HUNT_MAX_LEVEL + 1];   // energy one attack costs per monster level, learned from the answers (0 = not seen yet)
+
+	HuntHeroOwned heroes[HUNT_MAX_HEROES];
+	uint8_t  hero_count;
+
+	HuntMonsterTile monsters[HUNT_MAX_MONSTERS];
+	uint8_t  monster_count;
+	bool     scan_done;
+	uint16_t scan_cursor;
+	uint16_t scan_gen;
+	uint64_t next_scan_at;
+	uint64_t next_rescan_at;
+
+	HuntPhase phase;
+	bool     series;                     // an attack series is going: same monster until it dies or the energy is short
+	int      target;                     // index in monsters[] of the monster of the series
+	uint16_t target_zone;
+	uint8_t  target_point;
+	uint32_t energy_before;              // the energy just before the attack in flight
+	bool     killed;                     // the report of the attack in flight says the monster died
+	uint64_t next_action_at;
+	uint64_t phase_since;
+	uint32_t kills;
+	uint32_t attacks;
+	uint64_t refused_until;              // now_ms(): no attack at all (refusals in a row: a locked level, most likely)
+	uint8_t  refusals;                   // consecutive refusals
+	uint64_t no_monster_log_at;
+	bool     no_team_logged;
+} HuntSettings;
+
 typedef struct {
 	bool loaded;
 	TroopData troop;
@@ -1261,7 +1351,8 @@ typedef enum {
     MIGRATION_IDLE,
     MIGRATION_WAIT_SERVER,
     MIGRATION_WAIT_RESULT,
-    MIGRATION_WAIT_SCROLL_RESULT
+    MIGRATION_WAIT_SCROLL_RESULT,
+    MIGRATION_BUYING            // buying the missing scrolls in the guild shop, one by one
 } MigrationState;
 
 typedef struct {
@@ -1272,6 +1363,8 @@ typedef struct {
     uint16_t zone_id;
     uint8_t  point_id;
     time_t   deadline;
+    uint64_t buy_at;       // now_ms(): the next purchase, a moment after the last answer
+    bool     buy_in_flight;
 } Migration;
 
 /* One resource of a $adminrss/$rss batch: up to TRANSFER_BATCH_MAX resources sent one after another
@@ -1397,6 +1490,7 @@ typedef struct {
 	bool game_logged_in;
 	// number of migration scrolls the game asks for this account (migration.scrolls_needed)
 	uint16_t migration_scrolls_needed;
+	bool     migration_buy_scrolls;   // migration.buy_scrolls: buy the missing scrolls in the guild shop (one at a time) before a migration
 	// cargo ship: wait until bag items used for a trade are credited
 	time_t market_bag_wait;
 	// game server 
@@ -1467,6 +1561,8 @@ typedef struct {
 	ResearchAutoSettings research_auto;
 	BuildAutoSettings build_auto;
 	AskHelpState askhelp;
+	HuntSettings hunt;
+	LordState lord;
 	TrainingSlot training[4]; // indexed by TroopKind - see TrainingSlot's comment
 
 	WoundedTroopData wounded;

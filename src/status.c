@@ -164,6 +164,19 @@ void StatusWrite(Connection *c, bool connected)
 		fputs("}},", f);
 	}
 
+	// The lord: dead accounts get _MSG_RESP_LORD_BEINGEXECUTED at the login (RecvLordBeingExecuted).
+	fprintf(f, "\"lord\":{\"where\":\"%s\",\"dead\":%s,\"since\":%llu,\"wait\":%u,\"fruits\":%u,\"guild_coins\":%u},",
+		c->lord.where == LORD_DEAD ? "dead" : c->lord.where == LORD_CAPTIVE ? "captive" : "home", c->lord.dead ? "true" : "false",
+		(unsigned long long)c->lord.since, c->lord.wait, (unsigned)c->items[LORD_REVIVE_FRUIT_ITEM].quantity, (unsigned)c->RoleAlliance.Money);
+
+	// Map monster hunt: the energy the bot counts, what it knows, what it is doing.
+	{
+		const HuntSettings *h = &c->hunt;
+		fprintf(f, "\"monster\":{\"enabled\":%s,\"level\":%u,\"energy_max\":%u,\"energy\":%u,\"energy_known\":%s,\"cost\":%u,\"heroes\":%u,\"monsters\":%u,\"series\":%s,\"attacks\":%u,\"kills\":%u},",
+			h->enabled ? "true" : "false", h->level, h->energy_max, HuntEnergyNow(c), h->energy_known ? "true" : "false",
+			h->level <= HUNT_MAX_LEVEL ? h->cost[h->level] : 0, h->hero_count, h->monster_count, h->series ? "true" : "false", h->attacks, h->kills);
+	}
+
 	// Construction: every building (where it stands, which, its level - the ones sent at login), what is being
 	// built, and what the automatic construction would do next.
 	{

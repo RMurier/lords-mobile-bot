@@ -585,6 +585,34 @@ than mixing in 25% items for the tail end.
 
 ---
 
+## Automatic Monster Hunt
+
+Hunts the map monsters by itself (protocol and what is known: [monster-hunt.md](monster-hunt.md)).
+
+```cfg
+monster.enabled = false
+monster.level = 3
+monster.energy_max = 64540
+monster.chat_report = true
+```
+
+- `monster.level` (1-9, the map has 1 to 5): the level of the monsters to hunt. Some levels need the "Monster Hunt" researches; when the server refuses
+  3 attacks in a row the bot pauses 30 minutes and says why in the log.
+- `monster.energy_max`: **your energy bar's maximum**, as the game shows it (it depends on the hunting gear and the researches: the server does not send it,
+  the client computes it). 0 (the default) = the bot does not hunt. The bot knows the current energy from the login (stored value + the recovery since,
+  1 point per 1.2 s) and from each attack's answer.
+- The bot starts a series when the energy reaches that maximum: it attacks the **nearest** monster of that level (the map is scanned like the gather tiles, a
+  scan only when a hunt is near), one attack at a time, until it dies. Five heroes are sent: the ones that fight with the damage the monster is weak to first
+  (a "High PDEF" monster like the Gorzilla gets the mages, a "High MDEF" one the physical heroes, a balanced one the highest levels), then by level, star and
+  rank; the team is completed with the best of the others. An account with fewer than five heroes does not hunt.
+- The cost of an attack is learned from the answers (a level 3 attack costs 4240 on the account of the captures) and depends on the account's gear and researches.
+  When the energy no longer covers an attack and the monster is still alive, the bot writes its name, level and coordinates in the guild chat
+  (`Gorzilla niveau 3 K:13 X:281 Y:471`, the game makes the coordinates clickable) - `monster.chat_report = false` only logs it - and leaves it alone for
+  30 minutes. **The bag's energy items are never used.**
+- The event monsters (Astra...) are not hunted. The hunt has its own march in the game: it does not take one of the gather marches.
+
+---
+
 ## Automatic Research
 
 Researches the categories you pick, by itself. Whenever no research is running, the bot starts the next one it can, in the first
@@ -660,3 +688,13 @@ The following features are planned or under development:
 - More resource management options
 - Additional bot modules
 - More runtime configuration controls
+
+---
+
+## Dead lord
+
+An account whose lord (the leader) is dead gets `_MSG_RESP_LORD_BEINGEXECUTED` (4408) at its login - three healthy accounts' captures do not have it. 13 bytes:
+`time u64 | wait u32 | flag u8`, from a capture `2026-09-12 23:05:59 | 604800 s (7 days) | 1`: the lord was captured, the 7 day execution wait was over two weeks
+before the capture, so he is dead and waits for a resurrection. The bot logs it (`[SEIGNEUR] Le chef est mort : ...`), the console shows a "Chef mort" card in the
+status, and, with a Discord webhook, `notify.on_lord_dead = true` (the default) sends the alert once per run. The resurrection itself (`_MSG_REQUEST_LORD_REVIVE`,
+4410, answer 4411) is not implemented: its layout is not known, it needs a capture of the game's own resurrection.

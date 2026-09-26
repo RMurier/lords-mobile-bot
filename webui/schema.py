@@ -179,6 +179,9 @@ CATEGORIES = [
              "help": "PROVISOIRE. Le nombre de vélins dépend de la puissance du compte et du royaume : le jeu le demande au "
                      "serveur, mais le format de sa réponse n'est pas encore décodé. En attendant, indiquez ici le nombre affiché "
                      "par l'écran de migration ; le bot le compare au sac. Voir la commande migrate cost."},
+            _bool("migration.buy_scrolls", "Acheter les vélins de migration qui manquent",
+                  "Avant une migration, si le sac n'a pas assez de vélins, le bot les achète au magasin de guilde, un par un "
+                  "(810 000 pièces de guilde chacun), jusqu'à en avoir assez pour le nombre indiqué ci-dessus."),
             {"key": "command.output", "label": "Canal de réponse", "type": "select", "default": "MAIL",
              "options": CHANNELS, "help": "Où le bot répond. Le courrier est privé ; en chat, la réponse est adressée "
                                            "au joueur (@pseudo) sur une seule ligne."},
@@ -296,6 +299,7 @@ CATEGORIES = [
             _bool("notify.on_shield_expiring", "Bouclier bientôt expiré, plus aucun en stock", depends="protection.enabled"),
             _bool("notify.on_antiscout_expiring", "Anti-espionnage bientôt expiré, plus aucun en stock", depends="protection.enabled"),
             _bool("notify.on_transfer_done", "Une livraison de ressources ($bank) est terminée"),
+            _bool("notify.on_lord_dead", "Le chef du compte est mort (il attend d'être ressuscité)", default=True),
         ],
     },
     {
@@ -336,6 +340,28 @@ CATEGORIES = [
             {"key": f"autotrain.{kind}_t{tier}", "label": f"T{tier}", "type": "size",
              "default": "0", "depends": "autotrain.enabled", "group": label}
             for kind, label in TROOP_KINDS_FR for tier in range(1, 6)
+        ],
+    },
+    {
+        "id": "monster",
+        "label": "Chasse au monstre",
+        "description": "Chasse automatique des monstres de la carte. Quand l'énergie de chasse atteint son maximum, le bot attaque le "
+                      "monstre le plus proche du niveau choisi, une attaque à la fois, avec cinq héros (d'abord ceux qui frappent avec "
+                      "le dégât auquel le monstre est faible, puis par niveau), jusqu'à sa mort. Si l'énergie ne suffit plus pour "
+                      "finir le monstre, il écrit son nom, son niveau et ses coordonnées dans le chat de guilde. Il n'utilise jamais "
+                      "les objets d'énergie du sac. La chasse a sa propre marche réservée dans le jeu.",
+        "fields": [
+            _bool("monster.enabled", "Activer la chasse au monstre automatique"),
+            {"key": "monster.level", "label": "Niveau du monstre", "type": "int", "min": 1, "max": 9, "default": "1",
+             "depends": "monster.enabled",
+             "help": "Le niveau des monstres à chasser (1 à 5 sur la carte). Certains niveaux demandent les recherches "
+                     "« Chasse au monstre » : si le serveur refuse, le bot fait une pause."},
+            {"key": "monster.energy_max", "label": "Énergie maximum", "type": "int", "min": 0, "max": 100000000,
+             "default": "0", "depends": "monster.enabled",
+             "help": "Le maximum de votre barre d'énergie de chasse (visible en jeu, il dépend de l'équipement de chasse et des "
+                     "recherches). Le serveur ne l'envoie pas : le bot chasse quand l'énergie l'atteint. 0 = ne chasse pas."},
+            _bool("monster.chat_report", "Envoyer le monstre dans le chat de guilde quand l'énergie manque", default=True,
+                  depends="monster.enabled"),
         ],
     },
     {

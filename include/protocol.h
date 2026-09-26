@@ -96,6 +96,17 @@ void RecvAllianceGiftOpen(Connection *c, const uint8_t *data);
 void RecvDeleteAllianceGiftBox(Connection*, const uint8_t*);
 
 void RecvBuyItem(Connection *c, const uint8_t *data, uint16_t size);
+
+/* The guild shop, from a capture (two purchases): _MSG_REQUEST_BUYITEM `seq u32 | type u8 (2 = the guild shop) | key u16 | item u16 | quantity u16`,
+ * answer `status u8 | type u8 | key u16 | item u16 | quantity u16 | u32` (fruit: 00 02 0c00 5d04 0100 94 28 a1 01; scroll: 00 02 d400 fb04 0a00 84 cc 94 01). The keys and prices are
+ * the game's Store.bin rows: 12 = Revival Fruit (item 1117) for 60000 guild coins, 212 = Migration Scroll (item 1275) for 810000. The quantity of the answer
+ * is what the bag holds after (the scroll one said 10 after one purchase) and the last u32 the guild coins left: 27338900 and 26528900 in the capture, exactly
+ * the owner's 27398900 minus 60000, then minus 810000. */
+#define SHOP_TYPE_GUILD         2
+#define GUILD_SHOP_FRUIT_KEY    12
+#define GUILD_SHOP_FRUIT_PRICE  60000
+#define GUILD_SHOP_SCROLL_KEY   212
+#define GUILD_SHOP_SCROLL_PRICE 810000
 void RecvArmyGroupInfo(Connection *c, const uint8_t *data, uint16_t size);
 void RecvTroopTrainingImmediate(Connection *c, const uint8_t *data, uint16_t size);
 void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size);
@@ -103,6 +114,20 @@ void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size);
 void RecvTrainingInfo(Connection *c, const uint8_t *data, uint16_t size);
 uint32_t BarracksCapacityFloor(const Connection *c);
 void AutoTrainBagAnswer(Connection *c, bool ok, uint16_t item_id);
+
+void RecvLordBeingExecuted(Connection *c, const uint8_t *data, uint16_t size);
+void RecvLordWhere(Connection *c, uint16_t type, const uint8_t *data, uint16_t size);
+
+/* Map monster hunt (HuntSettings, connection.h) */
+void HuntTick(Connection *c);
+void HuntReadLogin(Connection *c, const uint8_t *data, uint16_t size);
+uint32_t HuntEnergyNow(const Connection *c);
+void RecvHeroSave(Connection *c, const uint8_t *data, uint16_t size);
+bool HuntPickHeroes(const Connection *c, uint8_t weak_to, uint16_t out[HUNT_TEAM_SIZE]);
+void RequestSendMonster(Connection *c, uint16_t zone_id, uint8_t point_id, const uint16_t heroes[HUNT_TEAM_SIZE], uint8_t level, uint16_t key);
+void RecvSendMonster(Connection *c, const uint8_t *data, uint16_t size);
+void RecvMonsterReport(Connection *c, const uint8_t *data, uint16_t size);
+void RecvMonsterHome(Connection *c, const uint8_t *data, uint16_t size);
 uint32_t TroopsAffordable(const Connection *c, uint8_t kind, uint8_t tier, bool with_bag, int *short_resource);
 void AutoTrainTick(Connection *c);
 void RecvWoundedTroopData(Connection *c, const uint8_t *data);

@@ -40,6 +40,24 @@ def split_packets(stream):
     return out
 
 
+GAME_PORT = 10013
+
+
+def find_start(stream, names, need=6, limit=20000):
+    """Offset where a chain of `need` packets in a row (u16 size, u16 known type) begins, in a stream taken in the middle of a connection."""
+    for start in range(min(limit, max(0, len(stream) - 4))):
+        pos, count = start, 0
+        while count < need and pos + 4 <= len(stream):
+            size, kind = struct.unpack("<HH", stream[pos:pos + 4])
+            if size < 4 or pos + size > len(stream) or kind not in names:
+                break
+            pos += size
+            count += 1
+        if count >= need:
+            return start
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("capture")
@@ -68,15 +86,25 @@ def main():
         stream = ec.reassemble(segments)
         if any(kind == ec.LOGIN_GAME for kind, _ in ec.parse_login(stream)):
             game = flow
-    if game is None:
-        sys.exit("no game server login (message 1044) in this capture: was it started before the game?")
-
     names = packet_names()
-    only = {int(x) for x in args.only.split(",")} if args.only else None
+    resync = game is None
+    if resync:
+        # The capture began after the game had logged in: no login packet to point at the flow. Take the flow to the game server port (10013) that
+        # carried the most data, and find where the packets start in the middle of each stream.
+        best = max((f for f in flows if f[3] == GAME_PORT), key=lambda f: sum(len(p) for _, p in flows[f]), default=None)
+        if best is None:
+            sys.exit("no game server login (message 1044) and no flow to the game port %d in this capture: was it started before the game?" % GAME_PORT)
+        game = best
+        print("note: no login in this capture (it started after the game): the packets are found by their chain of sizes and known message numbers", file=sys.stderr)
+
+    def packets_of(stream):
+        return split_packets(stream[find_start(stream, names):]) if resync else split_packets(stream)
+
     reverse = (game[2], game[3], game[0], game[1])
+    only = {int(x) for x in args.only.split(",")} if args.only else None
     for label, flow, encrypted in (("CLIENT -> SERVER", game, True), ("SERVER -> CLIENT", reverse, False)):
         print(f"== {label} ({ec.ip_to_str(flow[0])}:{flow[1]} -> {ec.ip_to_str(flow[2])}:{flow[3]})")
-        for kind, payload in split_packets(ec.reassemble(flows.get(flow, []))):
+        for kind, payload in packets_of(ec.reassemble(flows.get(flow, []))):
             if only and kind not in only:
                 continue
             body = decrypt(payload) if encrypted and kind != ec.LOGIN_GAME else payload

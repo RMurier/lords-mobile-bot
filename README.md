@@ -207,6 +207,7 @@ webui.bat       Start the web console (Windows)
 - [Research (technologies): protocol and what is known](docs/research.md)
 - [Lord's equipment sets and talents: what the protocol does (from a capture)](docs/equipment-and-talents.md)
 - [Buildings: levels (Mana upgrade), ids, Trading Post capacity and tax](docs/buildings.md)
+- [Monster hunt: protocol, energy, weaknesses (from captures)](docs/monster-hunt.md) and [the heroes: title <-> id](docs/heroes.md)
 - [Analyzing the game client (APK): methodology, tooling gotchas, and findings](docs/apk-analysis.md)
 
 ## License

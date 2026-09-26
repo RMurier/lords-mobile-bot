@@ -2,6 +2,7 @@
 #define _ITEMS_H_
 
 #define RANDOM_RELOCATOR 1003
+#define LORD_REVIVE_FRUIT_ITEM 1117   /* "Revives a Leader" in the game's Item table: the resurrection fruit */
 #define ADVANCE_RELOCATOR 1004
 
 #define MIGRATION_SCROLL 1275

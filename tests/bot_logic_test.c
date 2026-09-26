@@ -739,6 +739,14 @@ int main(void)
 		CHECK(c->migration.state == MIGRATION_IDLE && replied("Migration par vélin refusée par le serveur (code 5)"),
 			"a scroll refused by the server is reported, not mistaken for a relocation failure");
 
+		/* code 27 of a scroll: impossible during the RvR (KvK), as the game says (told by the account's owner) */
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		reset_sent();
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+		reset_sent();
+		{ uint8_t kvk[3] = { 27, 0xfb, 0x04 }; RecvUseItem(c, kvk, sizeof(kvk)); }
+		CHECK(c->migration.state == MIGRATION_IDLE && replied("code 27) : impossible pendant le RvR (KvK)"), "a scroll refused with code 27 says it is impossible during the RvR (KvK)");
+
 		/* no scroll left: the free offer is tried, and its refusal is reported as such */
 		c->items[MIGRATION_SCROLL].quantity = 0;
 		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
@@ -3551,6 +3559,273 @@ static const uint8_t first_2[] = {
 		reset_sent();
 		AutoTrainTick(c);
 		CHECK(find_packet(_MSG_REQUEST_SMARTUSE_FOR_TRAINING) < 0 && useitem_count == 1, "smart use refused: the bag is used item by item instead");
+		free(c);
+	}
+
+	/* ---- the guild shop: two purchases of the capture (the fruit, then a migration scroll) ---- */
+	{
+		c = fresh("boss");
+		reset_sent();
+		RequestBuyItem(c, SHOP_TYPE_GUILD, GUILD_SHOP_FRUIT_KEY, LORD_REVIVE_FRUIT_ITEM, 1);
+		int k = find_packet(_MSG_REQUEST_BUYITEM);
+		const uint8_t fruitReq[7] = { 0x02, 0x0c, 0x00, 0x5d, 0x04, 0x01, 0x00 };
+		CHECK(k >= 0 && sent_size[k] == 15 && memcmp(&sent[k][8], fruitReq, sizeof(fruitReq)) == 0,
+			"shop: the fruit request is the captured one (type 2, key 12, item 1117, quantity 1)");
+		reset_sent();
+		RequestBuyItem(c, SHOP_TYPE_GUILD, GUILD_SHOP_SCROLL_KEY, MIGRATION_SCROLL, 1);
+		k = find_packet(_MSG_REQUEST_BUYITEM);
+		const uint8_t scrollReq[7] = { 0x02, 0xd4, 0x00, 0xfb, 0x04, 0x01, 0x00 };
+		CHECK(k >= 0 && memcmp(&sent[k][8], scrollReq, sizeof(scrollReq)) == 0, "shop: the scroll request is the captured one (key 212, item 1275)");
+		const uint8_t fruitAns[12] = { 0x00, 0x02, 0x0c, 0x00, 0x5d, 0x04, 0x01, 0x00, 0x94, 0x28, 0xa1, 0x01 };
+		RecvBuyItem(c, fruitAns, sizeof(fruitAns));
+		CHECK(c->items[LORD_REVIVE_FRUIT_ITEM].quantity == 1 && c->RoleAlliance.Money == 27338900, "shop: the fruit answer gives the bag's quantity and the guild coins left");
+		const uint8_t scrollAns[12] = { 0x00, 0x02, 0xd4, 0x00, 0xfb, 0x04, 0x0a, 0x00, 0x84, 0xcc, 0x94, 0x01 };
+		RecvBuyItem(c, scrollAns, sizeof(scrollAns));
+		CHECK(c->items[MIGRATION_SCROLL].quantity == 10 && c->RoleAlliance.Money == 26528900, "shop: the scroll answer: 10 in the bag, 26528900 coins left");
+		free(c);
+
+		// a migration that buys the scrolls it lacks, one at a time
+		c = fresh("boss");
+		c->items_loaded = true; c->migration_buy_scrolls = true; c->migration_scrolls_needed = 2;
+		c->RoleAlliance.Money = 3000000; c->player.current_kingdom_id = 12;
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		reset_sent();
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+		CHECK(c->migration.state == MIGRATION_BUYING && replied("Achat de 2 vélin(s) de migration"), "shop: scrolls missing and coins enough: the migration buys them first");
+		c->migration.buy_at = 0;
+		reset_sent();
+		MigrationTick(c);
+		k = find_packet(_MSG_REQUEST_BUYITEM);
+		CHECK(k >= 0 && sent[k][9] == 0xd4 && sent[k][13] == 1 && c->migration.buy_in_flight, "shop: one scroll is bought (quantity 1)");
+		reset_sent();
+		MigrationTick(c);
+		CHECK(sent_count == 0, "shop: nothing else is sent until the answer");
+		{ uint8_t a1[12] = { 0x00, 0x02, 0xd4, 0x00, 0xfb, 0x04, 0x01, 0x00, 0x00, 0x00, 0x2d, 0x00 }; RecvBuyItem(c, a1, sizeof(a1)); }
+		c->migration.buy_at = 0;
+		reset_sent();
+		MigrationTick(c);
+		CHECK(find_packet(_MSG_REQUEST_BUYITEM) >= 0, "shop: the second scroll is bought after the first one's answer");
+		{ uint8_t a2[12] = { 0x00, 0x02, 0xd4, 0x00, 0xfb, 0x04, 0x02, 0x00, 0x00, 0x00, 0x2c, 0x00 }; RecvBuyItem(c, a2, sizeof(a2)); }
+		c->migration.buy_at = 0;
+		reset_sent();
+		MigrationTick(c);
+		CHECK(find_packet(_MSG_REQUEST_USEITEM) >= 0 && c->migration.state == MIGRATION_WAIT_SCROLL_RESULT && find_packet(_MSG_REQUEST_BUYITEM) < 0,
+			"shop: with enough scrolls the migration goes on with one");
+		free(c);
+
+		// not enough coins: the free offer is tried, and it says why
+		c = fresh("boss");
+		c->items_loaded = true; c->migration_buy_scrolls = true; c->migration_scrolls_needed = 2;
+		c->RoleAlliance.Money = 900000; c->player.current_kingdom_id = 12;
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		reset_sent();
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+		CHECK(replied("Pas assez de pièces de guilde pour acheter les 2 vélin(s) qui manquent") && c->migration.state == MIGRATION_WAIT_RESULT && find_packet(_MSG_REQUEST_BUYITEM) < 0,
+			"shop: not enough guild coins: nothing is bought, the free offer is tried");
+		free(c);
+
+		// off by default: no purchase
+		c = fresh("boss");
+		c->items_loaded = true; c->migration_scrolls_needed = 2; c->RoleAlliance.Money = 3000000; c->player.current_kingdom_id = 12;
+		say(c, "boss", "$migrate 796 301 491", COMMAND_CHANNEL_MAIL);
+		reset_sent();
+		{ uint8_t toc[21] = { 0, 0x2c, 0x2a, 0, 0, '1', 0 }; RecvKingdomServer(c, toc, sizeof(toc)); }
+		CHECK(c->migration.state == MIGRATION_WAIT_RESULT && find_packet(_MSG_REQUEST_BUYITEM) < 0, "shop: without migration.buy_scrolls nothing is bought");
+		free(c);
+	}
+
+	/* ---- the lord is dead: _MSG_RESP_LORD_BEINGEXECUTED from the capture ---- */
+	{
+		c = fresh("boss");
+		c->server_time = 1790445866;
+		snprintf(c->player.name, sizeof(c->player.name), "Zyco");
+		const uint8_t executed[13] = { 0xd7, 0xda, 0xa5, 0x6a, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3a, 0x09, 0x00, 0x01 };
+		CHECK(!c->lord.dead, "lord: alive until the login says otherwise");
+		RecvLordBeingExecuted(c, executed, sizeof(executed));
+		CHECK(c->lord.dead && c->lord.since == 1789254359ULL && c->lord.wait == 604800 && c->lord.flag == 1,
+			"lord: the packet of the capture: since 2026-09-12 23:05:59, an execution wait of 604800 s (7 days), flag 1");
+		RecvLordBeingExecuted(c, executed, 5);
+		CHECK(c->lord.dead, "lord: a short packet changes nothing");
+		CHECK(c->lord.where == LORD_DEAD, "lord: 4408 = dead");
+		RecvLordWhere(c, _MSG_RESP_LORD_HOME, NULL, 0);
+		CHECK(c->lord.where == LORD_HOME && !c->lord.dead, "lord: 4409 = back in the castle");
+		const uint8_t cage[4] = { 1, 2, 3, 4 };
+		RecvLordWhere(c, _MSG_RESP_LORD_BEINGCAPTIVE, cage, sizeof(cage));
+		CHECK(c->lord.where == LORD_CAPTIVE && !c->lord.dead, "lord: 4401 = in a prison");
+		RecvLordWhere(c, _MSG_RESP_LORD_BEINGRELEASED, NULL, 0);
+		CHECK(c->lord.where == LORD_HOME, "lord: 4407 = released");
+		free(c);
+	}
+
+	/* ---- map monster hunt: from the two captures ---- */
+	{
+		c = fresh("boss");
+		c->hunt.enabled = true; c->hunt.level = 3; c->hunt.chat_report = true;
+		c->player.zone_id = 0x1d8; c->player.point_id = 0x5b; c->player.current_kingdom_id = 13;
+		c->server_time = 1790438221;
+
+		// the login: 872 stored 1009 s before, 1201 ms per point (the second capture) = 1712, and the owner read 1744 a few seconds later
+		uint8_t login[705] = { 0 };
+		uint32_t stored = 872; uint64_t when = c->server_time - 1009; uint16_t freq = 1201;
+		memcpy(login + 366, &stored, 4); memcpy(login + 370, &when, 8); memcpy(login + 378, &freq, 2);
+		HuntReadLogin(c, login, sizeof(login));
+		CHECK(c->hunt.energy_known && HuntEnergyNow(c) == 1712, "hunt: the login's stored energy and time give 872 + 1009 s / 1.201 = 1712");
+		c->hunt.energy_max = 1000;
+		CHECK(HuntEnergyNow(c) == 1000, "hunt: the energy never counts above the maximum the owner gave");
+
+		// the heroes: five mages (4, 5, 6, 16, 19) and two physical ones (1, 2)
+		uint8_t save[10 + 7 * 20] = { 0 };
+		const uint16_t ids[7] = { 1, 2, 4, 5, 6, 16, 19 };
+		const uint8_t levels[7] = { 60, 60, 60, 59, 58, 57, 56 };
+		save[8] = 7;
+		for (int i = 0; i < 7; i++) { uint8_t *r = save + 10 + i * 20; memcpy(r, &ids[i], 2); r[2] = levels[i]; r[7] = 8; r[8] = 5; }
+		RecvHeroSave(c, save, sizeof(save));
+		CHECK(c->hunt.hero_count == 7, "hunt: HEROSAVE lists the heroes the account has");
+		uint16_t team[HUNT_TEAM_SIZE];
+		CHECK(HuntPickHeroes(c, 1, team) && team[0] == 4 && team[1] == 5 && team[2] == 6 && team[3] == 16 && team[4] == 19,
+			"hunt: a monster weak to magic (Gorzilla) gets the five mages, best level first");
+		CHECK(HuntPickHeroes(c, 2, team) && team[0] == 1 && team[1] == 2 && team[2] == 4 && team[3] == 5 && team[4] == 6,
+			"hunt: a monster weak to physical gets the physical heroes first, the team completed with the best of the others");
+		CHECK(HuntPickHeroes(c, 0, team) && team[0] == 1 && team[2] == 4, "hunt: no weakness: the highest levels");
+
+		// the map: the two Gorzilla records of the first capture (level 1 at zone 0x1c8 point 0xce, level 3 at zone 0x1d8 point 0x0d), in a bulk snapshot
+		uint8_t map[3 + 20 + 15 + 30 + 15 + 20] = { 0 };
+		const uint8_t gorz1[15] = { 0xc8, 0x01, 0xce, 0x0a, 0x01, 0x27, 0x00, 0x0e, 0xa9, 0x10, 0x00, 0x00, 0x00, 0xc8, 0x42 };
+		const uint8_t gorz3[15] = { 0xd8, 0x01, 0x0d, 0x0a, 0x03, 0x27, 0x00, 0xf8, 0xaa, 0x10, 0x00, 0x00, 0x00, 0xc8, 0x42 };
+		memcpy(map + 3 + 20, gorz1, 15);
+		memcpy(map + 3 + 20 + 15 + 30, gorz3, 15);
+		RecvMapInfoPlus(c, map, sizeof(map));
+		CHECK(c->hunt.monster_count == 2 && c->hunt.monsters[0].key == 0x27 && c->hunt.monsters[0].level == 1 && c->hunt.monsters[1].level == 3
+			&& c->hunt.monsters[1].serial == 0x10aaf8 && c->hunt.monsters[1].zone_id == 0x1d8 && c->hunt.monsters[1].point_id == 0x0d,
+			"hunt: monster records of a bulk snapshot are found by their kind byte, level, key and serial");
+
+		// an Astra monster (key 241, level 4, seen in the captures) is an event one: not hunted
+		const uint8_t astra[15] = { 0xc9, 0x01, 0xd0, 0x0a, 0x04, 0xf1, 0x00, 0x01, 0x02, 0x03, 0x04, 0x00, 0x00, 0xc8, 0x42 };
+		uint8_t astraMap[3 + 15 + 20] = { 0 };
+		memcpy(astraMap + 3, astra, 15);
+		RecvMapInfoPlus(c, astraMap, sizeof(astraMap));
+		CHECK(c->hunt.monster_count == 2, "hunt: an Astra (event) monster is not taken for a map monster");
+
+		// the attack request is the captured one
+		reset_sent();
+		const uint16_t captured[HUNT_TEAM_SIZE] = { 16, 19, 6, 4, 5 };
+		RequestSendMonster(c, 0x1d8, 0x0d, captured, 3, 0x27);
+		int k = find_packet(_MSG_REQUEST_SENDMONSTER);
+		const uint8_t expected[17] = { 0xd8, 0x01, 0x0d, 0x01, 0x10, 0x00, 0x13, 0x00, 0x06, 0x00, 0x04, 0x00, 0x05, 0x00, 0x03, 0x27, 0x00 };
+		CHECK(k >= 0 && memcmp(&sent[k][8], expected, sizeof(expected)) == 0 && sent_size[k] == 25,
+			"hunt: the attack request is the captured one (zone, point, 01, five heroes, level, key)");
+
+		// a series: the energy is at the maximum (4804) -> attack the nearest level 3 monster
+		c->hunt.energy_max = 4804;
+		c->hunt.energy_stored = 4804; c->hunt.energy_time = c->server_time;
+		c->hunt.scan_done = true; c->hunt.next_rescan_at = now_ms() + 3600000;
+		reset_sent();
+		HuntTick(c);
+		k = find_packet(_MSG_REQUEST_SENDMONSTER);
+		const uint8_t attack[17] = { 0xd8, 0x01, 0x0d, 0x01, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x10, 0x00, 0x13, 0x00, 0x03, 0x27, 0x00 };
+		CHECK(k >= 0 && memcmp(&sent[k][8], attack, sizeof(attack)) == 0 && c->hunt.phase == HUNT_WAIT_ANSWER && c->hunt.series,
+			"hunt: at the maximum energy the nearest monster of the level is attacked with the mages");
+		reset_sent();
+		c->hunt.next_action_at = 0;
+		HuntTick(c);
+		CHECK(sent_count == 0, "hunt: nothing else is sent while the answer is awaited");
+
+		// the answer of the capture: 564 left -> the cost of a level 3 attack is 4240
+		const uint8_t answer[31] = { 0x00, 0x08, 0xd8, 0x01, 0x0d, 0xbd, 0xeb, 0xb7, 0x6a, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x34, 0x02, 0x00, 0x00,
+			0x10, 0x00, 0x13, 0x00, 0x06, 0x00, 0x04, 0x00, 0x05, 0x00 };
+		RecvSendMonster(c, answer, sizeof(answer));
+		CHECK(c->hunt.energy_stored == 564 && c->hunt.cost[3] == 4240 && c->hunt.phase == HUNT_WAIT_HOME,
+			"hunt: the answer gives the energy left (564) and the cost of a level 3 attack (4240)");
+
+		// the report (not dead: killed byte 0, health 5904091 -> 4083727) and the heroes back
+		uint8_t report[40] = { 0xfb, 0x37, 0x01, 0x00, 0x00, 0xc0, 0xeb, 0xb7, 0x6a, 0, 0, 0, 0, 0x0d, 0x00, 0xd8, 0x01, 0x0d, 0x00, 0x6c, 0x0c, 0x27, 0x00, 0x03,
+			0xdb, 0x16, 0x5a, 0x00, 0x0f, 0x50, 0x3e, 0x00 };
+		RecvMonsterReport(c, report, sizeof(report));
+		CHECK(!c->hunt.killed, "hunt: a report with the killed byte at 0 and health left is not a kill");
+		const uint8_t home[1] = { 8 };
+		RecvMonsterHome(c, home, sizeof(home));
+		CHECK(c->hunt.phase == HUNT_IDLE && c->hunt.series && c->hunt.monster_count == 2, "hunt: the heroes are back, the series goes on");
+
+		// 564 energy left, an attack costs 4240: the monster goes to the guild chat, once
+		c->hunt.next_action_at = 0;
+		reset_sent();
+		HuntTick(c);
+		const map_pos_t pos = getTileMapPosbyPointCode(0x1d8, 0x0d);
+		char expected_chat[96];
+		snprintf(expected_chat, sizeof(expected_chat), "Gorzilla niveau 3 K:13 X:%u Y:%u", pos.x, pos.y);
+		k = find_packet(_MSG_REQUEST_SENDCHAT);
+		CHECK(k >= 0 && sent[k][8] == 1 && replied(expected_chat) && find_packet(_MSG_REQUEST_SENDMONSTER) < 0 && !c->hunt.series,
+			"hunt: not enough energy for another attack: the monster's name, level and coordinates go to the guild chat");
+		c->hunt.energy_stored = 4804; c->hunt.energy_time = c->server_time; c->hunt.next_action_at = 0;
+		reset_sent();
+		HuntTick(c);
+		CHECK(find_packet(_MSG_REQUEST_SENDMONSTER) < 0 && c->hunt.monsters[1].reported_until > now_ms(),
+			"hunt: a monster reported to the chat is left alone (no attack on it again)");
+		free(c);
+
+		// the kill: the third report of the capture has the killed byte at 1 and the health at 0
+		c = fresh("boss");
+		c->hunt.enabled = true; c->hunt.level = 3; c->player.zone_id = 0x1d8; c->player.point_id = 0x5b; c->player.current_kingdom_id = 13;
+		c->server_time = 1790438221; c->hunt.energy_known = true; c->hunt.energy_freq_ms = 1201; c->hunt.energy_max = 4804;
+		c->hunt.energy_stored = 4804; c->hunt.energy_time = c->server_time; c->hunt.scan_done = true; c->hunt.next_rescan_at = now_ms() + 3600000;
+		RecvHeroSave(c, save, sizeof(save));
+		RecvMapInfoPlus(c, map, sizeof(map));
+		HuntTick(c);
+		RecvSendMonster(c, answer, sizeof(answer));
+		uint8_t lastReport[40] = { 0xfd, 0x37, 0x01, 0x00, 0x00, 0xe4, 0xeb, 0xb7, 0x6a, 0, 0, 0, 0, 0x0d, 0x00, 0xd8, 0x01, 0x0d, 0x01, 0x6c, 0x0c, 0x27, 0x00, 0x03,
+			0x3a, 0x08, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x00 };
+		RecvMonsterReport(c, lastReport, sizeof(lastReport));
+		CHECK(c->hunt.killed, "hunt: the report's killed byte says the monster is dead");
+		RecvMonsterHome(c, home, sizeof(home));
+		CHECK(c->hunt.kills == 1 && !c->hunt.series && c->hunt.monster_count == 1 && c->hunt.monsters[0].level == 1,
+			"hunt: a kill ends the series and takes the monster off the list");
+		free(c);
+
+		// a refusal that is not the energy: the monster is left alone and three in a row pause the hunt
+		c = fresh("boss");
+		c->hunt.enabled = true; c->hunt.level = 3; c->player.zone_id = 0x1d8; c->player.point_id = 0x5b; c->player.current_kingdom_id = 13;
+		c->server_time = 1790438221; c->hunt.energy_known = true; c->hunt.energy_freq_ms = 1201; c->hunt.energy_max = 4804;
+		c->hunt.energy_stored = 4804; c->hunt.energy_time = c->server_time; c->hunt.scan_done = true; c->hunt.next_rescan_at = now_ms() + 3600000;
+		RecvHeroSave(c, save, sizeof(save));
+		RecvMapInfoPlus(c, map, sizeof(map));
+		HuntTick(c);
+		const uint8_t refused[1] = { 5 };
+		RecvSendMonster(c, refused, sizeof(refused));
+		CHECK(!c->hunt.series && c->hunt.phase == HUNT_IDLE && c->hunt.monsters[1].refused_until > now_ms() && c->hunt.refusals == 1 && c->hunt.cost[3] == 0,
+			"hunt: a refusal (no cost known): the monster is left alone for a while, no chat message");
+		free(c);
+
+		// the map scan: the first one runs at once, the next ones only when a hunt is near
+		c = fresh("boss");
+		c->hunt.enabled = true; c->hunt.level = 3; c->player.zone_id = 0x1d8; c->player.point_id = 0x5b;
+		c->server_time = 1790438221; c->hunt.energy_known = true; c->hunt.energy_freq_ms = 1201; c->hunt.energy_max = 64540;
+		c->hunt.energy_stored = 100; c->hunt.energy_time = c->server_time;
+		reset_sent();
+		HuntTick(c);
+		CHECK(find_packet(_MSG_REQUEST_MAPDATA) >= 0, "hunt: the first scan of the map starts at once");
+		c->hunt.scan_done = true; c->hunt.next_rescan_at = 1; c->hunt.next_scan_at = 0;
+		reset_sent();
+		HuntTick(c);
+		CHECK(find_packet(_MSG_REQUEST_MAPDATA) < 0, "hunt: no new scan while the energy is far from its maximum");
+		c->hunt.energy_stored = 64540 - 100;
+		HuntTick(c);
+		CHECK(find_packet(_MSG_REQUEST_MAPDATA) >= 0, "hunt: a scan starts when the energy is within ten minutes of its maximum");
+		c->hunt.energy_max = 0;
+		c->hunt.scan_done = false; c->hunt.next_scan_at = 0;
+		reset_sent();
+		HuntTick(c);
+		CHECK(sent_count == 0, "hunt: without the energy maximum the bot does nothing");
+		free(c);
+
+		// fewer than five heroes: no hunt
+		c = fresh("boss");
+		c->hunt.enabled = true; c->hunt.level = 3; c->player.zone_id = 0x1d8; c->player.point_id = 0x5b;
+		c->server_time = 1790438221; c->hunt.energy_known = true; c->hunt.energy_freq_ms = 1201; c->hunt.energy_max = 4804;
+		c->hunt.energy_stored = 4804; c->hunt.energy_time = c->server_time; c->hunt.scan_done = true; c->hunt.next_rescan_at = now_ms() + 3600000;
+		RecvMapInfoPlus(c, map, sizeof(map));
+		reset_sent();
+		HuntTick(c);
+		CHECK(find_packet(_MSG_REQUEST_SENDMONSTER) < 0, "hunt: an account with fewer than five heroes does not hunt");
 		free(c);
 	}
 

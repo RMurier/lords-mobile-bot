@@ -412,6 +412,10 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 	
+	if (strcmp(key, "migration.buy_scrolls") == 0) {
+		c->migration_buy_scrolls = (strcmp(value, "true") == 0);
+		return true;
+	}
 	if (strcmp(key, "migration.scrolls_needed") == 0) {
 		uint32_t needed = (uint32_t)strtoul(value, NULL, 10);
 		
@@ -559,6 +563,10 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 		return true;
 	}
 
+	if (strcmp(key, "notify.on_lord_dead") == 0) {
+		c->notify.on_lord_dead = (strcmp(value, "true") == 0);
+		return true;
+	}
 	if (strcmp(key, "notify.on_transfer_done") == 0) {
 		c->notify.on_transfer_done = (strcmp(value, "true") == 0);
 		return true;
@@ -623,6 +631,19 @@ static bool ParserConfig(Connection *c, const char *key, const char *value) {
 	if (strcmp(key, "build.reserve_wood") == 0) { c->build_auto.reserve.wood = (uint32_t)parse_number_u64(value); return true; }
 	if (strcmp(key, "build.reserve_ore") == 0)  { c->build_auto.reserve.ore  = (uint32_t)parse_number_u64(value); return true; }
 	if (strcmp(key, "build.reserve_gold") == 0) { c->build_auto.reserve.gold = (uint32_t)parse_number_u64(value); return true; }
+
+	if (strcmp(key, "monster.enabled") == 0) {
+		c->hunt.enabled = (strcmp(value, "true") == 0);
+		return true;
+	}
+	if (strcmp(key, "monster.level") == 0) {
+		uint64_t level = parse_number_u64(value);
+		if (level < 1 || level > HUNT_MAX_LEVEL) { printf("Invalid monster.level: %s (1 to %d)\n", value, HUNT_MAX_LEVEL); return true; }
+		c->hunt.level = (uint8_t)level;
+		return true;
+	}
+	if (strcmp(key, "monster.energy_max") == 0) { c->hunt.energy_max = (uint32_t)parse_number_u64(value); return true; }
+	if (strcmp(key, "monster.chat_report") == 0) { c->hunt.chat_report = (strcmp(value, "true") == 0); return true; }
 
 	if (strcmp(key, "research.enabled") == 0) {
 		c->research_auto.enabled = (strcmp(value, "true") == 0);
@@ -908,6 +929,7 @@ bool LoadConfig(Connection *c, const char *filename)
 	c->migration_scrolls_needed = 1;
 	c->gather.max_marches = 1;
 	c->gather.radius      = 30;
+	c->hunt.chat_report   = true;
 	c->gather.kind_priority[0] = TROOP_INFANTRY;
 	c->gather.kind_priority[1] = TROOP_RANGED;
 	c->gather.kind_priority[2] = TROOP_CAVALRY;
