@@ -543,6 +543,12 @@ lowest tier not yet at its own target is always tried first (e.g. `T2` fills bef
 research for it is not done yet) backs off automatically instead of retrying every tick - a few times a minute at first, then once
 every 30 minutes if it still fails, without ever giving up on it for the session (the research could finish later).
 
+**Refusals:** the game trains one (kind, tier) at a time. After any refusal the bot leaves *every* kind alone for 2 minutes instead of
+trying the next one a second later (which would be refused for the same reason), and the next order asks for half the refused amount
+(first order: 5000, what a level-25 barracks holds before research bonuses), then grows again by 50% from what was granted. The
+login packet `_MSG_RESP_TRAININGINFO_` (2402) is not decoded yet - shown in debug mode only - so at login the bot cannot know whether
+something is already training; it finds out from the first refusal.
+
 Note: the game can silently grant far less than requested even when accepting the order (e.g. asking for 3.7M and receiving 29) -
 confirmed by the account's own owner that this per-order cap is the same for every kind and every tier at any given moment (only
 price and duration differ) and changes over time (29 at one point, 7226 at another, same account). Rather than ask for the raw

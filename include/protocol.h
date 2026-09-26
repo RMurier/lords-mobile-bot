@@ -100,6 +100,8 @@ void RecvArmyGroupInfo(Connection *c, const uint8_t *data, uint16_t size);
 void RecvTroopTrainingImmediate(Connection *c, const uint8_t *data, uint16_t size);
 void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size);
 void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size);
+void RecvTrainingInfo(Connection *c, const uint8_t *data, uint16_t size);
+uint32_t BarracksCapacityFloor(const Connection *c);
 void AutoTrainTick(Connection *c);
 void RecvWoundedTroopData(Connection *c, const uint8_t *data);
 void RecvValhallaInfo(Connection *c, const uint8_t *data, uint16_t size);

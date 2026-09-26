@@ -3275,6 +3275,50 @@ static const uint8_t first_2[] = {
 		free(c);
 	}
 
+	/* ---- autotrain: a refusal pauses every kind (one training at a time) and halves the next amount ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		c->autotrain.target[TROOP_INFANTRY][TIER_T1] = 5000000;
+		c->autotrain.target[TROOP_RANGED][TIER_T1]   = 5000000;
+		reset_sent();
+
+		AutoTrainTick(c);
+		int k = find_packet(_MSG_REQUEST_TRAINING_);
+		uint32_t first = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(first == AUTOTRAIN_INITIAL_BATCH_GUESS && first <= 5000, "autotrain: the first amount is no more than a level-25 barracks holds");
+
+		uint8_t bareRefusal[1] = { 1 };
+		RecvTrainingStart(c, bareRefusal, sizeof(bareRefusal));
+		CHECK(c->autotrain.next_action_at >= now_ms() + AUTOTRAIN_REFUSAL_PAUSE_MS - 1000,
+			"autotrain: a refusal pauses everything, not just that kind - the next kind is not tried a second later");
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(sent_count == 0, "autotrain: nothing is sent during that pause");
+
+		c->autotrain.next_action_at = 0; // pause over
+		c->autotrain.retry_at[TROOP_INFANTRY][TIER_T1] = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		k = find_packet(_MSG_REQUEST_TRAINING_);
+		uint32_t second = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(second > 0 && second <= first / 2 + 1, "autotrain: after a refusal the next order asks for half the amount");
+		free(c);
+	}
+
+	/* ---- autotrain: _MSG_RESP_TRAININGINFO_ is not acted on (its fields are not decoded) ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		uint8_t info[18] = { 0, 0, 0x5c, 0x44, 0, 0, 0xde, 0xc1, 0xb6, 0x6a, 0, 0, 0, 0, 0x2d, 0x2c, 0x01, 0 };
+		RecvTrainingInfo(c, info, sizeof(info));
+		CHECK(!c->autotrain.busy && c->autotrain.last_granted == 0 && !c->training[0].active,
+			"autotrain: the undecoded login packet changes no state");
+		free(c);
+	}
+
 	/* ---- autotrain: moves on to the next unmet tier (ascending) while the lowest one is backed off ---- */
 	{
 		c = fresh("boss");

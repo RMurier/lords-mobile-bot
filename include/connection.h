@@ -849,6 +849,11 @@ typedef struct {
 	uint32_t amount;
 } TrainingSlot;
 
+// After ANY refusal every other (kind, tier) is left alone for this long: the game trains one
+// (kind, tier) at a time, so when one order is refused because something is already training,
+// asking for the next kind a second later is refused for the same reason.
+#define AUTOTRAIN_REFUSAL_PAUSE_MS         (2 * 60 * 1000)
+
 #define AUTOTRAIN_REFUSAL_BACKOFF_MS       (60 * 1000)       // normal case: likely transient (resources, timing)
 #define AUTOTRAIN_HARD_BLOCK_THRESHOLD     5                 // this many refusals in a row -> stop assuming "transient"
 // e.g. the tier's research/building requirement is not met yet: retrying every minute would
@@ -860,7 +865,7 @@ typedef struct {
 // First-ever request for a (kind, tier) with no history yet: a real player has no way to know
 // the true affordable max either (see AutoTrainSettings' comment on last_granted), so this is a
 // deliberately unremarkable guess, not the (possibly 7-digit) full gap to the target.
-#define AUTOTRAIN_INITIAL_BATCH_GUESS      10000
+#define AUTOTRAIN_INITIAL_BATCH_GUESS      5000  // a level-25 barracks holds 5000 before research bonuses (docs/apk-analysis.md)
 // Once we know what was actually granted last time, grow toward the target by this factor per
 // attempt (50%) instead of jumping straight back to the full gap.
 #define AUTOTRAIN_BATCH_GROWTH_NUM         3
@@ -912,6 +917,7 @@ typedef struct {
 	uint8_t  pending_tier;                       // tier of that order, valid while busy
 	uint8_t  next_kind;                          // round-robin cursor - see this struct's comment
 
+	uint32_t pending_amount;                     // amount of the order in flight, valid while busy: a refusal halves the next attempt from it
 	uint32_t last_granted;                       // account-wide, shared by every (kind, tier) - see this struct's comment; 0 = no history yet
 	uint64_t retry_at[4][5];                     // [kind][tier] now_ms() backoff after a refusal
 	uint16_t consecutive_refusals[4][5];         // [kind][tier], resets on any accepted order for that pair

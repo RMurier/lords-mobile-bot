@@ -4798,6 +4798,7 @@ static void TroopAdd(Connection *c, uint8_t kind, uint8_t tier, uint32_t amount)
 	if (kind < 4) {
 		c->autotrain.busy = false; // account-wide: only one (kind, tier) can ever be training - see AutoTrainSettings' comment
 		c->training[kind].active = false;
+		if (c->autotrain.enabled) c->autotrain.next_action_at = GatherHumanDelay(); // a player takes a moment before the next order
 	}
 
 	// Only add on top of a real baseline: without one (c->troop never loaded from
@@ -4857,6 +4858,14 @@ void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size) {
  * affects that one tier of that one kind, never a different, perfectly usable one. */
 static void AutoTrainApplyRefusal(Connection *c, uint8_t kind, uint8_t tier, uint8_t status) {
 	c->autotrain.busy = false;
+	// Whatever the reason was (over the barracks' capacity, resources, something already training), asking
+	// again for the same amount would be refused again: next time ask for half of it.
+	uint32_t asked = c->autotrain.pending_amount;
+	if (asked >= 3 && (c->autotrain.last_granted == 0 || asked / 3 < c->autotrain.last_granted))
+		c->autotrain.last_granted = asked / 3; // the next request is last_granted + 50%, so half of `asked`
+	c->autotrain.pending_amount = 0;
+	// nothing else is tried for a while - see AUTOTRAIN_REFUSAL_PAUSE_MS
+	c->autotrain.next_action_at = now_ms() + AUTOTRAIN_REFUSAL_PAUSE_MS;
 
 	uint16_t refusals = ++c->autotrain.consecutive_refusals[kind][tier];
 	if (refusals >= AUTOTRAIN_HARD_BLOCK_THRESHOLD) {
@@ -4904,9 +4913,39 @@ void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size) {
 	AutoTrainApplyRefusal(c, kind, tier, status);
 }
 
+/* The fewest troops one training order can hold, from the account's barracks: the Barracks' "Training Capacity"
+ * of the wiki (gamedata/buildings.json), added up over every Barracks the account has ("multiple barracks will
+ * increase barracks capacity"). Research and other bonuses only raise it, so it is a floor, never a ceiling.
+ * 0 when the building list has not arrived. Levels above 25 (mana levels) add 10 each on the wiki; counted as 25 here. */
+uint32_t BarracksCapacityFloor(const Connection *c) {
+	static const uint16_t capacity[25] = {
+		20, 40, 80, 120, 160, 220, 280, 360, 440, 520, 620, 720, 820, 940, 1060, 1180, 1320, 1460, 1600, 1760, 1920,
+		2080, 2260, 2500, 5000 };
+	uint32_t total = 0;
+	for (uint8_t i = 0; i < c->building_count; i++) {
+		if (c->building[i].build_id != BUILDING_BARRACKS || c->building[i].level == 0) continue;
+		total += capacity[(c->building[i].level > 25 ? 25 : c->building[i].level) - 1];
+	}
+	return total;
+}
+
+/* _MSG_RESP_TRAININGINFO_ (2402), 18 bytes, sent at login:
+ *   00 00 5c 44 00 00 de c1 b6 6a 00 00 00 00 2d 2c 01 00
+ * NOT decoded. A first reading (kind, tier, amount 17500, start, duration 76845 s) was tried and the
+ * account's owner said no such training exists - the fields are something else. The u64 at offset 6
+ * is a server time (about 19 h before that session's clock). Only shown in debug mode, until a capture
+ * taken with a known training running settles what it holds. */
+void RecvTrainingInfo(Connection *c, const uint8_t *data, uint16_t size) {
+	(void)c;
+	if (size < 18) return;
+	LOGD("[AUTOTRAIN] TRAININGINFO (non decode) : u16=%u u32=%u time=%llu u32=%u\n", read_u16(data), read_u32(data + 2),
+		(unsigned long long)read_u64(data + 6), read_u32(data + 14));
+}
+
 void AutoTrainTick(Connection *c) {
 	if (!c->autotrain.enabled) return;
 	if (!c->troop.loaded) return; // no real baseline yet (see TroopAdd's comment) - wait for the login snapshot
+
 	if (c->autotrain.busy) return; // one order account-wide at a time - see AutoTrainSettings' comment
 
 	if (now_ms() < c->autotrain.next_action_at) return;
@@ -4932,12 +4971,13 @@ void AutoTrainTick(Connection *c) {
 			uint32_t last = c->autotrain.last_granted;
 			uint32_t want = last > 0
 				? (uint32_t)(((uint64_t)last * AUTOTRAIN_BATCH_GROWTH_NUM) / AUTOTRAIN_BATCH_GROWTH_DEN)
-				: AUTOTRAIN_INITIAL_BATCH_GUESS;
+				: (BarracksCapacityFloor(c) ? BarracksCapacityFloor(c) : AUTOTRAIN_INITIAL_BATCH_GUESS);
 			if (want > gap) want = gap; // never ask for more than actually still needed
 
 			c->autotrain.busy = true; // optimistic, mirrors gather's active_marches pattern
 			c->autotrain.pending_kind = kind;
 			c->autotrain.pending_tier = tier;
+			c->autotrain.pending_amount = want;
 			c->autotrain.next_kind = (uint8_t)((kind + 1) % 4);
 			c->autotrain.next_action_at = GatherHumanDelay(); // one new order per tick, same pacing as gather
 			RequestTroopTraining(c, kind, tier, want);
