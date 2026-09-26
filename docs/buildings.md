@@ -165,7 +165,12 @@ the cancel's answer is scrambled, so how much a cancel refunds is not known - th
 from the login (`Connection.construction`, kept up to date by 2004/2005): if the kept farm is in one, it sends the cancel for that entry (the queue number is the entry's index,
 as the capture shows) and goes on when the answer comes. It cancels nothing else - another building in the queue is never touched.
 
-**Not seen yet**: the refusal (`_MSG_RESP_BUILDINGERROR` 2013) - its layout is logged as it comes and the building is left alone for 10 minutes -
+**The refusal** (`_MSG_RESP_BUILDINGERROR`, 2013): first sample, a start of the kept farm sent by `$askhelp` while a previous series had left that farm under construction (the
+connection had dropped): the payload is **2 bytes, `03 01`**. The code has no name in the APK (the check is in native code) and what the two bytes mean is not known:
+hypotheses are "queue busy" (3) with the queue number (1) or a resource (1 = second in the list). The bot now writes, with every refusal, what it asked for, the two queue
+entries it holds and the five stocks against the level's base cost, to tell them apart.
+
+**Not seen yet**: the refusal's other codes (`_MSG_RESP_BUILDINGERROR` 2013) - its layout is logged as it comes and the building is left alone for 10 minutes -
 the cancel's answer, the instant/free finishes (2008, 2009, 2011), and starting a building that does not exist yet.
 
 ## The Trading Post: capacity and tax

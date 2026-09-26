@@ -6891,6 +6891,45 @@ void RecvBuildComplete(Connection *c, const uint8_t *data, uint16_t size)
 	LOGI("[BUILD] Terminée : #%u %s(emplacement %u) niveau %s\n", build_id, t ? t->name_en : "", slot, text);
 }
 
+/* What the bot knew when a start was refused, so the refusal can be understood: the request (building, level), the two queue
+ * entries as the bot sees them, and each of the five resources against the level's base cost. */
+static void BuildDescribeFailure(const Connection *c, uint16_t slot, char *out, size_t size)
+{
+	size_t n = 0;
+	int idx = -1;
+	for (int i = 0; i < c->building_count; i++)
+		if (c->building[i].position_id == slot)
+			idx = i;
+
+	const BuildingTypeInfo *t = idx >= 0 ? BuildingType(c->building[idx].build_id) : NULL;
+	const BuildingLevelInfo *row = t ? BuildingLevelRow(t, (uint8_t)(c->building[idx].level + 1)) : NULL;
+	n += (size_t)snprintf(out + n, size - n, "demande : emplacement %u", slot);
+	if (t)
+		n += (size_t)snprintf(out + n, size - n, " %s niveau %u -> %u", t->name_en, c->building[idx].level, c->building[idx].level + 1);
+
+	int64_t now = c->server_time ? (int64_t)c->server_time : (int64_t)time(NULL);
+	n += (size_t)snprintf(out + n, size - n, " ; files vues par le bot (2e file %s) :", !c->construction_loaded ? "inconnue"
+		: c->construction_extra_expires == INT64_MAX ? "permanente" : c->construction_extra_expires > now ? "louée" : "absente");
+	for (int i = 0; i < BUILDING_QUEUE_SLOTS; i++) {
+		const BuildingConstruction *q = &c->construction[i];
+		if (q->used)
+			n += (size_t)snprintf(out + n, size - n, " [%d] #%u emplacement %u vers %u (reste %llds)", i, q->build_id, q->slot, q->level,
+				(long long)BuildingConstructionSecondsLeft(q, now));
+		else
+			n += (size_t)snprintf(out + n, size - n, " [%d] libre", i);
+	}
+
+	if (row) {
+		const int64_t stock[5] = { c->resources.food, c->resources.rock, c->resources.wood, c->resources.ore, c->resources.gold };
+		static const char *const label[5] = { "nourriture", "pierre", "bois", "minerai", "or" };
+		n += (size_t)snprintf(out + n, size - n, " ; stock/coût de base :");
+		for (int i = 0; i < 5; i++)
+			n += (size_t)snprintf(out + n, size - n, " %s %lld/%u", label[i], (long long)stock[i], row->cost[i]);
+		if (row->cost[5] || row->cost[6] || row->cost[7])
+			n += (size_t)snprintf(out + n, size - n, " ; objets de mana : %u/%u/%u", row->cost[5], row->cost[6], row->cost[7]);
+	}
+}
+
 /* _MSG_RESP_BUILDINGERROR (2013): the layout was never seen (no capture of a refused start), so what it says is logged
  * as it comes. If the automatic construction has a start waiting for its answer, that slot is left alone for a while. */
 void RecvBuildingError(Connection *c, const uint8_t *data, uint16_t size)
@@ -6898,11 +6937,17 @@ void RecvBuildingError(Connection *c, const uint8_t *data, uint16_t size)
 	char hex[64] = "";
 	for (uint16_t i = 0; i < size && i < 16; i++)
 		snprintf(hex + i * 3, sizeof(hex) - i * 3, "%02x ", data[i]);
-	LOGW("[BUILD] Erreur du serveur (%u octet(s)) : %s\n", size, hex);
+
+	// Which start it answers: the series' or the automatic construction's - the only two things that send one.
+	uint16_t slot = c->askhelp.active ? c->askhelp.slot : c->build_auto.pending ? c->build_auto.pending_slot : 0;
+	char detail[700] = "";
+	if (slot)
+		BuildDescribeFailure(c, slot, detail, sizeof(detail));
+	LOGW("[BUILD] Erreur du serveur (%u octet(s)) : %s ; %s\n", size, hex, detail);
 
 	if (c->askhelp.active) {
-		char text[128];
-		snprintf(text, sizeof(text), "le serveur a répondu par une erreur (%s)", hex);
+		char text[900];
+		snprintf(text, sizeof(text), "le serveur a répondu par une erreur (code %s) ; %s", hex, detail);
 		AskHelpStop(c, text);
 		return;
 	}

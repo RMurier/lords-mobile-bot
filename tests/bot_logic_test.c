@@ -1518,6 +1518,8 @@ int main(void)
 			reset_sent();
 			RecvBuildingError(ac, err, sizeof(err));
 			CHECK(!ac->askhelp.active && find_packet(2006) < 0, "askhelp: a server error stops the series and cancels nothing");
+			CHECK(replied("01 00 00 00") && replied("emplacement 50") && replied("files vues"),
+				"askhelp: a refusal says the code, what was asked, the queues the bot holds and the stocks against the cost");
 
 			AskHelpStart(ac, "boss", 5, error, sizeof(error));
 			ac->askhelp.next_at = 0;
