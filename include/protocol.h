@@ -102,6 +102,7 @@ void RecvAddSoldier(Connection *c, const uint8_t *data, uint16_t size);
 void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size);
 void RecvTrainingInfo(Connection *c, const uint8_t *data, uint16_t size);
 uint32_t BarracksCapacityFloor(const Connection *c);
+void AutoTrainBagAnswer(Connection *c, bool ok, uint16_t item_id);
 uint32_t TroopsAffordable(const Connection *c, uint8_t kind, uint8_t tier, bool with_bag, int *short_resource);
 void AutoTrainTick(Connection *c);
 void RecvWoundedTroopData(Connection *c, const uint8_t *data);
@@ -283,6 +284,9 @@ typedef struct {
 uint64_t BagTotal(const Connection *c, ResourceType type);
 int  BagPlan(const Connection *c, ResourceType type, uint64_t need, BagUse out[BAG_PLAN_MAX]);
 void BagApply(Connection *c, const BagUse *plan, int count, ResourceType type);
+/* The game's own "train and use the bag": one request that trains and pays what the stock lacks with the listed items. */
+void RequestSmartUseTraining(Connection *c, uint8_t kind, uint8_t tier, uint32_t amount, const BagUse *items, int count);
+void RecvSmartUseForWork(Connection *c, const uint8_t *data, uint16_t size);
 
 /* Answers a player through the configured command.output channel. Defined in command.c. */
 void BotReply(Connection *c, const char *player_name, const char *subject, const char *fmt, ...);

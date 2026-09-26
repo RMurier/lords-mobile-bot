@@ -450,6 +450,9 @@ static SessionResult ProcessConnection(Connection *c)
 				case _MSG_RESP_TRAININGINFO_:
 					RecvTrainingInfo(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;
+				case _MSG_RESP_SMARTUSE_FOR_WORK:
+					RecvSmartUseForWork(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
+					break;
 				case _MSG_RESP_TRAINING_:
 					RecvTrainingStart(c, s->buffer + s->parse_pos + 4, s->packet_size - 4);
 					break;

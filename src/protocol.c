@@ -313,6 +313,31 @@ void RequestTroopTraining(Connection *c, uint8_t kind, uint8_t tier, uint32_t am
 	send_packet(c, true);
 }
 
+/* _MSG_REQUEST_SMARTUSE_FOR_TRAINING (1434): what the game's "train and use the bag" button sends. From a capture (7226 cavalry
+ * T2, the stock lacking only food, the game listing the items itself):
+ *   seq u32 | type u8 (2 = cavalry) | tier u8 (1 = T2) | amount u32 (7226) | count u16 (4) | count x (item u16, quantity u16)
+ *   items 0x0587 x1, 0x03f6 x1, 0x03f1 x1, 0x0492 x1 = 250K + 150K + 30K + 5K of food, the smallest cover of what was missing.
+ * No separate _MSG_REQUEST_TRAINING_ follows: the server uses the items and starts the training, and answers with
+ * _MSG_RESP_SMARTUSE_FOR_WORK (RecvSmartUseForWork) and the usual _MSG_RESP_TRAINING_ (RecvTrainingStart). */
+void RequestSmartUseTraining(Connection *c, uint8_t kind, uint8_t tier, uint32_t amount, const BagUse *items, int count)
+{
+	c->size = 2;
+
+	write_u16(c->data + c->size, _MSG_REQUEST_SMARTUSE_FOR_TRAINING); c->size += 2;
+	write_u32(c->data + c->size, ++c->protocol.seq_id);               c->size += 4;
+	write_u8 (c->data + c->size, kind);                               c->size += 1;
+	write_u8 (c->data + c->size, tier);                               c->size += 1;
+	write_u32(c->data + c->size, amount);                             c->size += 4;
+	write_u16(c->data + c->size, (uint16_t)count);                    c->size += 2;
+	for (int i = 0; i < count; i++) {
+		write_u16(c->data + c->size, items[i].item_id);  c->size += 2;
+		write_u16(c->data + c->size, items[i].quantity); c->size += 2;
+	}
+	write_u16(c->data, c->size);
+
+	send_packet(c, true);
+}
+
 void CancelTroopTraining(Connection *c)
 {
 	c->size = 2;
@@ -2918,6 +2943,7 @@ void RecvUseItem(Connection *c, const uint8_t *data, uint16_t size) {
 	uint8_t status = read_u8(data + offset); offset += 1;
 
 	if (status != 0) {
+		AutoTrainBagAnswer(c, false, 0);
 		if (c->migration.state == MIGRATION_WAIT_SCROLL_RESULT) {
 			c->migration.state = MIGRATION_IDLE;
 			LOGW("[MIGRATION] Migration par vélin refusée par le serveur (code %d)\n", (int8_t)status);
@@ -2936,6 +2962,7 @@ void RecvUseItem(Connection *c, const uint8_t *data, uint16_t size) {
 		
 		// Server returns the updated inventory quantity after using the item.
 		c->items[item_id].quantity = item_quantity;
+		AutoTrainBagAnswer(c, true, item_id);
 		
 		if (item_id == ADVANCE_RELOCATOR || item_id == RANDOM_RELOCATOR) {
 			c->player.zone_id            = read_u16(data + offset); offset += 2;
@@ -4910,12 +4937,55 @@ void RecvTrainingStart(Connection *c, const uint8_t *data, uint16_t size) {
 		c->training[kind].amount = amount;
 		c->autotrain.consecutive_refusals[kind][tier] = 0;
 		if (amount > 0) c->autotrain.last_granted = amount; // account-wide, shared by every (kind, tier) - see AutoTrainSettings' comment
+		if (c->autotrain.busy && c->autotrain.pending_kind == kind && c->autotrain.pending_tier == tier) {
+			// the game grants what it can (its own stock, its own capacity), so what was asked is not what is trained
+			if (amount < c->autotrain.pending_amount)
+				LOGW("[AUTOTRAIN] Formation acceptee : %u %s T%u seulement (%u demandees) - le serveur a limite l'ordre\n",
+					amount, TROOP_KIND_NAMES[kind], tier + 1, c->autotrain.pending_amount);
+			else
+				LOGI("[AUTOTRAIN] Formation acceptee : %u %s T%u\n", amount, TROOP_KIND_NAMES[kind], tier + 1);
+		}
+		// The 39-byte answer goes on with the stock left after the order (5 x u32: food, stone, wood, ore, gold), the same
+		// tail as a construction's answer: from a capture, 15 T2 infantry left 481274 / 56301 / 925 / 73 / 5971858.
+		// It is the server's own count, so it replaces the client's - which counts bag items as credited before they are.
+		if (size >= 27) {
+			c->resources.food = read_u32(data + 7);
+			c->resources.rock = read_u32(data + 11);
+			c->resources.wood = read_u32(data + 15);
+			c->resources.ore  = read_u32(data + 19);
+			c->resources.gold = read_u32(data + 23);
+		}
 		// busy stays true (set when we sent the request) until RecvAddSoldier /
 		// RecvTroopTrainingImmediate reports the batch actually finished.
 		return;
 	}
 
 	AutoTrainApplyRefusal(c, kind, tier, status);
+}
+
+/* _MSG_RESP_SMARTUSE_FOR_WORK (1431), answer to the request above. From a capture:
+ *   00 | 00 00 00 00 | 00 04 00?  -> byte 0 is the result (0 = done); the item list is at offset 5: count u16, then count x
+ *   (item u16, quantity u16 LEFT in the bag after the use). Only the result and that list are read; the other bytes are not known.
+ * A result other than 0 = refused: the bot goes back to using the items one by one for a while. */
+void RecvSmartUseForWork(Connection *c, const uint8_t *data, uint16_t size)
+{
+	if (size < 1) return;
+	const uint8_t res = read_u8(data);
+	if (res != 0) {
+		if (c->autotrain.busy) {
+			LOGW("[AUTOTRAIN] Le serveur a refuse la formation avec le sac (code %u) : j'utilise les objets un par un pendant %u min\n",
+				res, AUTOTRAIN_BAG_REFUSED_MS / 60000);
+			c->autotrain.busy = false;
+			c->autotrain.pending_amount = 0;
+			c->autotrain.smart_refused_until = now_ms() + AUTOTRAIN_BAG_REFUSED_MS;
+			c->autotrain.next_action_at = now_ms() + 3000 + (uint64_t)(rand() % 1500);
+		}
+		return;
+	}
+	if (size < 7) return;
+	const uint16_t count = read_u16(data + 5);
+	for (uint16_t i = 0; i < count && 7 + (i + 1) * 4 <= size; i++)
+		c->items[read_u16(data + 7 + i * 4)].quantity = read_u16(data + 9 + i * 4);
 }
 
 /* How many troops of that kind and tier the stock pays for, at the game's base price (troop_table.h; bonuses only
@@ -4995,6 +5065,8 @@ void RecvTrainingInfo(Connection *c, const uint8_t *data, uint16_t size) {
 		amount, TROOP_KIND_NAMES[kind], tier + 1, (unsigned long long)((start + duration - now + 59) / 60));
 }
 
+static uint64_t BagItemValue(ResourceType type, uint16_t item_id);
+
 void AutoTrainTick(Connection *c) {
 	if (!c->autotrain.enabled) return;
 	if (!c->troop.loaded) return; // no real baseline yet (see TroopAdd's comment) - wait for the login snapshot
@@ -5009,6 +5081,13 @@ void AutoTrainTick(Connection *c) {
 		c->autotrain.next_action_at = GatherHumanDelay();
 	}
 	if (c->autotrain.busy) return; // one order account-wide at a time - see AutoTrainSettings' comment
+
+	// A bag item was used and its answer is not in: nothing else meanwhile, and no answer in time = refused.
+	if (c->autotrain.bag_item) {
+		if (now_ms() < c->autotrain.bag_deadline) return;
+		LOGW("[AUTOTRAIN] Pas de reponse du serveur a l'utilisation de l'objet %u du sac : je le tiens pour refuse\n", c->autotrain.bag_item);
+		AutoTrainBagAnswer(c, false, 0);
+	}
 
 	if (now_ms() < c->autotrain.next_action_at) return;
 
@@ -5034,6 +5113,8 @@ void AutoTrainTick(Connection *c) {
 			uint32_t want = last > 0
 				? (uint32_t)(((uint64_t)last * AUTOTRAIN_BATCH_GROWTH_NUM) / AUTOTRAIN_BATCH_GROWTH_DEN)
 				: (BarracksCapacityFloor(c) ? BarracksCapacityFloor(c) : AUTOTRAIN_INITIAL_BATCH_GUESS);
+			const uint32_t floor_cap = BarracksCapacityFloor(c);
+			if (floor_cap && want < floor_cap) want = floor_cap; // a barracks always holds at least that
 			if (want > gap) want = gap; // never ask for more than actually still needed
 
 			// Never ask for what cannot be paid: the order would just be refused (a login capture with 0 food got
@@ -5060,26 +5141,57 @@ void AutoTrainTick(Connection *c) {
 					shortfall[r] = need > have ? need - have : 0;
 					if (shortfall[r]) lacking = true;
 				}
-				if (lacking) {
-					BagUse plan[5][BAG_PLAN_MAX];
-					int used[5] = { 0, 0, 0, 0, 0 };
-					bool coverable = c->autotrain.bag_topups < AUTOTRAIN_BAG_TOPUPS_MAX;
-					for (int r = 0; r < 5 && coverable; r++) {
+				if (lacking && now >= c->autotrain.smart_refused_until) {
+					// The game's own way: ONE request with the whole list of items, which trains and pays at once. The list is
+					// the smallest cover of what each resource lacks (what the game's own button picked in a capture), food last.
+					static const int list_order[5] = { RESOURCE_ROCK, RESOURCE_WOOD, RESOURCE_ORE, RESOURCE_GOLD, RESOURCE_FOOD };
+					BagUse all[5 * BAG_PLAN_MAX];
+					int total = 0;
+					bool complete = true;
+					for (int i = 0; i < 5 && complete; i++) {
+						const int r = list_order[i];
 						if (!shortfall[r]) continue;
-						used[r] = BagPlan(c, (ResourceType)r, shortfall[r], plan[r]);
-						if (used[r] < 0) coverable = false;
+						BagUse plan[BAG_PLAN_MAX];
+						const int used = BagPlan(c, (ResourceType)r, shortfall[r], plan);
+						if (used <= 0) { complete = false; break; }
+						for (int k = 0; k < used; k++) all[total++] = plan[k];
 					}
+					if (complete && total > 0) {
+						c->autotrain.busy = true;
+						c->autotrain.pending_kind = kind;
+						c->autotrain.pending_tier = tier;
+						c->autotrain.pending_amount = want;
+						c->autotrain.bag_topups = 0;
+						c->autotrain.next_kind = (uint8_t)((kind + 1) % 4);
+						c->autotrain.next_action_at = GatherHumanDelay();
+						RequestSmartUseTraining(c, kind, tier, want, all, total);
+						LOGI("[AUTOTRAIN] Demande de formation avec le sac : %u troupes %s T%u (objectif %u), %d objet(s) du sac pour le manque\n",
+							want, TROOP_KIND_NAMES[kind], tier + 1, target, total);
+						return;
+					}
+				}
+				if (lacking) {
+					// One bag item at a time, its answer checked before the next: three used at once got two refused (a
+					// capture) while the client counted all three as credited, and the order came out at 15 instead of 5000.
+					BagUse plan[BAG_PLAN_MAX];
+					// food last: what is not food is completed first, and food only once nothing else is missing
+					static const int bag_order[5] = { RESOURCE_ROCK, RESOURCE_WOOD, RESOURCE_ORE, RESOURCE_GOLD, RESOURCE_FOOD };
+					int first = -1;
+					for (int i = 0; i < 5 && first < 0; i++)
+						if (shortfall[bag_order[i]]) first = bag_order[i];
+					bool coverable = c->autotrain.bag_topups < AUTOTRAIN_BAG_TOPUPS_MAX && now >= c->autotrain.bag_refused_until;
+					int used = coverable ? BagPlan(c, (ResourceType)first, shortfall[first], plan) : -1;
+					if (used <= 0) coverable = false;
 					if (coverable) {
-						char detail[200] = "";
-						size_t n = 0;
-						for (int r = 0; r < 5; r++) {
-							if (!shortfall[r]) continue;
-							n += (size_t)snprintf(detail + n, sizeof(detail) - n, "%s%s %llu", n ? ", " : "", names[r], (unsigned long long)shortfall[r]);
-							BagApply(c, plan[r], used[r], (ResourceType)r);
-						}
+						BagApply(c, plan, 1, (ResourceType)first);
+						c->autotrain.bag_item = plan[0].item_id;
+						c->autotrain.bag_res = (uint8_t)first;
+						c->autotrain.bag_credit = BagItemValue((ResourceType)first, plan[0].item_id) * plan[0].quantity;
+						c->autotrain.bag_deadline = now + AUTOTRAIN_BAG_ANSWER_MS;
 						c->autotrain.bag_topups++;
-						c->autotrain.next_action_at = now + 3000 + (uint64_t)(rand() % 1500); // the server has to credit them
-						LOGI("[AUTOTRAIN] Sac utilise pour former %u %s T%u : il manquait %s\n", want, TROOP_KIND_NAMES[kind], tier + 1, detail);
+						c->autotrain.next_action_at = now + 3000 + (uint64_t)(rand() % 1500); // a human waits between two uses
+						LOGI("[AUTOTRAIN] Sac : %u x objet %u (%s) pour former %u %s T%u - il manque %llu\n", plan[0].quantity, plan[0].item_id,
+							names[first], want, TROOP_KIND_NAMES[kind], tier + 1, (unsigned long long)shortfall[first]);
 						return;
 					}
 					// the bag cannot (or may no more) cover it: what the stock alone pays for
@@ -5103,7 +5215,7 @@ void AutoTrainTick(Connection *c) {
 			c->autotrain.next_action_at = GatherHumanDelay(); // one new order per tick, same pacing as gather
 			RequestTroopTraining(c, kind, tier, want);
 
-			LOGI("[AUTOTRAIN] Formation de %u troupes %s T%u (objectif %u)\n",
+			LOGI("[AUTOTRAIN] Demande de formation : %u troupes %s T%u (objectif %u)\n",
 				want, TROOP_KIND_NAMES[kind], tier + 1, target);
 			return;
 		}
@@ -8314,11 +8426,11 @@ typedef struct {
 } ResourceItem;
 
 /* Every table is sorted from the biggest item to the smallest one. */
-static const ResourceItem FOOD_ITEMS[]  = { {FOOD_60M, 60000000}, {FOOD_20M, 20000000}, {FOOD_6M, 6000000}, {FOOD_2M, 2000000}, {FOOD_500K, 500000}, {FOOD_150K, 150000}, {FOOD_30K, 30000}, {FOOD_5K, 5000} };
-static const ResourceItem STONE_ITEMS[] = { {STONE_15M, 15000000}, {STONE_5M, 5000000}, {STONE_1_5M, 1500000}, {STONE_500K, 500000}, {STONE_150K, 150000}, {STONE_50K, 50000}, {STONE_10K, 10000}, {STONE_3K, 3000} };
-static const ResourceItem WOOD_ITEMS[]  = { {TIMBER_15M, 15000000}, {TIMBER_5M, 5000000}, {TIMBER_1_5M, 1500000}, {TIMBER_500K, 500000}, {TIMBER_150K, 150000}, {TIMBER_50K, 50000}, {TIMBER_10K, 10000}, {TIMBER_3K, 3000} };
-static const ResourceItem ORE_ITEMS[]   = { {ORE_15M, 15000000}, {ORE_5M, 5000000}, {ORE_1_5M, 1500000}, {ORE_500K, 500000}, {ORE_150K, 150000}, {ORE_50K, 50000}, {ORE_10K, 10000}, {ORE_3K, 3000} };
-static const ResourceItem GOLD_ITEMS[]  = { {GOLD_6M, 6000000}, {GOLD_2M, 2000000}, {GOLD_600K, 600000}, {GOLD_200K, 200000}, {GOLD_50K, 50000}, {GOLD_15K, 15000}, {GOLD_3K, 3000} };
+static const ResourceItem FOOD_ITEMS[]  = { {FOOD_60M, 60000000}, {FOOD_20M, 20000000}, {FOOD_6M, 6000000}, {FOOD_2M, 2000000}, {FOOD_500K, 500000}, {FOOD_250K, 250000}, {FOOD_150K, 150000}, {FOOD_100K, 100000}, {FOOD_50K, 50000}, {FOOD_30K, 30000}, {FOOD_20K, 20000}, {FOOD_10K, 10000}, {FOOD_5K, 5000} };
+static const ResourceItem STONE_ITEMS[] = { {STONE_15M, 15000000}, {STONE_5M, 5000000}, {STONE_1_5M, 1500000}, {STONE_500K, 500000}, {STONE_250K, 250000}, {STONE_150K, 150000}, {STONE_50K, 50000}, {STONE_25K, 25000}, {STONE_10K, 10000}, {STONE_5K, 5000}, {STONE_3K, 3000}, {STONE_1K, 1000} };
+static const ResourceItem WOOD_ITEMS[]  = { {TIMBER_15M, 15000000}, {TIMBER_5M, 5000000}, {TIMBER_1_5M, 1500000}, {TIMBER_500K, 500000}, {TIMBER_250K, 250000}, {TIMBER_150K, 150000}, {TIMBER_50K, 50000}, {TIMBER_25K, 25000}, {TIMBER_10K, 10000}, {TIMBER_5K, 5000}, {TIMBER_3K, 3000}, {TIMBER_1K, 1000} };
+static const ResourceItem ORE_ITEMS[]   = { {ORE_15M, 15000000}, {ORE_5M, 5000000}, {ORE_1_5M, 1500000}, {ORE_500K, 500000}, {ORE_250K, 250000}, {ORE_150K, 150000}, {ORE_50K, 50000}, {ORE_25K, 25000}, {ORE_10K, 10000}, {ORE_5K, 5000}, {ORE_3K, 3000}, {ORE_1K, 1000} };
+static const ResourceItem GOLD_ITEMS[]  = { {GOLD_6M, 6000000}, {GOLD_2M, 2000000}, {GOLD_600K, 600000}, {GOLD_200K, 200000}, {GOLD_100K, 100000}, {GOLD_50K, 50000}, {GOLD_30K, 30000}, {GOLD_15K, 15000}, {GOLD_9K, 9000}, {GOLD_6K, 6000}, {GOLD_3K, 3000} };
 
 static const ResourceItem *ResourceItemsFor(ResourceType type, int *count)
 {
@@ -8478,6 +8590,43 @@ static void AddResourceAmount(Connection *c, ResourceType type, uint64_t amount)
 		case RESOURCE_ORE:  c->resources.ore  = SaturatingAddU32(c->resources.ore,  amount); break;
 		case RESOURCE_GOLD: c->resources.gold = SaturatingAddU32(c->resources.gold, amount); break;
 	}
+}
+
+static uint64_t BagItemValue(ResourceType type, uint16_t item_id)
+{
+	int item_count;
+	const ResourceItem *items = ResourceItemsFor(type, &item_count);
+	for (int j = 0; j < item_count; j++)
+		if (items[j].item_id == item_id)
+			return items[j].value;
+	return 0;
+}
+
+/* The answer to the one bag item autotrain used (RecvUseItem calls this for every answer). A success confirms the credit
+ * BagApply made; a refusal (status other than 0: seen as 0x44 for wood and ore items sent right after a food one) takes it
+ * back, and the bag is left alone for a while. Anything else in the answers is not autotrain's. */
+void AutoTrainBagAnswer(Connection *c, bool ok, uint16_t item_id)
+{
+	if (!c->autotrain.bag_item)
+		return;
+	if (ok && item_id != c->autotrain.bag_item)
+		return; // another item's answer
+	if (!ok) {
+		const uint64_t credit = c->autotrain.bag_credit;
+		switch ((ResourceType)c->autotrain.bag_res) {
+			case RESOURCE_FOOD: c->resources.food = c->resources.food > credit ? (uint32_t)(c->resources.food - credit) : 0; break;
+			case RESOURCE_ROCK: c->resources.rock = c->resources.rock > credit ? (uint32_t)(c->resources.rock - credit) : 0; break;
+			case RESOURCE_WOOD: c->resources.wood = c->resources.wood > credit ? (uint32_t)(c->resources.wood - credit) : 0; break;
+			case RESOURCE_ORE:  c->resources.ore  = c->resources.ore  > credit ? (uint32_t)(c->resources.ore  - credit) : 0; break;
+			case RESOURCE_GOLD: c->resources.gold = c->resources.gold > credit ? (uint32_t)(c->resources.gold - credit) : 0; break;
+		}
+		c->autotrain.bag_refused_until = now_ms() + AUTOTRAIN_BAG_REFUSED_MS;
+		LOGW("[AUTOTRAIN] Objet %u du sac refuse par le serveur : credit annule, plus de sac pour %u min\n",
+			c->autotrain.bag_item, AUTOTRAIN_BAG_REFUSED_MS / 60000);
+	}
+	c->autotrain.bag_item = 0;
+	c->autotrain.bag_credit = 0;
+	c->autotrain.next_action_at = now_ms() + 1500 + (uint64_t)(rand() % 1500); // a moment before the next step
 }
 
 /* Uses the planned items. The server sends back the real quantities and the new resources. */

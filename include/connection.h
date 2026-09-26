@@ -857,7 +857,9 @@ typedef struct {
 #define AUTOTRAIN_POOR_BACKOFF_MS          (10 * 60 * 1000)
 // The bag tops the stock up at most this many times for one order: the server has to credit it, and an order that never
 // gets there must not drain the bag one top-up at a time.
-#define AUTOTRAIN_BAG_TOPUPS_MAX           3
+#define AUTOTRAIN_BAG_TOPUPS_MAX           8      // one bag item per step, several steps per order
+#define AUTOTRAIN_BAG_ANSWER_MS            6000   // no _MSG_RESP_USEITEM by then: refused
+#define AUTOTRAIN_BAG_REFUSED_MS           (10 * 60 * 1000)
 // A training whose end time (from _MSG_RESP_TRAININGINFO_) passed this long ago, with no
 // "troops added" packet since, is taken as finished - the packet was missed.
 #define AUTOTRAIN_END_GRACE_S              30
@@ -927,6 +929,12 @@ typedef struct {
 
 	uint64_t running_until;                      // server clock: when the training seen at login ends, 0 = unknown (see RecvTrainingInfo)
 	uint8_t  bag_topups;                         // bag top-ups made for the order about to be sent, back to 0 once it is sent
+	uint64_t smart_refused_until;                // now_ms(): the game's own bag-and-train request was refused: item by item until then
+	uint16_t bag_item;                           // the bag item used and not answered yet (0 = none): one at a time, see AutoTrainBagAnswer
+	uint8_t  bag_res;                            // its resource (ResourceType index)
+	uint64_t bag_credit;                         // what BagApply credited for it before the server confirmed
+	uint64_t bag_deadline;                       // now_ms(): no answer by then = taken as refused
+	uint64_t bag_refused_until;                  // now_ms(): no bag use before, after a refused or unanswered one
 	uint32_t pending_amount;                     // amount of the order in flight, valid while busy: a refusal halves the next attempt from it
 	uint32_t last_granted;                       // account-wide, shared by every (kind, tier) - see this struct's comment; 0 = no history yet
 	uint64_t retry_at[4][5];                     // [kind][tier] now_ms() backoff after a refusal

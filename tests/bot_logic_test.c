@@ -3425,6 +3425,7 @@ static const uint8_t first_2[] = {
 		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
 		c->resources.food = 0;                                            // 5000 infantry T2 = 500000 food
 		c->items[FOOD_500K].quantity = 3; c->items[FOOD_5K].quantity = 10;
+		c->autotrain.smart_refused_until = now_ms() + 3600000;   // the item-by-item path: the game's own request was refused
 		CHECK(TroopsAffordable(c, TROOP_INFANTRY, TIER_T2, false, NULL) == 0 && TroopsAffordable(c, TROOP_INFANTRY, TIER_T2, true, NULL) == 15500,
 			"affordable: the bag counts when asked (1550000 food in it / 100)");
 		reset_sent();
@@ -3434,6 +3435,16 @@ static const uint8_t first_2[] = {
 		CHECK(c->autotrain.bag_topups == 1 && c->resources.food == 500000, "bag: the food is credited, one top-up counted");
 		CHECK(!c->autotrain.busy && c->autotrain.next_action_at > now_ms(), "bag: the order waits a few seconds for the server to credit it");
 
+		// nothing else while the item's answer is awaited
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(sent_count == 0 && c->autotrain.bag_item == FOOD_500K, "bag: nothing is sent while the item's answer is awaited");
+
+		// the answer: status 0, item, what is left of it (2)
+		uint8_t answer[6] = { 0, (uint8_t)(FOOD_500K & 0xff), (uint8_t)(FOOD_500K >> 8), 2, 0, 0 };
+		RecvUseItem(c, answer, sizeof(answer));
+		CHECK(c->autotrain.bag_item == 0 && c->resources.food == 500000, "bag: the answer confirms the credit and frees the step");
 		c->autotrain.next_action_at = 0;
 		reset_sent();
 		AutoTrainTick(c);
@@ -3441,6 +3452,30 @@ static const uint8_t first_2[] = {
 		uint32_t amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
 		CHECK(k >= 0 && amount == 5000 && useitem_count == 0 && c->autotrain.bag_topups == 0,
 			"bag: then the order goes out for the full amount, with nothing more taken from the bag");
+		free(c);
+
+		// a refused item (a capture: status 0x44 for wood and ore items): its credit is taken back, the bag is left alone
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
+		c->resources.wood = 2312;                                         // 23 troops' worth of wood
+		c->items[TIMBER_500K].quantity = 3;
+		c->autotrain.smart_refused_until = now_ms() + 3600000;   // the item-by-item path: the game's own request was refused
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(c->autotrain.bag_item == TIMBER_500K && c->resources.wood == 2312 + 500000, "bag refused: the item is used and credited first");
+		uint8_t refused[3] = { 0x44, 0x02, 0x04 };
+		RecvUseItem(c, refused, sizeof(refused));
+		CHECK(c->autotrain.bag_item == 0 && c->resources.wood == 2312 && c->autotrain.bag_refused_until > now_ms(),
+			"bag refused: the credit is taken back and the bag is left alone");
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		k = find_packet(_MSG_REQUEST_TRAINING_);
+		amount = k >= 0 ? (uint32_t)(sent[k][10] | sent[k][11] << 8 | sent[k][12] << 16 | sent[k][13] << 24) : 0;
+		CHECK(k >= 0 && amount == 23 && useitem_count == 0, "bag refused: the order is cut to what the stock really pays (23), no second try");
 		free(c);
 
 		// the bag cannot cover it: the order shrinks to what the stock pays for, and the bag stays untouched
@@ -3451,16 +3486,112 @@ static const uint8_t first_2[] = {
 		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
 		c->resources.food = 100000;                                       // 1000 troops
 		c->items[FOOD_5K].quantity = 2;                                   // +10000 food = 100 more troops, still short of 5000
+		c->autotrain.smart_refused_until = now_ms() + 3600000;   // the item-by-item path: the game's own request was refused
 		reset_sent();
 		AutoTrainTick(c);
 		CHECK(find_packet(_MSG_REQUEST_TRAINING_) < 0 && useitem_count == 1 && c->items[FOOD_5K].quantity == 0,
 			"bag: the shortfall of the amount stock + bag can pay is taken from the bag");
+		uint8_t answer2[6] = { 0, (uint8_t)(FOOD_5K & 0xff), (uint8_t)(FOOD_5K >> 8), 0, 0, 0 };
+		RecvUseItem(c, answer2, sizeof(answer2));
 		c->autotrain.next_action_at = 0;
 		reset_sent();
 		AutoTrainTick(c);
 		int k2 = find_packet(_MSG_REQUEST_TRAINING_);
 		uint32_t amount2 = k2 >= 0 ? (uint32_t)(sent[k2][10] | sent[k2][11] << 8 | sent[k2][12] << 16 | sent[k2][13] << 24) : 0;
 		CHECK(amount2 == 1100, "bag: the order is cut to what stock + bag pay for (110000 food / 100)");
+		free(c);
+	}
+
+	/* ---- the game's own "train and use the bag" request, from the capture: 7226 cavalry T2, only food short ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_CAVALRY][TIER_T2] = 7226;              // gap 7226: that is the amount asked
+		c->autotrain.last_granted = 4818;                                 // 4818 x 3/2 = 7227, cut to the gap
+		c->resources.food = 289040;                                       // 722600 needed: 433560 short
+		// the bag as it was before the capture's use: 0x0587 x2, 150K x686, 30K x602, 5K x3
+		c->items[FOOD_250K].quantity = 2; c->items[FOOD_150K].quantity = 686; c->items[FOOD_30K].quantity = 602; c->items[FOOD_5K].quantity = 3;
+		reset_sent();
+		AutoTrainTick(c);
+		int k = find_packet(_MSG_REQUEST_SMARTUSE_FOR_TRAINING);
+		CHECK(k >= 0 && find_packet(_MSG_REQUEST_TRAINING_) < 0 && useitem_count == 0,
+			"smart use: one request, no separate order and no item used one by one");
+		const uint8_t expected[20] = { TROOP_CAVALRY, TIER_T2, 0x3a, 0x1c, 0x00, 0x00, 0x04, 0x00,
+			0x87, 0x05, 0x01, 0x00, 0xf6, 0x03, 0x01, 0x00, 0xf1, 0x03, 0x01, 0x00 };
+		const uint8_t tail[4] = { 0x92, 0x04, 0x01, 0x00 };
+		CHECK(k >= 0 && memcmp(&sent[k][8], expected, sizeof(expected)) == 0 && memcmp(&sent[k][28], tail, sizeof(tail)) == 0,
+			"smart use: type, tier, amount and the four items are the ones of the capture (250K, 150K, 30K, 5K)");
+		CHECK(c->autotrain.busy && c->autotrain.pending_amount == 7226, "smart use: the slot is busy with the amount asked");
+
+		// the answer of the capture: result 0, then the items left
+		const uint8_t answer[23] = { 0, 0, 0, 0, 0, 4, 0, 0x87, 0x05, 1, 0, 0xf6, 0x03, 0xad, 0x02, 0xf1, 0x03, 0x59, 0x02, 0x92, 0x04, 2, 0 };
+		RecvSmartUseForWork(c, answer, sizeof(answer));
+		CHECK(c->items[FOOD_250K].quantity == 1 && c->items[FOOD_150K].quantity == 685 && c->items[FOOD_30K].quantity == 601 && c->items[FOOD_5K].quantity == 2,
+			"smart use: the answer's quantities become the bag's");
+		CHECK(c->autotrain.busy, "smart use: an accepted request keeps the slot busy until the troops are added");
+		free(c);
+
+		// refused: item by item for a while, and the slot is free again
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_CAVALRY][TIER_T2] = 7226;
+		c->autotrain.last_granted = 4818;
+		c->resources.food = 289040;
+		c->items[FOOD_250K].quantity = 2; c->items[FOOD_150K].quantity = 686;
+		reset_sent();
+		AutoTrainTick(c);
+		const uint8_t refusedAnswer[1] = { 1 };
+		RecvSmartUseForWork(c, refusedAnswer, sizeof(refusedAnswer));
+		CHECK(!c->autotrain.busy && c->autotrain.smart_refused_until > now_ms(), "smart use refused: the slot is free, the request is not tried again for a while");
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(find_packet(_MSG_REQUEST_SMARTUSE_FOR_TRAINING) < 0 && useitem_count == 1, "smart use refused: the bag is used item by item instead");
+		free(c);
+	}
+
+	/* ---- the bag completes food last ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
+		c->resources.food = 0; c->resources.wood = 0;                     // both short for 5000 infantry T2
+		c->items[FOOD_500K].quantity = 3; c->items[TIMBER_500K].quantity = 3;
+		c->autotrain.smart_refused_until = now_ms() + 3600000;   // the item-by-item path: the game's own request was refused
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(c->autotrain.bag_item == TIMBER_500K && c->autotrain.bag_res == RESOURCE_WOOD, "bag: wood is completed before food");
+		uint8_t woodAnswer[6] = { 0, (uint8_t)(TIMBER_500K & 0xff), (uint8_t)(TIMBER_500K >> 8), 2, 0, 0 };
+		RecvUseItem(c, woodAnswer, sizeof(woodAnswer));
+		c->autotrain.next_action_at = 0;
+		reset_sent();
+		AutoTrainTick(c);
+		CHECK(c->autotrain.bag_item == FOOD_500K && c->autotrain.bag_res == RESOURCE_FOOD, "bag: food comes last, once nothing else is missing");
+		free(c);
+	}
+
+	/* ---- the server's answer says what was really granted, and what is left of the stock ---- */
+	{
+		c = fresh("boss");
+		c->troop.loaded = true;
+		c->autotrain.enabled = true;
+		give_stock(c);
+		c->autotrain.target[TROOP_INFANTRY][TIER_T2] = 5000000;
+		reset_sent();
+		AutoTrainTick(c);
+		// the capture: 5000 asked, 15 granted, then food 481274, stone 56301, wood 925, ore 73, gold 5971858
+		uint8_t granted[39] = { 0x00, 0x00, 0x01, 0x0f, 0x00, 0x00, 0x00, 0xfa, 0x57, 0x07, 0x00, 0xed, 0xdb, 0x00, 0x00, 0x9d, 0x03, 0x00, 0x00,
+			0x49, 0x00, 0x00, 0x00, 0x92, 0x1f, 0x5b, 0x00, 0x32, 0xd6, 0xb7, 0x6a, 0x00, 0x00, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00 };
+		RecvTrainingStart(c, granted, sizeof(granted));
+		CHECK(c->training[TROOP_INFANTRY].amount == 15 && c->autotrain.last_granted == 15, "TRAINING answer (real capture): 15 granted, not the 5000 asked");
+		CHECK(c->resources.food == 481274 && c->resources.rock == 56301 && c->resources.wood == 925 && c->resources.ore == 73 && c->resources.gold == 5971858,
+			"TRAINING answer (real capture): the stock left replaces the client's count");
 		free(c);
 	}
 

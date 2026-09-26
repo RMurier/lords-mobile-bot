@@ -556,10 +556,21 @@ en cours ... encore N min`). With nothing training the packet is not sent at all
 **Never more than the stock pays for:** the price of one troop comes from the game's `Soldier` table (`include/troop_table.h`, base
 price, bonuses only lower it). The order is cut down to what the scarcest resource pays for, **stock and bag together**.
 
-**The bag pays only what the stock lacks:** when the stock does not cover an order but the stock plus the bag's resource items does,
-the bot uses the strict minimum of items for the missing part of each resource (same planning as the trade and `$askhelp` top-ups,
-smallest cover), waits 3-4 s for the server to credit it, then sends the order. At most 3 top-ups per order; if the bag cannot cover
-it, the order is cut to what the stock alone pays for. With not one troop payable (bag included) the bot logs `Pas assez de
+**The bag pays only what the stock lacks, the way the game does it:** when the stock does not cover an order but the stock plus the
+bag's resource items does, the bot sends the game's own "train and use the bag" request (`_MSG_REQUEST_SMARTUSE_FOR_TRAINING`, 1434:
+type, tier, amount and the list of items, layout read from a capture): one packet that trains and pays what is missing, with the
+smallest cover of items (the same choice the game's button made in that capture: 250K + 150K + 30K + 5K of food for a 433560 shortfall).
+If the server refuses it, the bot goes back for 10 minutes to the older way below. The bag's items include the event ones the game
+also uses (250K, 100K, 50K... items besides the plain 3K-60M ones). The older way: the bot uses the strict minimum of items for the missing part of each resource (same planning as the trade and `$askhelp` top-ups,
+smallest cover), **one item at a time, food last** (stone, wood, ore, gold first) with a 3-4 s wait and the server's answer checked before the next (three used at once got
+two refused with status `0x44` in a capture, while the bot counted all three as credited: the order came out at 15 troops instead of
+5000). A refused or unanswered item takes its credit back and leaves the bag alone for 10 minutes; the order is then cut to what the
+stock alone pays for. At most 8 items per order.
+
+**What is really trained:** the server's answer to an order gives the amount it granted (it caps by its own stock and capacity) and the
+stock left after it. The log says `Demande de formation : N ...` when the order goes out and `Formation acceptee : G ...` (a warning if
+G is less than N) when the server answers; the stock left replaces the bot's count. A barracks always holds at least its floor, so the
+next order never asks for less than that, whatever a limited order taught. With not one troop payable (bag included) the bot logs `Pas assez de
 <ressource> (sac compris) ...` and leaves that box alone for 10 minutes.
 
 Note: the game can silently grant far less than requested even when accepting the order (e.g. asking for 3.7M and receiving 29) -

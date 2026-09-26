@@ -1870,66 +1870,12 @@ static void ResourceCommandHandler(
 
 
 
-uint64_t GetBagFood(Connection *c) {
-	return 
-		((uint64_t)c->items[FOOD_5K].quantity * 5000) + // FOOD 5K
-		((uint64_t)c->items[FOOD_30K].quantity * 30000) + // FOOD 30K
-		((uint64_t)c->items[FOOD_150K].quantity * 150000) + // FOOD 150K
-		((uint64_t)c->items[FOOD_500K].quantity * 500000) + // FOOD 500K
-		((uint64_t)c->items[FOOD_2M].quantity * 2000000) + // FOOD 2M
-		((uint64_t)c->items[FOOD_6M].quantity * 6000000) + // FOOD 6M
-		((uint64_t)c->items[FOOD_20M].quantity * 20000000) + // FOOD 20M
-		((uint64_t)c->items[FOOD_60M].quantity * 60000000); // FOOD 60M
-}
-
-
-uint64_t GetBagRock(Connection *c) {
-	return 
-		((uint64_t)c->items[STONE_3K].quantity   * 3000) + // STONE 3K
-		((uint64_t)c->items[STONE_10K].quantity  * 10000) + // STONE 10K
-		((uint64_t)c->items[STONE_50K].quantity  * 50000) + // STONE 50K
-		((uint64_t)c->items[STONE_150K].quantity * 150000) + // STONE 150K
-		((uint64_t)c->items[STONE_500K].quantity * 500000) + // STONE 500K
-		((uint64_t)c->items[STONE_1_5M].quantity * 1500000) + // STONE 1.5M
-		((uint64_t)c->items[STONE_5M].quantity   * 5000000) + // STONE 5M
-		((uint64_t)c->items[STONE_15M].quantity  * 15000000); // STONE 15M
-}
-
-
-uint64_t GetBagWood(Connection *c) {
-	return 
-		((uint64_t)c->items[TIMBER_3K].quantity * 3000) + // WOOD 3K
-		((uint64_t)c->items[TIMBER_10K].quantity * 10000) + // WOOD 10K
-		((uint64_t)c->items[TIMBER_50K].quantity * 50000) + // WOOD 50K
-		((uint64_t)c->items[TIMBER_150K].quantity * 150000) + // WOOD 150K
-		((uint64_t)c->items[TIMBER_500K].quantity * 500000) + // WOOD 500K
-		((uint64_t)c->items[TIMBER_1_5M].quantity * 1500000) + // WOOD 1.5M
-		((uint64_t)c->items[TIMBER_5M].quantity * 5000000) + // WOOD 5M
-		((uint64_t)c->items[TIMBER_15M].quantity * 15000000); // WOOD 15M
-}
-
-uint64_t GetBagOre(Connection *c) {
-	return 
-		((uint64_t)c->items[ORE_3K].quantity * 3000) + // ORE 3K
-		((uint64_t)c->items[ORE_10K].quantity * 10000) + // ORE 10K
-		((uint64_t)c->items[ORE_50K].quantity * 50000) + // ORE 50K
-		((uint64_t)c->items[ORE_150K].quantity * 150000) + // ORE 150K
-		((uint64_t)c->items[ORE_500K].quantity * 500000) + // ORE 500K
-		((uint64_t)c->items[ORE_1_5M].quantity * 1500000) + // ORE 1.5M
-		((uint64_t)c->items[ORE_5M].quantity * 5000000) + // ORE 5M
-		((uint64_t)c->items[ORE_15M].quantity * 15000000); // ORE 15M
-}
-
-uint64_t GetBagGold(Connection *c) {
-	return 
-		((uint64_t)c->items[GOLD_3K].quantity   * 3000) + // FOOD 5K
-		((uint64_t)c->items[GOLD_15K].quantity  * 15000) + // FOOD 30K
-		((uint64_t)c->items[GOLD_50K].quantity  * 50000) + // FOOD 150K
-		((uint64_t)c->items[GOLD_200K].quantity * 200000) + // FOOD 500K
-		((uint64_t)c->items[GOLD_600K].quantity * 600000) + // FOOD 2M
-		((uint64_t)c->items[GOLD_2M].quantity   * 2000000) + // FOOD 6M
-		((uint64_t)c->items[GOLD_6M].quantity   * 6000000); // FOOD 20M
-}
+/* What the bag holds of each resource, in resource items (BagTotal: the one table of them, protocol.c). */
+uint64_t GetBagFood(Connection *c) { return BagTotal(c, RESOURCE_FOOD); }
+uint64_t GetBagRock(Connection *c) { return BagTotal(c, RESOURCE_ROCK); }
+uint64_t GetBagWood(Connection *c) { return BagTotal(c, RESOURCE_WOOD); }
+uint64_t GetBagOre(Connection *c)  { return BagTotal(c, RESOURCE_ORE); }
+uint64_t GetBagGold(Connection *c) { return BagTotal(c, RESOURCE_GOLD); }
 
 
 void ShowBankBalance(Connection *c, const char *player_name, CommandChannel channel) {

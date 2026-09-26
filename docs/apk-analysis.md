@@ -163,6 +163,19 @@ across every kind/tier, `AutoTrainTick` learns it live - starts from a modest gu
 whatever the server actually granted last time (+50% headroom) for every subsequent request,
 account-wide. This needs no formula and adapts automatically as the real cap changes over time.
 
+### "Train and use the bag automatically" (smart use)
+
+The game has a button that trains and covers what the stock lacks with the bag's items itself. The client class is
+`SmartUseForTrainingProtocol` (dump.cs): fields `TroopType` (u8), `TroopTier` (u8), `TrainingForce` (u32, the amount), and a
+`SendPack(List<ItemSaveDataType>)` that adds the list of items to use; the request is `_MSG_REQUEST_SMARTUSE_FOR_TRAINING` (1434), the
+answer `_MSG_RESP_SMARTUSE_FOR_WORK` (1431) with a result byte. The same family exists for buildings (1432), researches (1433), weapons,
+traps, healing... **Layout, from a capture** (7226 cavalry T2 with only food short): request `seq u32, type u8, tier u8, amount u32, count u16,
+count x (item u16, quantity u16)` - the items the client picked (0x0587, 0x03f6, 0x03f1, 0x0492 = 250K + 150K + 30K + 5K of food, the
+smallest cover); no separate `_MSG_REQUEST_TRAINING_` follows. Answer 1431: byte 0 = result (0 = done), the list at offset 5 (count u16, then
+item u16 + quantity u16 left in the bag); then the usual `_MSG_RESP_TRAINING_` (7226 granted, and the stock left). Autotrain uses it
+(`RequestSmartUseTraining`). Item 0x0587 is a "food 250K" item the bot's table did not have: the game's Item table has plain and event
+resource items with the same record (`tools` can list them: 5 extra food, 4 stone, 4 wood, 4 ore, 4 gold).
+
 ### The game's data tables (research and others)
 
 The APK's `assets/Loading/Table.unity3d` (9.5 MB, 556 tables) and `String.unity3d` are plain Unity bundles: `pip install UnityPy`
