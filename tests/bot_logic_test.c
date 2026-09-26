@@ -1554,6 +1554,53 @@ int main(void)
 			free(ac);
 		}
 
+		/* a farm left under construction by a series cut short is cancelled first, then the series goes on */
+		{
+			Connection *lc = fresh("boss");
+			lc->resources.food = lc->resources.rock = lc->resources.wood = lc->resources.ore = lc->resources.gold = 1000000000LL;
+			lc->building_count = 3;
+			lc->building[0] = (BuildingInfo){ .position_id = 50, .build_id = 4, .level = 3 };
+			lc->building[1] = (BuildingInfo){ .position_id = 51, .build_id = 8, .level = 12 };
+			lc->building[2] = (BuildingInfo){ .position_id = 52, .build_id = 4, .level = 30 };
+			lc->construction_loaded = true;
+			lc->construction_extra_expires = INT64_MAX;
+			lc->construction[1] = (BuildingConstruction){ .used = 1, .slot = 50, .build_id = 4, .level = 4, .start_time = 1, .duration = 2000 };
+			lc->construction[0] = (BuildingConstruction){ .used = 1, .slot = 999, .build_id = 26, .level = 31, .start_time = 1, .duration = 100000 };
+			char error[200];
+			CHECK(AskHelpStart(lc, "boss", 2, error, sizeof(error)), "askhelp: a farm left under construction does not refuse the series");
+			reset_sent();
+			lc->askhelp.next_at = 0;
+			AskHelpTick(lc);
+			int at = find_packet(2006);
+			CHECK(at >= 0 && sent[at][8] == 1 && find_packet(2003) < 0 && lc->askhelp.recovering,
+				"askhelp: cancels the leftover farm, in the queue it is in (1), and starts nothing yet");
+			uint8_t answer[23] = { 0 };
+			RecvBuildCancel(lc, answer, sizeof(answer));
+			CHECK(lc->askhelp.done == 0 && !lc->askhelp.recovering && !lc->construction[1].used && lc->construction[0].used && lc->construction[0].slot == 999,
+				"askhelp: the recovery cancel is not a cycle, frees that queue and leaves the other one alone");
+			reset_sent();
+			lc->askhelp.next_at = 0;
+			AskHelpTick(lc);
+			CHECK(find_packet(2003) >= 0, "askhelp: then the series goes on with a start");
+			free(lc);
+
+			/* something else in the queue is never cancelled */
+			lc = fresh("boss");
+			lc->resources.food = lc->resources.rock = lc->resources.wood = lc->resources.ore = lc->resources.gold = 1000000000LL;
+			lc->building_count = 2;
+			lc->building[0] = (BuildingInfo){ .position_id = 50, .build_id = 4, .level = 3 };
+			lc->building[1] = (BuildingInfo){ .position_id = 51, .build_id = 8, .level = 12 };
+			lc->construction_loaded = true;
+			lc->construction_extra_expires = INT64_MAX;
+			lc->construction[0] = (BuildingConstruction){ .used = 1, .slot = 51, .build_id = 8, .level = 13, .start_time = 1, .duration = 2000 };
+			AskHelpStart(lc, "boss", 2, error, sizeof(error));
+			reset_sent();
+			lc->askhelp.next_at = 0;
+			AskHelpTick(lc);
+			CHECK(find_packet(2006) < 0 && find_packet(2003) >= 0, "askhelp: another building under construction is never cancelled, the farm is started in the free queue");
+			free(lc);
+		}
+
 		/* the farm kept at a low level: never upgraded by the automatic construction */
 		{
 			Connection *fc = fresh("boss");

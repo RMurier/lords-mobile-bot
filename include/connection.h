@@ -949,6 +949,7 @@ typedef struct {
 	uint16_t       slot;            // the building being started / cancelled
 	uint16_t       build_id;
 	int8_t         queue;           // the queue entry the start went to, -1 = not known yet
+	bool           recovering;      // the cancel in flight is of the farm a previous series left under construction: not a cycle
 	uint64_t       phase_since;     // now_ms()
 	uint64_t       next_at;         // now_ms(): when the current wait ends
 	ResourceStock  stock_before;    // to tell what the whole thing cost in the end

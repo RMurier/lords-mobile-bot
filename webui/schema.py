@@ -542,7 +542,8 @@ COMMANDS = [
      "summary": "Améliore la ferme gardée à bas niveau, demande de l'aide à l'alliance, attend 3 à 4 secondes, annule la construction, et recommence : autant de cycles que demandé (100 au plus).",
      "details": ["C'est toujours la ferme du compte qui a le niveau le plus bas (à égalité, l'emplacement le plus petit) : la construction automatique ne la monte jamais, "
                  "pour qu'elle reste disponible. Pas de ferme, ferme au maximum, ressources ou prérequis manquants : la commande le dit.",
-                 "Il n'annule que la construction qu'il vient de lancer, dans la file où elle est entrée ; l'autre file n'est jamais touchée. Si une réponse manque, si le serveur renvoie une erreur ou si les deux files sont occupées, la série s'arrête et le dit.",
+                 "Si la ferme est déjà en construction au départ (série interrompue par une déconnexion, par exemple), il l'annule d'abord, dans la file où elle se trouve, puis reprend : ce n'est pas un cycle. "
+                 "Il n'annule que cette ferme et ce qu'il vient de lancer, dans la file où c'est entré ; l'autre file n'est jamais touchée. Si une réponse manque, si le serveur renvoie une erreur ou si les deux files sont occupées, la série s'arrête et le dit.",
                  "À la fin (ou à l'arrêt) le bot indique combien de cycles sont faits et ce que le stock a gagné ou perdu depuis le début : c'est la façon de voir si l'annulation rend tout. Chaque cycle envoie une demande d'aide à toute l'alliance.",
                  "askhelp stop arrête la série. La construction automatique est suspendue pendant la série."],
      "example": "askhelp 20"},

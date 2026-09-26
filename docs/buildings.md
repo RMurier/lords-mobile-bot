@@ -161,6 +161,10 @@ queue busy that entry is the only free one, so the server had no other choice; w
 capture shows), and a wrong guess would cancel an empty queue, not a running construction. The end message gives the stock difference since the start:
 the cancel's answer is scrambled, so how much a cancel refunds is not known - this tells.
 
+**A farm left under construction** (the connection dropped between the start and the cancel): at the start of a series, and before each cycle, the bot looks in the queue entries
+from the login (`Connection.construction`, kept up to date by 2004/2005): if the kept farm is in one, it sends the cancel for that entry (the queue number is the entry's index,
+as the capture shows) and goes on when the answer comes. It cancels nothing else - another building in the queue is never touched.
+
 **Not seen yet**: the refusal (`_MSG_RESP_BUILDINGERROR` 2013) - its layout is logged as it comes and the building is left alone for 10 minutes -
 the cancel's answer, the instant/free finishes (2008, 2009, 2011), and starting a building that does not exist yet.
 

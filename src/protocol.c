@@ -6795,6 +6795,13 @@ void RecvBuildCancel(Connection *c, const uint8_t *data, uint16_t size)
 		if (h->queue >= 0 && h->queue < BUILDING_QUEUE_SLOTS)
 			c->construction[h->queue].used = 0;
 		h->queue = -1;
+		if (h->recovering) {
+			h->recovering = false;
+			h->phase = ASKHELP_PAUSE;
+			h->next_at = now_ms() + 3000 + (uint64_t)(rand() % 3000);
+			LOGI("[AIDE] Construction précédente de la ferme annulée, la série reprend\n");
+			return;
+		}
 		h->done++;
 		LOGI("[AIDE] Cycle %u/%u terminé (annulation confirmée, %u octet(s))\n", h->done, h->total, size);
 		if (h->done >= h->total) {
@@ -7008,8 +7015,9 @@ void AskHelpStop(Connection *c, const char *why)
 /* What $askhelp starts: the next level of the account's low-level farm (BuildingReservedFarm), and only that - never a
  * prerequisite of it. False, with `why`, when it cannot be started now: no farm, already at its maximum, being built, a
  * prerequisite or a research short, not enough of the five basic resources, mana items needed, or both queues busy. */
-static bool AskHelpTarget(const Connection *c, uint16_t *slot, char *why, size_t why_size)
+static bool AskHelpTarget(const Connection *c, uint16_t *slot, int *leftover_queue, char *why, size_t why_size)
 {
+	*leftover_queue = -1;
 	int idx = BuildingReservedFarm(c);
 	if (idx < 0) { snprintf(why, why_size, "Le compte n'a aucune ferme."); return false; }
 
@@ -7017,7 +7025,15 @@ static bool AskHelpTarget(const Connection *c, uint16_t *slot, char *why, size_t
 	const BuildingTypeInfo *t = BuildingType(b->build_id);
 	const BuildingLevelInfo *row = t ? BuildingLevelRow(t, (uint8_t)(b->level + 1)) : NULL;
 	if (!row) { snprintf(why, why_size, "La ferme gardée (emplacement %u) est au maximum.", b->position_id); return false; }
-	if (BuildingUnderConstruction(c, b->position_id)) { snprintf(why, why_size, "La ferme gardée (emplacement %u) est déjà en construction.", b->position_id); return false; }
+	// A farm left under construction (a series cut short by a disconnection, or a cancel that never went through): it is cancelled
+	// first, then the series goes on. Only ever that farm: the queue entry must hold it.
+	for (int i = 0; i < BUILDING_QUEUE_SLOTS; i++)
+		if (c->construction[i].used && c->construction[i].slot == b->position_id && c->construction[i].build_id == BUILD_ID_FARM) {
+			*slot = b->position_id;
+			*leftover_queue = i;
+			return true;
+		}
+	if (BuildingUnderConstruction(c, b->position_id)) { snprintf(why, why_size, "La ferme gardée (emplacement %u) est déjà en construction (par un autre lancement du bot).", b->position_id); return false; }
 
 	for (int r = 0; r < BUILDING_REQ_MAX; r++) {
 		if (!row->req_id[r]) continue;
@@ -7053,12 +7069,13 @@ bool AskHelpStart(Connection *c, const char *requester, uint16_t total, char *er
 {
 	AskHelpState *h = &c->askhelp;
 	uint16_t slot;
+	int leftover;
 	char why[160];
 
 	if (h->active) { snprintf(error, error_size, "Une série est déjà en cours (%u/%u).", h->done, h->total); return false; }
 	if (!c->construction_loaded || c->building_count == 0) { snprintf(error, error_size, "Les bâtiments et les files de construction ne sont pas encore reçus du serveur."); return false; }
 	if (MarchesPaused()) { snprintf(error, error_size, "Le bot est en pause après un rappel."); return false; }
-	if (!AskHelpTarget(c, &slot, why, sizeof(why))) { snprintf(error, error_size, "%s", why); return false; }
+	if (!AskHelpTarget(c, &slot, &leftover, why, sizeof(why))) { snprintf(error, error_size, "%s", why); return false; }
 
 	memset(h, 0, sizeof(*h));
 	h->active = true;
@@ -7093,9 +7110,21 @@ void AskHelpTick(Connection *c)
 		if (now < h->next_at)
 			return;
 		uint16_t slot;
+		int leftover;
 		char why[160];
-		if (!AskHelpTarget(c, &slot, why, sizeof(why))) {
+		if (!AskHelpTarget(c, &slot, &leftover, why, sizeof(why))) {
 			AskHelpStop(c, why);
+			return;
+		}
+		if (leftover >= 0) {
+			LOGI("[AIDE] La ferme (emplacement %u) est déjà en construction : je l'annule d'abord\n", slot);
+			h->slot = slot;
+			h->build_id = BUILD_ID_FARM;
+			h->queue = (int8_t)leftover;
+			h->recovering = true;
+			RequestBuildCancel(c, (uint8_t)leftover);
+			h->phase = ASKHELP_WAIT_CANCEL_ANSWER;
+			h->phase_since = now;
 			return;
 		}
 		// Only ever cancel what this series started: the entry it lands in must be a free one the bot knows about.
