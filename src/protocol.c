@@ -6827,6 +6827,13 @@ void RecvBuildCancel(Connection *c, const uint8_t *data, uint16_t size)
 	AskHelpState *h = &c->askhelp;
 
 	if (h->active && h->phase == ASKHELP_WAIT_CANCEL_ANSWER) {
+		// The answer carries, after the five stocks, the queue that was cancelled (byte 20; seen 1 for a farm in queue 1, like 2004's byte 37).
+		if (size >= 21 && h->queue >= 0 && read_u8(data + 20) != (uint8_t)h->queue) {
+			char text[160];
+			snprintf(text, sizeof(text), "l'annulation a visé la file %u alors que le bot attendait la file %d : les files ne sont plus sûres", read_u8(data + 20), h->queue);
+			AskHelpStop(c, text);
+			return;
+		}
 		if (h->queue >= 0 && h->queue < BUILDING_QUEUE_SLOTS)
 			c->construction[h->queue].used = 0;
 		h->queue = -1;
@@ -6995,6 +7002,16 @@ void RecvBuildingError(Connection *c, const uint8_t *data, uint16_t size)
 	LOGW("[BUILD] Erreur du serveur (%u octet(s)) : %s ; %s\n", size, hex, detail);
 
 	if (c->askhelp.active) {
+		AskHelpState *h = &c->askhelp;
+		// A start refused after cycles that went through is not what a permanent refusal looks like (the bot sees the queues free and
+		// the stock enough): wait a good while and try again, twice at most, and keep what the refusal said so the cause can be told.
+		if (h->phase == ASKHELP_WAIT_BEGIN && h->done > 0 && h->start_retries < 2) {
+			h->start_retries++;
+			h->phase = ASKHELP_PAUSE;
+			h->next_at = now_ms() + 20000 + (uint64_t)(rand() % 10000);
+			LOGW("[AIDE] Lancement refusé après %u cycle(s) réussi(s) : nouvel essai dans ~25 s (%u/2)\n", h->done, h->start_retries);
+			return;
+		}
 		char text[900];
 		snprintf(text, sizeof(text), "le serveur a répondu par une erreur (code %s) ; %s", hex, detail);
 		AskHelpStop(c, text);
@@ -7271,6 +7288,7 @@ void AskHelpTick(Connection *c)
 		h->queue = -1;
 		h->retried_other = false;
 		h->stop_after_cancel = false;
+		LOGI("[AIDE] Cycle %u/%u : lancement de la ferme (emplacement %u)\n", h->done + 1, h->total, slot);
 		RequestBuildStart(c, slot, BUILD_ID_FARM);
 		h->phase = ASKHELP_WAIT_BEGIN;
 		h->phase_since = now;

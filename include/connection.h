@@ -950,6 +950,7 @@ typedef struct {
 	uint16_t       build_id;
 	int8_t         queue;           // the queue entry the start went to, -1 = not known yet
 	uint8_t        topups;          // times the bag was used to cover the farm's cost during this series
+	uint8_t        start_retries;     // starts refused after at least one good cycle, retried after a long pause
 	bool           stop_after_cancel; // the server refused the help request: this cycle's cancel goes through, then the series stops
 	char           help_refusal[64];  // what the refusal said, in hex
 	bool           retried_other;   // the cancel got no answer and was tried on the other queue once

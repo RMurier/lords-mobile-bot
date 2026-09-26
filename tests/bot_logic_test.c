@@ -1593,10 +1593,63 @@ int main(void)
 			AskHelpTick(hc);
 			CHECK(find_packet(2006) >= 0 && sent[find_packet(2006)][8] == 1, "askhelp: the construction is still cancelled after a refused help request");
 			uint8_t cancel_answer[23] = { 0 };
+			cancel_answer[20] = 1;   /* the queue that was cancelled */
 			reset_sent();
 			RecvBuildCancel(hc, cancel_answer, sizeof(cancel_answer));
 			CHECK(!hc->askhelp.active && hc->askhelp.done == 1 && replied("refus"), "askhelp: then it stops, and says the server refused the help");
 			free(hc);
+		}
+
+		/* a start refused after good cycles is retried after a long pause, twice, then the series stops; the cancel's queue byte is checked */
+		{
+			Connection *rc = fresh("boss");
+			rc->resources.food = rc->resources.rock = rc->resources.wood = rc->resources.ore = rc->resources.gold = 1000000000LL;
+			rc->building_count = 2;
+			rc->building[0] = (BuildingInfo){ .position_id = 57584, .build_id = 4, .level = 12 };
+			rc->building[1] = (BuildingInfo){ .position_id = 51, .build_id = 8, .level = 13 };
+			rc->construction_loaded = true;
+			rc->construction_extra_expires = INT64_MAX;
+			char error[200];
+			AskHelpStart(rc, "boss", 5, error, sizeof(error));
+			rc->askhelp.done = 2;                     /* two cycles behind it */
+			rc->askhelp.next_at = 0;
+			AskHelpTick(rc);
+			uint8_t err[2] = { 3, 1 };
+			reset_sent();
+			RecvBuildingError(rc, err, sizeof(err));
+			CHECK(rc->askhelp.active && rc->askhelp.phase == ASKHELP_PAUSE && rc->askhelp.start_retries == 1,
+				"askhelp: a start refused after good cycles is retried later instead of stopping the series");
+			uint64_t wait = rc->askhelp.next_at - now_ms();
+			CHECK(wait >= 19000 && wait <= 31000, "askhelp: the retry waits about 20 to 30 seconds");
+			rc->askhelp.next_at = 0;
+			AskHelpTick(rc);
+			RecvBuildingError(rc, err, sizeof(err));
+			rc->askhelp.next_at = 0;
+			AskHelpTick(rc);
+			RecvBuildingError(rc, err, sizeof(err));
+			CHECK(!rc->askhelp.active && replied("03 01"), "askhelp: after two retries the refusal stops the series and is reported");
+
+			/* the cancel's own answer says which queue it cancelled: it has to be the bot's */
+			rc = fresh("boss");
+			rc->resources.food = rc->resources.rock = rc->resources.wood = rc->resources.ore = rc->resources.gold = 1000000000LL;
+			rc->building_count = 2;
+			rc->building[0] = (BuildingInfo){ .position_id = 57584, .build_id = 4, .level = 12 };
+			rc->building[1] = (BuildingInfo){ .position_id = 51, .build_id = 8, .level = 13 };
+			rc->construction_loaded = true;
+			rc->construction_extra_expires = INT64_MAX;
+			AskHelpStart(rc, "boss", 3, error, sizeof(error));
+			rc->askhelp.next_at = 0;
+			AskHelpTick(rc);
+			uint8_t begin[40] = { 0xf0, 0xe0, 0x04, 0x00, 0x0d };
+			begin[37] = 1;
+			RecvBuildBegin(rc, begin, sizeof(begin));
+			rc->askhelp.next_at = 0; AskHelpTick(rc);
+			rc->askhelp.next_at = 0; AskHelpTick(rc);       /* help, then cancel */
+			uint8_t answer[23] = { 0 };
+			answer[20] = 0;                                  /* it says queue 0 was cancelled, the bot asked for queue 1 */
+			RecvBuildCancel(rc, answer, sizeof(answer));
+			CHECK(!rc->askhelp.active && rc->askhelp.done == 0, "askhelp: a cancel answer naming another queue than the bot's stops the series, nothing counted");
+			free(rc);
 		}
 
 		/* the queue a start went to is read from the answer (byte 37), not guessed: live, the farm went to queue 1 with queue 0 empty */
@@ -1682,6 +1735,7 @@ int main(void)
 			CHECK(at >= 0 && sent[at][8] == 1 && find_packet(2003) < 0 && lc->askhelp.recovering,
 				"askhelp: cancels the leftover farm, in the queue it is in (1), and starts nothing yet");
 			uint8_t answer[23] = { 0 };
+			answer[20] = 1;   /* the leftover farm was in queue 1 */
 			RecvBuildCancel(lc, answer, sizeof(answer));
 			CHECK(lc->askhelp.done == 0 && !lc->askhelp.recovering && !lc->construction[1].used && lc->construction[0].used && lc->construction[0].slot == 999,
 				"askhelp: the recovery cancel is not a cycle, frees that queue and leaves the other one alone");
