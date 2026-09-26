@@ -7,6 +7,7 @@
 #include "log.h"
 #include "guildbank.h"
 #include <stdlib.h>
+#include <ctype.h>
 #include <time.h>
 
 #include <stdarg.h>
