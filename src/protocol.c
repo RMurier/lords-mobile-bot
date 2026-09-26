@@ -6801,7 +6801,7 @@ void RecvBuildCancel(Connection *c, const uint8_t *data, uint16_t size)
 			AskHelpStop(c, NULL);
 		} else {
 			h->phase = ASKHELP_PAUSE;
-			h->next_at = now_ms() + 1000 + (uint64_t)(rand() % 1500);
+			h->next_at = now_ms() + 3000 + (uint64_t)(rand() % 3000);   // a person does not start again the instant it is over
 		}
 		return;
 	}
@@ -6840,10 +6840,10 @@ void RecvBuildBegin(Connection *c, const uint8_t *data, uint16_t size)
 		if (at < 0) {
 			AskHelpStop(c, "aucune file libre dans le suivi du bot : je m'arrête sans rien annuler");
 		} else {
-			RequestBuildHelp(c);
-			h->phase = ASKHELP_WAIT_CANCEL_TIMER;
+			// The game asks for help about 1.2 s after the answer (measured on the capture, 1.2 s between 2004 and 2852), not at once.
+			h->phase = ASKHELP_WAIT_HELP;
 			h->phase_since = now_ms();
-			h->next_at = now_ms() + 3000 + (uint64_t)(rand() % 1001);   // 3 to 4 s, then the cancel
+			h->next_at = now_ms() + 1000 + (uint64_t)(rand() % 1000);
 		}
 	}
 
@@ -7071,12 +7071,14 @@ bool AskHelpStart(Connection *c, const char *requester, uint16_t total, char *er
 	h->stock_before_raw[3] = c->resources.ore;
 	h->stock_before_raw[4] = c->resources.gold;
 	h->phase = ASKHELP_PAUSE;
-	h->next_at = now_ms() + 500;
+	h->next_at = now_ms() + 1500 + (uint64_t)(rand() % 1500);
 	LOGI("[AIDE] %u cycle(s) demandés par %s\n", total, requester);
 	return true;
 }
 
-/* One step at a time: start, wait for the answer, ask for help, wait 3 to 4 s, cancel, wait for the answer, a short pause. Any
+/* One step at a time, paced like a person (the game's own delays were measured on a capture: help about 1.2 s after the start's answer, the
+ * cancel a few seconds later): a pause of 1.5 to 3 s, start, wait for the answer, 1 to 2 s, ask for help, 3 to 4 s, cancel, wait for the
+ * answer, a pause of 3 to 6 s. Any
  * missing answer, any server error, any unexpected state stops the series: it never goes on blindly. */
 void AskHelpTick(Connection *c)
 {
@@ -7134,6 +7136,18 @@ void AskHelpTick(Connection *c)
 			AskHelpStop(c, "pas de réponse du serveur à l'annulation");
 		return;
 	case ASKHELP_WAIT_HELP:
+		if (now < h->next_at)
+			return;
+		if (h->queue < 0 || h->queue >= BUILDING_QUEUE_SLOTS || !c->construction[h->queue].used
+			|| c->construction[h->queue].slot != h->slot) {
+			AskHelpStop(c, "la construction lancée n'est plus dans la file attendue : je ne demande rien et n'annule rien");
+			return;
+		}
+		RequestBuildHelp(c);
+		h->phase = ASKHELP_WAIT_CANCEL_TIMER;
+		h->phase_since = now;
+		h->next_at = now + 3000 + (uint64_t)(rand() % 1001);   // 3 to 4 s after the help request, then the cancel
+		return;
 	case ASKHELP_IDLE:
 		return;
 	}

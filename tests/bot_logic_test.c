@@ -1477,10 +1477,15 @@ int main(void)
 				memset(begin, 0, sizeof(begin));
 				begin[0] = 50; begin[2] = 4; begin[4] = 2; begin[13] = 0x10; begin[14] = 0x0e;
 				RecvBuildBegin(ac, begin, sizeof(begin));
-				CHECK(find_packet(_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP) >= 0 && ac->askhelp.queue == 0
-					&& ac->askhelp.phase == ASKHELP_WAIT_CANCEL_TIMER, "askhelp: asks the alliance for help as soon as it is started, in the free queue (0)");
+				CHECK(find_packet(_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP) < 0 && ac->askhelp.queue == 0 && ac->askhelp.phase == ASKHELP_WAIT_HELP,
+					"askhelp: does not ask for help the instant the answer arrives, the start went to the free queue (0)");
+				uint64_t pause = ac->askhelp.next_at - now_ms();
+				CHECK(pause >= 900 && pause <= 2100, "askhelp: waits about 1 to 2 seconds before asking, like the game (1.2 s measured)");
+				ac->askhelp.next_at = 0;
+				AskHelpTick(ac);
+				CHECK(find_packet(_MSG_RESP_ALLIANCE_SOMEBODY_NEEDHELP) >= 0 && ac->askhelp.phase == ASKHELP_WAIT_CANCEL_TIMER, "askhelp: then asks the alliance for help");
 				uint64_t wait = ac->askhelp.next_at - now_ms();
-				CHECK(wait >= 2900 && wait <= 4100, "askhelp: waits 3 to 4 seconds before cancelling");
+				CHECK(wait >= 2900 && wait <= 4100, "askhelp: waits 3 to 4 seconds after the help request before cancelling");
 				reset_sent();
 				AskHelpTick(ac);
 				CHECK(find_packet(2006) < 0, "askhelp: does not cancel before the wait is over");

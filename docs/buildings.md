@@ -152,8 +152,10 @@ The farm is always the account's lowest-level one (`BuildingReservedFarm()`, the
 goal nor as a prerequisite: with several farms the highest one is used for the prerequisites of other buildings, with a single farm the farms are
 left alone and a building that needs a higher farm says so ("construisez-en une autre"). So every bot account keeps one low-level farm.
 
-`$askhelp <times>` (docs/commands.md) loops on the account's **low-level farm**: start (2003), wait for the answer (2004), ask for help (2852), wait 3 to 4 s, cancel the queue the
-start went to (2006), wait for the answer (2007), a 1 to 2.5 s pause. `AskHelpTick()` in `src/protocol.c`. What it does not do is guess: a missing
+`$askhelp <times>` (docs/commands.md) loops on the account's **low-level farm**: start (2003), wait for the answer (2004), 1 to 2 s, ask for help (2852), wait 3 to 4 s, cancel the queue the
+start went to (2006), wait for the answer (2007), a 3 to 6 s pause, and 1.5 to 3 s before the first start. The pacing follows the game's own timings measured on the
+capture (server answers about 0.5 s after a request; the help request 1.2 s after the start's answer; the cancel about 3 s after it): the first version sent
+the help request within milliseconds of the answer and the server closed the connection 0.7 s later. `AskHelpTick()` in `src/protocol.c`. What it does not do is guess: a missing
 answer (10 s), a server error (2013) or two busy queues stop the series, and it cancels only the queue entry its own start filled - with the other
 queue busy that entry is the only free one, so the server had no other choice; with both free the entry is the first free one (the rule the
 capture shows), and a wrong guess would cancel an empty queue, not a running construction. The end message gives the stock difference since the start:
